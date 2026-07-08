@@ -27,6 +27,9 @@ new ADR that supersedes it, so the trail of *why it changed* survives.
 | [0007](0007-timing-and-inspect.md) | Simulated flash timing (ESP32-S3) and inspect-driven coloring | Accepted |
 | [0008](0008-live-map-and-background-gc.md) | Per-page liveness via upstream inspect; background-GC modeling | Accepted |
 | [0009](0009-timed-playback-and-pacing.md) | Two-layer playback: instant execution, timed animation, await-pacing | Accepted |
+| [0010](0010-churn-model-in-js.md) | Port the FASTFFS churn model to JS for a target-live steady state | Accepted |
+| [0011](0011-uniform-fs-driver-abi.md) | A uniform FS-driver ABI behind the WASM shim | Accepted |
+| [0012](0012-per-fs-liveness-inspect.md) | Per-FS liveness via native inspect hooks | Accepted |
 
 ADRs 0001–0004 document the throwaway JS prototype that established the visual language.
 They're kept as history; the live architecture starts at 0005.

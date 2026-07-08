@@ -30,18 +30,21 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
 - [x] **`fffs_inspect_live_map` upstreamed to FASTFFS `main`** (`c18ab22`, pushed to
       `origin`). A fresh clone now gets per-page obsolete coloring; the parent gitlink already
       pointed at this SHA, so no submodule bump was needed.
-- [ ] Strip the now-dead CSS in `index.html`: `@keyframes prog/ping/erase-wash` plus the
-      `.cell.prog`/`.sector.erasing` rules, all replaced by the Web Animations API.
-- [ ] **Port the FASTFFS churn model to JS** (`benchmarks/churn_model/`). Give it a target
-      live size so the auto-runner fills toward a steady state instead of monotonically
-      overfilling the FS and throwing out-of-space errors.
+- [x] Strip the now-dead CSS in `index.html`: `@keyframes prog/ping/erase-wash` plus the
+      `.cell.prog`/`.cell.ping`/`.sector.erasing` rules, all replaced by the Web Animations API.
+- [x] **Port the FASTFFS churn model to JS** (`web/src/churn.js`). Byte-exact PRNG/event
+      sequence (reproduces FASTFFS benchmark runs; feeds every FS the same logical workload for
+      lockstep), idiomatic JS above the PRNG. A target live size fills toward a steady state
+      instead of monotonically overfilling. See [ADR-0010](adr/0010-churn-model-in-js.md).
 - [ ] **Churn workload tuning knobs.** Expose the churn model's parameters in the UI — target
       live size, file-size distribution, create/replace/delete mix, seed — so the workload can
       be shaped (and reproduced) instead of hardcoded.
 - [ ] **Integrate LittleFS**: submodule under `fs/littlefs/`, a `bindings/littlefs/shim.c`
-      onto the same three HAL imports, WASM build, plus whatever live/inspect hooks the viz needs.
+      onto the same three HAL imports and the uniform shim ABI ([ADR-0011](adr/0011-uniform-fs-driver-abi.md)),
+      WASM build, plus a native `lfs_inspect.c` liveness hook ([ADR-0012](adr/0012-per-fs-liveness-inspect.md)).
 - [ ] **UI: switch filesystem implementation.** A control to pick which FS drives the die;
-      switching is simple — fresh state, no cross-FS carryover.
+      switching is simple — fresh state, no cross-FS carryover. Rides on the FS-agnostic
+      `runner.js` from [ADR-0011](adr/0011-uniform-fs-driver-abi.md).
 - [ ] **UI: lockstep multiple filesystems.** Run the same deterministic churn workload across
       several FS implementations in parallel; the UI switches which die/log view is shown (each
       FS has its own timing, so logs and playback pace differ). Two modes:
@@ -50,7 +53,7 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
   - **Pace** — the simulation paces to the slowest FS so all stay at the same workload step
     (files in sync, die images directly comparable), while tracking each FS's total active time.
 
-## Borrow from FASTFFS later (per Ben)
+## Borrow from FASTFFS later
 The FASTFFS repo has more reusable workload and fault machinery worth pulling rather than
 reinventing (the churn model and VFS workloads are already promoted into **Next** above):
 - `tools/fffs_api_crash_sweep.c` — simulates partial writes / power loss during churn; the basis
