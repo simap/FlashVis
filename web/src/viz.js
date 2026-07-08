@@ -57,6 +57,7 @@ export function createViz(device) {
   let curStep = 0, curRem = 0, curAnimMs = MIN_ANIM, lastNow = 0;
   let heat = false, selected = -1, inspectorEl = null, onSelectCb = null;
   let lastMap = null;
+  let prep = false;          // setup mode (ADR-0014): suppress animation, drain synchronously
 
   const reduced = matchMedia('(prefers-reduced-motion:reduce)').matches;
   const pageOf = (off) => Math.floor(off / pageSize);
@@ -72,12 +73,12 @@ export function createViz(device) {
   // animationend listeners to race, so erases can't be cut short at fast speed.
   function glow(p, kind) {
     const el = cellEls[p];
-    if (reduced || !el.animate) return;
+    if (reduced || prep || !el.animate) return;
     el.animate(kind === 'ping' ? PING_KF : PROG_KF, { duration: curAnimMs, easing: 'ease' });
   }
   function sweep(s) {
     const el = sectorEls[s];
-    if (reduced || !el.animate) return;
+    if (reduced || prep || !el.animate) return;
     el.animate(ERASE_KF, { duration: curAnimMs, easing: 'linear' });
   }
   function wearColor(w, ref) {
@@ -172,6 +173,23 @@ export function createViz(device) {
     requestAnimationFrame(frame);
   }
 
+  // Setup mode (ADR-0014): drain the whole queue to the die NOW, with no timed
+  // pacing and no glow/sweep animation (the `prep` guard suppresses those), so
+  // bulk console ops run at full speed while the die stays current. Fills snap
+  // (curAnimMs = 0). Barriers still resolve so no awaiter is left hanging.
+  function flushQueue() {
+    while (queue.length || cur) {
+      if (!cur) {
+        const ev = queue.shift();
+        if (ev.op === 'barrier') { ev.resolve(); continue; }
+        cur = stepsFor(ev); curStep = 0;
+      }
+      curAnimMs = 0;
+      for (; curStep < cur.length; curStep++) cur[curStep].run();
+      cur = null;
+    }
+  }
+
   // ---- inspector ----
   function sectorInfo(s) {
     const base = s * pagesPerSector;
@@ -229,6 +247,10 @@ export function createViz(device) {
     pending() { return queue.length + (cur ? 1 : 0); },
     /** Resolve once the player has finished everything queued up to this point. */
     barrier() { return new Promise((resolve) => queue.push({ op: 'barrier', ns: 0, resolve })); },
+    /** Setup mode: when on, ops animate nothing and paced awaits flush synchronously (ADR-0014). */
+    setPrep(v) { prep = v; },
+    /** Drain the queue to the die immediately, no animation — the prep-mode paced-await path. */
+    flush() { flushQueue(); },
 
     applyLiveMap(states) {
       lastMap = states;
