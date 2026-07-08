@@ -104,7 +104,7 @@ for (let i = 0; i < 10; i++) await fs.write(`log_${i}.dat`, randomBytes(500))
 ```
 
 Without `await` they fire-and-queue (the animation backlogs). The console supports top-level
-`await`.
+`await`. **↑/↓** cycle command history (persisted, last 20).
 
 ## Adding another filesystem
 
