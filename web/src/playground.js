@@ -210,11 +210,42 @@ async function boot() {
     print: (...a) => log(a.map(formatVal).join(' '), 'out'),
     text: (s) => new TextEncoder().encode(s),
   };
-  $('terminput').addEventListener('keydown', (e) => {
-    if (e.key !== 'Enter') return;
-    const src = e.target.value.trim(); if (!src) return;
-    e.target.value = '';
-    runConsole(src, scope);
+  // ---- command history: up/down cycles, persisted to localStorage (last 20) ----
+  const HKEY = 'flashvis.console.history', HMAX = 20;
+  // Only a real browser gets persistence: the headless fake-DOM never defines `window`
+  // (emscripten sniffs it), so gating on it skips localStorage — and its stubs/warnings — there.
+  const store = typeof window !== 'undefined' ? window.localStorage : null;
+  const loadHist = () => { try { const h = JSON.parse(store.getItem(HKEY)); return Array.isArray(h) ? h : []; } catch { return []; } };
+  const saveHist = () => { try { store.setItem(HKEY, JSON.stringify(cmdHist)); } catch { /* no storage / private mode */ } };
+  let cmdHist = loadHist();
+  let hidx = cmdHist.length;   // == length means the live draft line (past the newest entry)
+  let draft = '';              // the in-progress line, stashed while browsing up
+  const input = $('terminput');
+  const setInput = (v) => { input.value = v; input.setSelectionRange(v.length, v.length); };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const src = input.value.trim(); if (!src) return;
+      input.value = '';
+      if (cmdHist[cmdHist.length - 1] !== src) {   // skip consecutive duplicates
+        cmdHist.push(src);
+        if (cmdHist.length > HMAX) cmdHist = cmdHist.slice(-HMAX);
+        saveHist();
+      }
+      hidx = cmdHist.length; draft = '';
+      runConsole(src, scope);
+    } else if (e.key === 'ArrowUp') {
+      if (!cmdHist.length) return;
+      e.preventDefault();
+      if (hidx === cmdHist.length) draft = input.value;   // stash the draft before leaving it
+      hidx = Math.max(0, hidx - 1);
+      setInput(cmdHist[hidx]);
+    } else if (e.key === 'ArrowDown') {
+      if (hidx === cmdHist.length) return;
+      e.preventDefault();
+      hidx += 1;
+      setInput(hidx === cmdHist.length ? draft : cmdHist[hidx]);
+    }
   });
   log('console ready — await fs.write(...) paces to simulated time.', 'sys');
   help();
