@@ -51,6 +51,17 @@ static size_t g_sector_size    = 4096;
 static size_t g_sector_count   = 64;
 static size_t g_program_granule = 1;
 
+/* Fixed per-handle pools for the console's file/dir API (ADR-0014): no
+ * malloc, a used-bitmap per pool, indices returned to JS as small integer
+ * handles. Pool reuse must close a slot before freeing it. */
+#define FF_MAX_FILES 8
+#define FF_MAX_DIRS  4
+
+static struct fffs_file files[FF_MAX_FILES];
+static uint8_t          file_used[FF_MAX_FILES];
+static struct fffs_dir  dirs[FF_MAX_DIRS];
+static uint8_t          dir_used[FF_MAX_DIRS];
+
 static void be_init(void) {
     g_be.ctx = NULL;    /* unused: the callbacks read the JS chip directly */
     g_be.size = g_sector_size * g_sector_count;
@@ -127,12 +138,111 @@ int ff_read(const char *name, uint8_t *out, uint32_t cap) {
     return (int)total;
 }
 
+/* Open a pooled handle: mode 0='r' (RDONLY), 1='w' (WRONLY|CREATE|TRUNC).
+ * Mode 2='a' (append) is unsupported on FASTFFS (no append flag) → negative.
+ * Returns handle >=0, or negative on bad mode / pool exhaustion / open error. */
+int ff_open(const char *name, int mode) {
+    uint32_t flags;
+    if (mode == 0) flags = FFFS_O_RDONLY;
+    else if (mode == 1) flags = FFFS_O_WRONLY | FFFS_O_CREATE | FFFS_O_TRUNC;
+    else return FFFS_ERR_INVALID;
+
+    int h = -1;
+    for (int i = 0; i < FF_MAX_FILES; i++) if (!file_used[i]) { h = i; break; }
+    if (h < 0) return FFFS_ERR_NOMEM;
+
+    int rc = fffs_open(&g_fs, &files[h], name, flags);
+    if (rc != FFFS_OK) return rc;
+    file_used[h] = 1;
+    return h;
+}
+
+/* Fill out[0..n) from the handle's current position, looping fffs_read to
+ * ride out short reads (mirrors ff_read's fill loop, but positioned).
+ * Returns bytes read (>=0, 0=EOF) or negative error. */
+int ff_file_read(int h, uint8_t *out, uint32_t n) {
+    if (h < 0 || h >= FF_MAX_FILES || !file_used[h]) return FFFS_ERR_INVALID;
+    size_t total = 0;
+    while (total < n) {
+        size_t got = 0;
+        int rc = fffs_read(&files[h], out + total, n - total, &got);
+        if (rc != FFFS_OK) return rc;
+        if (got == 0) break;
+        total += got;
+    }
+    return (int)total;
+}
+
+/* Write n bytes at the handle's current position. Returns bytes written or
+ * negative error. */
+int ff_file_write(int h, const uint8_t *data, uint32_t n) {
+    if (h < 0 || h >= FF_MAX_FILES || !file_used[h]) return FFFS_ERR_INVALID;
+    int rc = fffs_write(&files[h], data, n);
+    return rc != FFFS_OK ? rc : (int)n;
+}
+
+/* Seek the handle; whence 0=set, 1=cur, 2=end. Returns the new absolute
+ * position (>=0) or negative error. */
+int ff_file_seek(int h, int32_t off, int whence) {
+    if (h < 0 || h >= FF_MAX_FILES || !file_used[h]) return FFFS_ERR_INVALID;
+    uint32_t pos = 0;
+    int rc = fffs_seek(&files[h], off, (enum fffs_seek_whence)whence, &pos);
+    return rc != FFFS_OK ? rc : (int)pos;
+}
+
+/* Stat the open handle; writes a NUL-terminated name into name_out[cap]
+ * (truncated safely, same convention as ff_dir_read). Returns size (>=0) or
+ * negative error. */
+int ff_file_stat(int h, char *name_out, uint32_t cap) {
+    if (h < 0 || h >= FF_MAX_FILES || !file_used[h]) return FFFS_ERR_INVALID;
+    struct fffs_stat st;
+    int rc = fffs_fstat(&files[h], &st);
+    if (rc != FFFS_OK) return rc;
+    size_t n = strlen(st.name);
+    if (cap && n >= cap) n = cap - 1;
+    memcpy(name_out, st.name, n);
+    if (cap) name_out[n] = 0;
+    return (int)st.size;
+}
+
+/* Close and free the slot. Uncommitted writes live in the handle until close,
+ * so close happens before the slot is freed. Double-close is a bounds-checked
+ * error, not UB. */
+int ff_file_close(int h) {
+    if (h < 0 || h >= FF_MAX_FILES || !file_used[h]) return FFFS_ERR_INVALID;
+    int rc = fffs_close(&files[h]);
+    file_used[h] = 0;
+    return rc;
+}
+
 int ff_delete(const char *name) { return fffs_delete_file(&g_fs, name); }
 
 int ff_exists(const char *name) {
     bool e = false;
     int rc = fffs_exists(&g_fs, name, &e);
     return rc != FFFS_OK ? rc : (e ? 1 : 0);
+}
+
+/* Stat a file by name; writes a NUL-terminated name into name_out[cap]
+ * (truncated safely). Returns size (>=0), -1 if not found (so JS can return
+ * null), or another negative error. */
+int ff_stat(const char *name, char *name_out, uint32_t cap) {
+    struct fffs_stat st;
+    int rc = fffs_stat(&g_fs, name, &st);
+    if (rc == FFFS_ERR_NOT_FOUND) return -1;
+    if (rc != FFFS_OK) return rc;
+    size_t n = strlen(st.name);
+    if (cap && n >= cap) n = cap - 1;
+    memcpy(name_out, st.name, n);
+    if (cap) name_out[n] = 0;
+    return (int)st.size;
+}
+
+/* FASTFFS is flat (the path is the name): no directories to create, so this
+ * is a trivial always-succeeds no-op. */
+int ff_mkdir(const char *name) {
+    (void)name;
+    return 0;
 }
 
 /* Emit "name\tsize\n" lines into out[cap]. Returns bytes written or neg error. */
@@ -154,23 +264,25 @@ int ff_list(char *out, uint32_t cap) {
 }
 
 /* Streaming directory iterator: each ff_dir_read is one fffs_dir_read, so the
- * caller can pace/animate the listing entry by entry. */
-static struct fffs_dir g_dir;
-static int g_dir_active = 0;
+ * caller can pace/animate the listing entry by entry. Pool-based (FF_MAX_DIRS)
+ * so more than one prefix scan can be open at once. */
+int ff_dir_open(const char *prefix) {
+    int h = -1;
+    for (int i = 0; i < FF_MAX_DIRS; i++) if (!dir_used[i]) { h = i; break; }
+    if (h < 0) return FFFS_ERR_NOMEM;
 
-int ff_dir_open(void) {
-    if (g_dir_active) { fffs_dir_close(&g_dir); g_dir_active = 0; }
-    int rc = fffs_dir_open(&g_fs, &g_dir, "");
-    if (rc == FFFS_OK) g_dir_active = 1;
-    return rc;
+    int rc = fffs_dir_open(&g_fs, &dirs[h], prefix ? prefix : "");
+    if (rc != FFFS_OK) return rc;
+    dir_used[h] = 1;
+    return h;
 }
 
 /* One entry: name → out[cap]; returns size (>=0), -1 at end, -2 error/closed. */
-int ff_dir_read(char *out, uint32_t cap) {
-    if (!g_dir_active) return -2;
+int ff_dir_read(int h, char *out, uint32_t cap) {
+    if (h < 0 || h >= FF_MAX_DIRS || !dir_used[h]) return -2;
     struct fffs_stat st;
-    if (!fffs_dir_read(&g_dir, &st)) {
-        return fffs_dir_status(&g_dir) == FFFS_OK ? -1 : -2;
+    if (!fffs_dir_read(&dirs[h], &st)) {
+        return fffs_dir_status(&dirs[h]) == FFFS_OK ? -1 : -2;
     }
     size_t n = strlen(st.name);
     if (cap && n >= cap) n = cap - 1;
@@ -179,8 +291,10 @@ int ff_dir_read(char *out, uint32_t cap) {
     return (int)st.size;
 }
 
-void ff_dir_close(void) {
-    if (g_dir_active) { fffs_dir_close(&g_dir); g_dir_active = 0; }
+void ff_dir_close(int h) {
+    if (h < 0 || h >= FF_MAX_DIRS || !dir_used[h]) return;
+    fffs_dir_close(&dirs[h]);
+    dir_used[h] = 0;
 }
 
 /* Run one opportunistic GC step; returns the fffs_gc_action or negative error. */
