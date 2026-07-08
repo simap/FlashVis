@@ -22,12 +22,12 @@ The web JS (`web/src/{device,runner,viz,playground}.js`) is plain ESM — just r
 ## The FASTFFS submodule (important)
 
 - `fs/fastffs` is a submodule of `git@github.com:simap/FASTFFS.git`.
-- It is checked out on a **local** branch `flashvis-live-map` at commit `c18ab22`, which adds
-  `fffs_inspect_live_map()` to `src/fffs_inspect.c` + `include/fastffs/fastffs_inspect.h`
-  (per-page liveness, reusing the existing index reachability walk).
-- **That commit is not pushed to the FASTFFS remote.** The parent repo's gitlink points at it,
-  so a fresh clone elsewhere won't find it until the branch is pushed (or the helper is
-  upstreamed — see ROADMAP). Without it, the build loses per-page obsolete coloring.
+- It is checked out on `main` at commit `c18ab22`, which adds `fffs_inspect_live_map()` to
+  `src/fffs_inspect.c` + `include/fastffs/fastffs_inspect.h` (per-page liveness, reusing the
+  existing index reachability walk).
+- **That commit is on `origin/main`** (pushed), so a fresh clone gets it and the per-page
+  obsolete coloring. The former local-only `flashvis-live-map` branch fast-forwarded into `main`
+  and is now redundant.
 - The build compiles FASTFFS's `CORE_SRCS` list (mirrored in `build/build-fastffs.sh`) + the
   shim. It does **not** use FASTFFS's `verify_flash` host backend — the NOR device is emulated
   in JS (`web/src/device.js`) instead.

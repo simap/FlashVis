@@ -27,9 +27,12 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       stream at sim pace instead of one blob.
 - [x] **Churn-model file tracking** (`runner.names()`) — the workload and Delete pick from a
       recorded file set, so a step never scans the directory first.
+- [x] **`fffs_inspect_live_map` upstreamed to FASTFFS `main`** (`c18ab22`, pushed to
+      `origin`). A fresh clone now gets per-page obsolete coloring; the parent gitlink already
+      pointed at this SHA, so no submodule bump was needed.
 - [ ] Geometry controls (sector size/count, program granule) wired through `ff_config`.
-- [ ] Upstream `fffs_inspect_live_map` to FASTFFS proper (currently on a review branch).
-- [ ] Strip the now-dead CSS keyframes (prog/ping/erase-wash) replaced by the Web Animations API.
+- [ ] Strip the now-dead CSS in `index.html`: `@keyframes prog/ping/erase-wash` plus the
+      `.cell.prog`/`.sector.erasing` rules, all replaced by the Web Animations API.
 
 ## Borrow from FASTFFS later (per Ben)
 The FASTFFS repo already contains realistic, cross-filesystem workload and fault machinery we
