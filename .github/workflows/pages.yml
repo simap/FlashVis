@@ -1,0 +1,65 @@
+# Build the FASTFFS WASM and publish the visualizer to GitHub Pages.
+# The site is static (single-threaded WASM + ESM), so no special headers are
+# needed. `dist/` is a build artifact, so we build it here rather than commit it.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.2                # matches DEVELOPMENT.md's pinned emcc
+          actions-cache-folder: emsdk-cache
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm run build:fastffs
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp -r web _site/web            # keeps web/ ↔ dist/ relative layout intact
+          cp -r dist _site/dist
+          touch _site/.nojekyll          # serve ESM/WASM verbatim, no Jekyll
+          cat > _site/index.html <<'HTML'
+          <!doctype html><meta charset="utf-8">
+          <title>flashvis</title>
+          <meta http-equiv="refresh" content="0; url=./web/">
+          <a href="./web/">flashvis &rarr;</a>
+          HTML
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
