@@ -100,6 +100,8 @@ async function boot() {
     read: (n) => timed(`read(${n})`, () => runner.read(n)),
     cat: (n) => timed(`cat(${n})`, () => runner.cat(n)),
     remove: (n) => timed(`delete(${n})`, () => runner.remove(n)),
+    stat: (n) => timed(`stat(${n})`, () => runner.stat(n)),
+    mkdir: (n) => timed(`mkdir(${n})`, () => runner.mkdir(n)),
     list: () => timed('ls()', () => runner.list()),
     gcStep: () => timed('gc()', () => runner.gcStep()),
     exists: (n) => runner.exists(n),
@@ -108,20 +110,28 @@ async function boot() {
   };
 
   // Run an op, then resolve after the player finishes playing it (await = pace to sim time).
-  const pace = (fn) => { const res = fn(); return viz.barrier().then(() => res); };
+  // In prep/setup mode (ADR-0014) skip the barrier and flush the die synchronously —
+  // full speed, no animation, but timed() still logs each op.
+  let prepMode = false;
+  const pace = (fn) => {
+    const res = fn();
+    if (prepMode) { viz.flush(); return Promise.resolve(res); }
+    return viz.barrier().then(() => res);
+  };
   const names = () => runner.names();
 
-  // Streaming ls: open, then await each fffs_dir_read and print the entry as it arrives.
-  const lsStream = async (printEach) => {
+  // Streaming ls: open a pooled dir handle, then await each fffs_dir_read and print
+  // the entry as it arrives. `prefix` scopes the scan (empty ⇒ whole FS).
+  const lsStream = async (printEach, prefix = '') => {
     const files = [];
-    await pace(() => runner.dirOpen());
+    const dir = await pace(() => runner.openDir(prefix));
     for (;;) {
-      const e = await pace(() => runner.dirRead());
+      const e = await pace(() => dir.read());
       if (!e) break;
       if (printEach) log(`  ${e.name}  ${e.size} B`, 'out');
       files.push(e);
     }
-    await pace(() => runner.dirClose());
+    await pace(() => dir.close());
     if (printEach && !files.length) log('  (empty)', 'out');
     return files;
   };
@@ -191,22 +201,63 @@ async function boot() {
   // The internal auto-workload keeps using the synchronous `fs`.
   // Paced console facade: `await fs.write(...)` blocks for the op's simulated time
   // (scaled by SPEED), locking a console loop to the animation. `list` streams.
+  // Raw handle proxy (ADR-0014 Tier 2): each op is logged by timed() and paced by
+  // pace(), so `await f.read(n)` blocks for the partial read's simulated flash time.
+  const pacedFile = (h) => ({
+    read: (n) => pace(() => timed(`file.read(${n} B)`, () => h.read(n))),
+    write: (d) => pace(() => timed(`file.write(${sizeOf(d)} B)`, () => h.write(d))),
+    seek: (o, w = 'set') => pace(() => timed(`file.seek(${o}, ${w})`, () => h.seek(o, w))),
+    stat: () => pace(() => timed('file.stat()', () => h.stat())),
+    close: () => pace(() => timed('file.close()', () => h.close())),
+  });
+  const pacedDir = (d) => ({
+    read: () => pace(() => d.read()),
+    close: () => pace(() => d.close()),
+  });
   const pfs = {
     write: (n, d) => pace(() => fs.write(n, d)),
     read: (n) => pace(() => fs.read(n)),
     cat: (n) => pace(() => fs.cat(n)),
     remove: (n) => pace(() => fs.remove(n)),
+    stat: (n) => pace(() => fs.stat(n)),
+    mkdir: (n) => pace(() => fs.mkdir(n)),
     gcStep: () => pace(() => fs.gcStep()),
-    list: () => lsStream(false),
+    list: (prefix) => lsStream(false, prefix),
     exists: (n) => fs.exists(n),
+    open: async (name, mode = 'r') => pacedFile(await pace(() => timed(`open(${name}, ${mode})`, () => runner.open(name, mode)))),
+    openDir: async (prefix = '') => pacedDir(await pace(() => runner.openDir(prefix))),
+    format: () => runner.format(),
+    mount: () => runner.mount(),
+    unmount: () => runner.unmount(),
+    sectorClasses: () => runner.sectorClasses(),
+    liveMap: () => runner.liveMap(),
     fsinfo: () => fs.fsinfo(),
     device: runner.device, geometry: runner.geometry, get hostBytes() { return runner.hostBytes; },
   };
+
+  // Tier-1 friendly pokes (ADR-0014): optional args, data-agnostic, all paced, each
+  // returning a descriptor so a console script self-tracks its file set with no
+  // runner.names() backdoor. A no-arg read/delete lands on a tracked file and reports it.
+  let fileSeq = 0;
+  const STOCK_SIZE = 1024;
+  const autoName = () => `f${(fileSeq++).toString(36).padStart(3, '0')}.dat`;
+  const pickKnown = () => { const k = names(); if (!k.length) throw new Error('no files yet — write one first'); return k[rnd(k.length)]; };
+  const writeFile = async (name, size = STOCK_SIZE) => { const n = name ?? autoName(); await pfs.write(n, randomBytes(size)); return { name: n, size }; };
+  const readFile = async (name) => { const n = name ?? pickKnown(); const bytes = await pfs.read(n); return { name: n, size: bytes.length }; };
+  const deleteFile = async (name) => { const n = name ?? pickKnown(); const st = await pfs.stat(n); await pfs.remove(n); return { name: n, size: st ? st.size : 0 }; };
+  // mkdir -p: create each missing parent by looping the single-level shim primitive
+  // (a no-op success on flat FASTFFS; real on LittleFS later). See ADR-0014 Namespace.
+  const mkdirP = async (path) => { let cur = ''; for (const p of String(path).split('/').filter(Boolean)) { cur += (cur ? '/' : '') + p; await pfs.mkdir(cur); } return 'ok'; };
+  const getFiles = (prefix) => lsStream(false, prefix);
+
   const scope = {
     fs: pfs, device: runner.device, viz, randomBytes, help,
-    ls: () => lsStream(true),
+    writeFile, readFile, deleteFile, mkdir: mkdirP, getFiles,
+    ls: (prefix) => lsStream(true, prefix),
     cat: (n) => pace(() => fs.cat(n)),
     gc: async (n = 1) => { let a; for (let i = 0; i < Math.max(1, n | 0); i++) a = await pace(() => fs.gcStep()); return a; },
+    // Setup mode: full speed, no animation, still logs — for bulk seed/framework code.
+    prep: (enable = true) => { prepMode = !!enable; viz.setPrep(prepMode); log(`prep ${prepMode ? 'on — full speed, no animation (still logging)' : 'off — paced + animated'}`, 'sys'); },
     print: (...a) => log(a.map(formatVal).join(' '), 'out'),
     text: (s) => new TextEncoder().encode(s),
   };
@@ -366,19 +417,27 @@ function formatVal(v) {
 
 function help() {
   [
-    'FILES  (prefix with await to pace to simulated flash time):',
+    'POKES  (friendly, optional args, all paced — prefix with await):',
+    '  writeFile(name?, size?) → {name,size}    random bytes; random name / stock size when omitted',
+    '  readFile(name?) → {name,size}   ·   deleteFile(name?) → {name,size}   (no-arg lands on a tracked file)',
+    '  mkdir(path)  mkdir -p (no-op on flat FASTFFS)   ·   getFiles(prefix?) → [{name,size}]   ·   ls(prefix?)',
+    'FILES  (raw fs. layer — await to pace to simulated flash time):',
     '  fs.write(name, data)    create/replace — data = string | Uint8Array',
-    '  fs.read(name) → bytes   ·  cat(name) → text   ·  fs.remove(name)',
-    '  ls() / fs.list() → [{name,size}]   ·  fs.exists(name) → bool',
-    '  gc(n=1) / fs.gcStep()   run n background GC steps',
-    '  fs.fsinfo() → { files, bytes }',
+    '  fs.read(name) → bytes   ·  cat(name) → text   ·  fs.remove(name)   ·  fs.stat(name) → {name,size}|null',
+    '  fs.list(prefix?) → [{name,size}]   ·  fs.exists(name) → bool   ·  fs.mkdir(name)',
+    '  gc(n=1) / fs.gcStep()   run n background GC steps   ·   fs.fsinfo() → { files, bytes }',
+    'HANDLES  (partial / positioned I/O — every op paced):',
+    "  const f = await fs.open(name, 'r'|'w')   → f.read(n), f.write(bytes), f.seek(off, 'set'|'cur'|'end'), f.stat(), f.close()",
+    '  const d = await fs.openDir(prefix?)      → d.read() → {name,size}|null, d.close()',
+    'MODES:  fs.format() / fs.mount() / fs.unmount()   ·   fs.sectorClasses() / fs.liveMap()',
+    '  prep(true)   full-speed setup: no animation, no await-pacing, still logs; prep(false) resumes',
     'DEVICE / VIEW:',
     '  device   flash, wear[], stats{reads,programs,erases,simNs,programBytes}',
     '  fs.geometry   { sectorSize, sectorCount, pageSize, granule }',
     '  viz   pending(), setScale(nsPerMs), liveCounts()',
     'HELPERS:  randomBytes(n) → bytes   ·   text(s) → bytes   ·   print(x)   ·   help()',
-    'example:  for (let i=0;i<10;i++) print(await ls())      // stream results',
-    'example:  for (let i=0;i<10;i++) await fs.write(`log_${i}.dat`, randomBytes(500))',
+    'example:  for (let i=0;i<10;i++) print(await writeFile())      // self-tracking set',
+    "example:  const f = await fs.open('log.dat','w'); await f.write(text('hi')); await f.close()",
   ].forEach((l) => log(l, 'sys'));
 }
 
