@@ -10,8 +10,9 @@
     "build:fastffs": "bash build/build-fastffs.sh",
     "test:fastffs": "node scripts/fastffs-test.mjs",
     "test:integrity": "node scripts/integrity-test.mjs",
+    "test:console": "node scripts/console-api-test.mjs",
     "test:domsmoke": "node scripts/dom-smoke.mjs",
-    "test": "npm run test:fastffs && npm run test:integrity && npm run test:domsmoke",
+    "test": "npm run test:fastffs && npm run test:integrity && npm run test:console && npm run test:domsmoke",
     "ci": "npm run build:fastffs && npm test"
   }
 }
