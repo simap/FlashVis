@@ -30,6 +30,7 @@ new ADR that supersedes it, so the trail of *why it changed* survives.
 | [0010](0010-churn-model-in-js.md) | Port the FASTFFS churn model to JS for a target-live steady state | Accepted |
 | [0011](0011-uniform-fs-driver-abi.md) | A uniform FS-driver ABI behind the WASM shim | Accepted |
 | [0012](0012-per-fs-liveness-inspect.md) | Per-FS liveness via native inspect hooks | Accepted |
+| [0013](0013-fixed-wasm-memory.md) | Fixed WASM memory footprint (no `ALLOW_MEMORY_GROWTH`) | Accepted |
 
 ADRs 0001–0004 document the throwaway JS prototype that established the visual language.
 They're kept as history; the live architecture starts at 0005.
