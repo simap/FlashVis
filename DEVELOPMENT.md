@@ -56,6 +56,11 @@ Non-obvious invariants, each documented where it's enforced — change the code,
 - **Three FS facades.** `runner` (low-level) → `fs` (synchronous, used by the auto-workload) →
   `pfs` (paced — what the console sees as `fs`; `await` blocks for the op's simulated time via
   `viz.barrier`). The workload and Delete pick victims from `runner.names()`, never a dir scan.
+- **Decode WASM strings from a `slice()` copy, never a HEAP view.** `ALLOW_MEMORY_GROWTH` makes
+  `HEAPU8.buffer` a *resizable* ArrayBuffer, and browser `TextDecoder.decode()` — including the one
+  inside emscripten's `UTF8ToString` — rejects a view backed by one. `runner.js` `list()`/`dirRead()`
+  copy first. Node's `TextDecoder` is lax, so the headless guards can't catch a regression here; it
+  surfaces only in the browser (e.g. `ls()` throwing "ArrayBuffer value must not be resizable").
 
 Full rationale lives in ADRs: Web Animations API over CSS keyframes
 ([ADR-0009](adr/0009-timed-playback-and-pacing.md)); ESP32-S3 timing preset and inspect-driven

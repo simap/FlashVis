@@ -93,7 +93,12 @@ export async function createRunner(geometry = {}) {
       const cap = 64, p = M._malloc(cap);
       try {
         const size = M._ff_dir_read(p, cap);
-        return size < 0 ? null : { name: M.UTF8ToString(p), size };
+        if (size < 0) return null;
+        // Decode from a slice() copy, never a HEAP view: ALLOW_MEMORY_GROWTH makes
+        // HEAPU8.buffer a *resizable* ArrayBuffer, and TextDecoder.decode() (incl. the
+        // one inside emscripten's UTF8ToString) refuses a view backed by one.
+        let end = p; while (end < p + cap && M.HEAPU8[end] !== 0) end++;
+        return { name: dec.decode(M.HEAPU8.slice(p, end)), size };
       } finally { M._free(p); }
     },
     dirClose() { M._ff_dir_close(); },
@@ -103,7 +108,8 @@ export async function createRunner(geometry = {}) {
       const cap = 1 << 16, out = M._malloc(cap);
       try {
         const n = check(M._ff_list(out, cap), 'list');
-        return dec.decode(M.HEAPU8.subarray(out, out + n)).split('\n').filter(Boolean)
+        // slice(), not subarray(): see dirRead — decoding a resizable-backed view throws.
+        return dec.decode(M.HEAPU8.slice(out, out + n)).split('\n').filter(Boolean)
           .map((line) => { const [name, size] = line.split('\t'); return { name, size: +size }; });
       } finally { M._free(out); }
     },
