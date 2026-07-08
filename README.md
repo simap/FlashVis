@@ -4,6 +4,8 @@ Watch real flash filesystems work. flashvis compiles embedded flash filesystems 
 WebAssembly and runs them in the browser against an emulated **NOR** chip, animating every
 `program` / `erase` / `read` the driver actually issues. First filesystem: **FASTFFS**.
 
+**Live demo: <https://simap.github.io/FlashVis/>** — real FASTFFS in your browser, no install.
+
 ## Status
 
 - ✅ **Real FASTFFS in the browser.** Compiled to WASM, driven against the JS-emulated NOR
