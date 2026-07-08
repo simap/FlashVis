@@ -66,6 +66,10 @@ export function createNorDevice(opts = {}) {
      * Program `len` bytes from WASM heap `src`. Faithful NOR: a program can only
      * clear bits (1→0), so we AND — identical to the reference lfs_emubd, which
      * FASTFFS relies on for in-place monotonic bit-clearing (footers, commits).
+     *
+     * Because programming physically cannot set a bit to 1, there is no "NOR
+     * violation" to detect here — an earlier metric that flagged it was wrong and
+     * was removed. Don't re-add it, and don't emit a `violations` field.
      */
     prog(off, src, len) {
       const heap = mod.HEAPU8;

@@ -1,0 +1,30 @@
+# CI mirror of `npm run ci`: build the FASTFFS WASM and run the guards
+# (fastffs pipeline, byte-exact integrity, and the headless dom-smoke).
+#
+# Day-to-day this project is verified locally with `npm run ci`; this workflow
+# just makes the same checks enforce on push once the repo is on GitHub.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive        # fs/fastffs — the live-map helper is on origin/main
+
+      - name: Set up Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 6.0.2                # matches DEVELOPMENT.md's pinned emcc
+          actions-cache-folder: emsdk-cache
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm run ci                 # build:fastffs + test:fastffs + test:integrity + test:domsmoke

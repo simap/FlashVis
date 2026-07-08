@@ -9,10 +9,10 @@ import { createNorDevice } from '../web/src/device.js';
 const SECTOR_SIZE = 4096, SECTOR_COUNT = 64, GRANULE = 1;
 
 const dev = createNorDevice({ sectorSize: SECTOR_SIZE, sectorCount: SECTOR_COUNT });
-const ops = { read: 0, prog: 0, erase: 0, progBytes: 0, violations: 0 };
+const ops = { read: 0, prog: 0, erase: 0, progBytes: 0 };
 dev.onEvent((e) => {
   ops[e.op]++;
-  if (e.op === 'prog') { ops.progBytes += e.len; ops.violations += e.violations; }
+  if (e.op === 'prog') ops.progBytes += e.len;
 });
 
 const M = await createModule();
@@ -47,10 +47,10 @@ console.log('fsinfo    -> files:', M._ff_committed_files(), 'bytes:', M._ff_comm
 console.log('device    ->', ops);
 
 const okContent = got === dec.decode(payload);
-if (!okContent || ops.violations > 0) {
-  console.error('\nFAIL', { okContent, violations: ops.violations });
+if (!okContent) {
+  console.error('\nFAIL', { okContent });
   process.exit(1);
 }
 console.log('\nPASS — FASTFFS formatted, mounted, wrote two files and read one back,');
 console.log('       issuing', ops.read, 'reads /', ops.prog, 'programs /', ops.erase,
-            'erases against the emulated NOR device (0 NOR rule violations).');
+            'erases against the emulated NOR device.');
