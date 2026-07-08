@@ -46,7 +46,7 @@ web mode and fail to load the `.wasm` under Node. Stubbing `document` / `matchMe
 
 Tests target **simulation / FS correctness** against the real WASM — byte-exact reads, churn + GC,
 and (as the handle-based API lands) partial/seeked I/O and handle-pool reuse. UI-interaction
-behavior (keyboard, DOM wiring) is verified by driving it once, not with a permanent test.
+behavior (keyboard, DOM wiring) probably doesn't need a permanent test.
 
 ## Gotchas (indexed to the code)
 
