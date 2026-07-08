@@ -79,20 +79,71 @@ reference (no WASM).
 
 ### Console API
 
-Type `help()` in the console at any time. Everything below is in scope:
+Type `help()` in the console at any time. Two tiers: friendly top-level pokes for quick tests, and
+raw `fs.` calls (including real handles) when the bytes matter. See [ADR-0014](adr/0014-console-fs-api.md).
+
+**Tier 1 — friendly pokes.** Optional args, data-agnostic:
 
 | Call | Does | Notes |
 |------|------|-------|
-| `fs.write(name, data)` | Create or replace a file | `data` = string or `Uint8Array`. Paced. |
-| `fs.read(name)` / `cat(name)` | Read a file → bytes / text | Paced. |
+| `writeFile(name?, size?)` → `{name, size}` | Write `size` random bytes | Random name / stock size when omitted. Paced. |
+| `readFile(name?)` → `{name, size}` | Whole-file read | `size` is the byte count read, not the bytes. No-arg reads a random existing file. Paced. |
+| `deleteFile(name?)` → `{name, size}` | Stat then delete | Returns the size it deleted. Paced. |
+| `mkdir(path)` | `mkdir -p` | Creates missing parents; real on hierarchical FSs, a no-op on flat ones (FASTFFS). `mkdir` first, then write under it, for portable directory use. |
+| `ls(prefix?)` | Paced streaming print | |
+| `getFiles(prefix?)` → `[{name, size}]` | Paced scan | Returns the array instead of printing it. |
+
+Returning descriptors from `writeFile`/`deleteFile` lets a script track its own file set with no
+backdoor:
+
+```js
+const mine = [];
+for (let i = 0; i < 100; i++) {
+  if (mine.length && Math.random() < 0.3) {
+    const { name } = await deleteFile(mine[Math.floor(Math.random() * mine.length)]);
+    mine.splice(mine.indexOf(name), 1);
+  } else { mine.push((await writeFile()).name); }
+}
+```
+
+**Tier 2 — raw `fs.` on real data.** POSIX-shaped, handle-based, for when the bytes and positions
+matter. Everything here is paced, so `await` each call:
+
+| Call | Does | Notes |
+|------|------|-------|
+| `fs.write(name, data)` | Create or replace a whole file | `data` = string or `Uint8Array`. Paced. |
+| `fs.read(name)` / `cat(name)` | Read a whole file → bytes / text | Paced. |
 | `fs.remove(name)` | Delete a file | Paced. |
-| `ls()` / `fs.list()` | List files → `[{name, size}]` | Streams entries one at a time via the `fffs_dir_read` iterator (paced); returns the array. |
 | `fs.exists(name)` | → boolean | |
-| `gc(n=1)` / `fs.gcStep()` | Run `n` background GC steps | Paced. |
-| `fs.fsinfo()` | → `{ files, bytes }` | committed totals |
+| `fs.stat(name)` | → `{name, size}` or `null` | `null` when the file doesn't exist. Paced. |
+| `fs.mkdir(name)` | Single-level create | `-p` behavior is the top-level `mkdir`, not this. No-op success on flat FSs. |
+| `fs.list(prefix?)` | → `[{name, size}]` | Streams via the `fffs_dir_read` iterator (paced); returns the array. |
+| `await fs.open(name, mode='r')` | → a handle: `{read(n), write(data), seek(off, whence), stat(), close()}` — each op paced | `mode` is `'r'`\|`'w'`\|`'a'` — `'a'` (append) is driver-optional; FASTFFS doesn't support it. `whence` is `'set'`\|`'cur'`\|`'end'`. Handle I/O is raw and doesn't count toward `hostBytes` (the write-amplification denominator) — that's tracked only by whole-file `fs.write`. |
+| `await fs.openDir(prefix?)` | → `{read(), close()}` | `read()` → `{name, size}` or `null` at the end; regular files only. Empty/absent prefix scans the whole FS. |
+| `fs.gcStep()` / `gc(n=1)` | Run `n` background GC steps | Paced. |
+| `fs.fsinfo()` | → `{files, bytes}` | Committed totals. |
+| `fs.format()` / `fs.mount()` / `fs.unmount()` | Lifecycle | Raw — `format` leaves the FS unmounted. |
+| `fs.geometry` | `{sectorSize, sectorCount, pageSize, granule}` | |
+| `fs.sectorClasses()` / `fs.liveMap()` | Per-sector / per-page introspection | Silent — no device traffic. |
+
+```js
+const h = await fs.open('log.bin', 'w');
+await h.write(randomBytes(200));
+await h.close();
+
+const r = await fs.open('log.bin', 'r');
+await r.seek(50, 'set');
+print(await r.read(20));   // 20 bytes starting at offset 50
+await r.close();
+```
+
+**Other console helpers:**
+
+| Call | Does | Notes |
+|------|------|-------|
 | `device` | Emulated chip: `flash`, `wear[]`, `stats` | `stats.simNs`, `.reads`, `.programs`, `.erases`, `.programBytes` |
-| `fs.geometry` | `{ sectorSize, sectorCount, pageSize, granule }` | |
 | `viz` | Player: `pending()`, `setScale(nsPerMs)`, `liveCounts()` | |
+| `prep(enable)` | Toggle setup mode | Runs ops at full speed, no animation/await-pacing, but still logs each op. For bulk seeding; `prep(false)` resumes paced interaction. |
 | `print(x)` | Log a value to the console | e.g. `for (…) print(await ls())` |
 | `randomBytes(n)`, `text(s)` | Make a `Uint8Array` | |
 

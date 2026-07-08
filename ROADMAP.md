@@ -36,7 +36,7 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       sequence (reproduces FASTFFS benchmark runs; feeds every FS the same logical workload for
       lockstep), idiomatic JS above the PRNG. A target live size fills toward a steady state
       instead of monotonically overfilling. See [ADR-0010](adr/0010-churn-model-in-js.md).
-- [ ] **Console FS API sweep.** A two-tier console surface — friendly top-level pokes
+- [x] **Console FS API sweep.** A two-tier console surface — friendly top-level pokes
       (`writeFile`/`readFile`/`deleteFile`/`ls`/`getFiles`, all paced, returning descriptors so a
       script self-tracks) over a raw handle-based `fs.` layer (`fs.open`/`fs.openDir` file/dir
       proxies with partial/seeked I/O, stat, prefix), on a static handle pool in the shim, plus a
