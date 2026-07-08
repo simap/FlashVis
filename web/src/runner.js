@@ -39,6 +39,24 @@ export async function createRunner(geometry = {}) {
     if (rc < 0) throw new Error(`${what} failed: ${rc}`);
     return rc;
   };
+  // Decode a NUL-terminated C string out of a heap buffer via a slice() copy, never
+  // a subarray/view (ADR-0013): we build fixed-memory so HEAPU8.buffer is a plain
+  // ArrayBuffer today and a view would work — but copying stays safe if
+  // ALLOW_MEMORY_GROWTH ever returns, since a resizable buffer makes browser
+  // TextDecoder (incl. the one in emscripten's UTF8ToString) reject views onto it.
+  const decodeCStr = (p, cap) => {
+    let end = p; while (end < p + cap && M.HEAPU8[end] !== 0) end++;
+    return dec.decode(M.HEAPU8.slice(p, end));
+  };
+  // One fffs_dir_read via a pooled dir handle; size<0 (end/error) → null.
+  const readDirEntry = (handle) => {
+    const cap = 64, p = M._malloc(cap);
+    try {
+      const size = M._ff_dir_read(handle, p, cap);
+      if (size < 0) return null;
+      return { name: decodeCStr(p, cap), size };
+    } finally { M._free(p); }
+  };
 
   M._ff_config(sectorSize, sectorCount, granule);
 
@@ -87,22 +105,94 @@ export async function createRunner(geometry = {}) {
     /** Names we've written and not deleted — the churn-model view of what exists. */
     names() { return [...tracked]; },
 
-    // Streaming directory iterator: each dirRead is one fffs_dir_read.
-    dirOpen() { return M._ff_dir_open(); },
-    dirRead() {
-      const cap = 64, p = M._malloc(cap);
+    // Streaming directory iterator (ADR-0014): dirOpen/dirRead/dirClose are thin
+    // wrappers over a pooled dir handle now — dirOpen returns the handle, dirRead/
+    // dirClose take it, so more than one can be open at once. NOTE for the
+    // integrator: playground.js's lsStream currently calls these with no args
+    // (runner.dirOpen()/dirRead()/dirClose()); it must be updated to thread the
+    // handle returned by dirOpen through dirRead/dirClose (or switch to openDir()).
+    dirOpen(prefix = '') { return check(withCStr(prefix, (np) => M._ff_dir_open(np)), `dirOpen ${prefix}`); },
+    dirRead(handle) { return readDirEntry(handle); },
+    dirClose(handle) { M._ff_dir_close(handle); },
+
+    /** Stat a file by name; null when it doesn't exist. */
+    stat(name) {
+      const cap = 128, buf = M._malloc(cap);
       try {
-        const size = M._ff_dir_read(p, cap);
+        const size = withCStr(name, (np) => M._ff_stat(np, buf, cap));
         if (size < 0) return null;
-        // Decode from a slice() copy, never a HEAP view. We build fixed-memory (ADR-0013)
-        // so HEAPU8.buffer is a plain ArrayBuffer and a view would work — but copying stays
-        // safe if ALLOW_MEMORY_GROWTH ever returns: a resizable buffer makes browser
-        // TextDecoder (incl. the one in emscripten's UTF8ToString) reject views onto it.
-        let end = p; while (end < p + cap && M.HEAPU8[end] !== 0) end++;
-        return { name: dec.decode(M.HEAPU8.slice(p, end)), size };
-      } finally { M._free(p); }
+        return { name: decodeCStr(buf, cap), size };
+      } finally { M._free(buf); }
     },
-    dirClose() { M._ff_dir_close(); },
+
+    /** Create a directory entry; a no-op success on flat FSs (already-exists is OK too). */
+    mkdir(name) {
+      check(withCStr(name, (np) => M._ff_mkdir(np)), `mkdir ${name}`);
+      return true;
+    },
+
+    /** Open a handle for partial/positioned I/O. mode: 'r'|'w'|('a' if driver-supported). */
+    open(name, mode = 'r') {
+      const MODES = { r: 0, w: 1, a: 2 };
+      const m = MODES[mode];
+      if (m === undefined) throw new Error(`open ${name}: bad mode '${mode}'`);
+      const handle = check(withCStr(name, (np) => M._ff_open(np, m)), `open ${name}`);
+      let closed = false;
+      return {
+        /** Read up to n bytes from the current position; length = bytes actually read. */
+        read(n) {
+          const p = M._malloc(n || 1);
+          try {
+            const got = check(M._ff_file_read(handle, p, n), `read handle ${handle}`);
+            return M.HEAPU8.slice(p, p + got);
+          } finally { M._free(p); }
+        },
+        /** Write `data` (string|Uint8Array) at the current position; returns bytes written.
+         *  Raw handle I/O — does NOT update hostBytes/tracked (those are the whole-file
+         *  write() churn-model denominator only). */
+        write(data) {
+          const u8 = typeof data === 'string' ? enc.encode(data) : data;
+          return check(withBytes(u8, (dp) => M._ff_file_write(handle, dp, u8.length)), `write handle ${handle}`);
+        },
+        /** Move the current position; whence 'set'|'cur'|'end'. Returns the new absolute position. */
+        seek(off, whence = 'set') {
+          const WHENCE = { set: 0, cur: 1, end: 2 };
+          const w = WHENCE[whence];
+          if (w === undefined) throw new Error(`seek: bad whence '${whence}'`);
+          return check(M._ff_file_seek(handle, off, w), `seek handle ${handle}`);
+        },
+        /** Stat the open file. */
+        stat() {
+          const cap = 128, p = M._malloc(cap);
+          try {
+            const size = check(M._ff_file_stat(handle, p, cap), `stat handle ${handle}`);
+            return { name: decodeCStr(p, cap), size };
+          } finally { M._free(p); }
+        },
+        /** Close the handle, freeing its pool slot. Safe to call more than once. */
+        close() {
+          if (closed) return;
+          closed = true;
+          check(M._ff_file_close(handle), `close handle ${handle}`);
+        },
+      };
+    },
+
+    /** Open a directory-scoped streaming iterator over a pooled dir handle. */
+    openDir(prefix = '') {
+      const handle = check(withCStr(prefix, (np) => M._ff_dir_open(np)), `openDir ${prefix}`);
+      let closed = false;
+      return {
+        /** One fffs_dir_read; regular files only. Null at end (or on error). */
+        read: () => readDirEntry(handle),
+        /** Close the dir handle, freeing its pool slot. Safe to call more than once. */
+        close: () => {
+          if (closed) return;
+          closed = true;
+          M._ff_dir_close(handle);
+        },
+      };
+    },
 
     /** List files as [{ name, size }]. */
     list() {
