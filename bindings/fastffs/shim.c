@@ -52,7 +52,7 @@ static size_t g_sector_count   = 64;
 static size_t g_program_granule = 1;
 
 static void be_init(void) {
-    g_be.ctx = &g_fs;   /* opaque device handle; must be non-NULL, callbacks ignore it */
+    g_be.ctx = NULL;    /* unused: the callbacks read the JS chip directly */
     g_be.size = g_sector_size * g_sector_count;
     g_be.read_granule = 1;                 /* NOR reads are byte-addressable */
     g_be.program_granule = g_program_granule;
