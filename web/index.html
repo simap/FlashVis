@@ -48,7 +48,6 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
   background:#0c141b;border:1px solid #17242e;cursor:pointer;transition:border-color .15s,box-shadow .15s}
 .sector:hover{border-color:var(--accent-dim)}
 .sector.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 16px -4px var(--accent)}
-.sector.erasing{animation:erase-wash var(--anim,.42s) ease both}
 .cell{position:relative;aspect-ratio:1;border-radius:1.5px;overflow:hidden;background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge);transition:box-shadow .16s ease}
 .cell .fill{position:absolute;left:0;right:0;bottom:0;height:0;background:var(--prog);transition:height .18s ease}
 .cell[data-s="prog"]{box-shadow:inset 0 0 0 1px var(--prog-edge),0 0 6px -2px #eab54a55}
@@ -56,11 +55,6 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .cell[data-live="obsolete"] .fill{background:var(--stale)}
 .cell[data-live="obsolete"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
 .cell[data-live="meta"] .fill{background:var(--index)}
-.cell.prog{animation:prog var(--anim,.3s) ease}
-.cell.ping{animation:ping var(--anim,.62s) ease}
-@keyframes prog{0%{box-shadow:inset 0 0 0 1px #fff,0 0 12px 1px var(--program)}100%{box-shadow:inset 0 0 0 1px var(--prog-edge),0 0 6px -2px #eab54a55}}
-@keyframes ping{0%{box-shadow:inset 0 0 0 1px #eafcff,0 0 15px 3px var(--read);background:#173842}45%{box-shadow:inset 0 0 0 1px var(--read),0 0 12px 1px var(--read)}100%{box-shadow:inset 0 0 0 1px var(--erased-edge)}}
-@keyframes erase-wash{0%{box-shadow:0 0 0 1px var(--erase),0 0 22px -2px var(--erase);background:#241832}55%{box-shadow:0 0 0 1px var(--erase),0 0 26px 0 var(--erase);background:#2c1d3e}100%{box-shadow:none;background:#0c141b}}
 .die.heat .sector{background:var(--wc,#0c141b);border-color:#0006}
 .die.heat .cell{opacity:.13}
 .die.heat .sector.sel{box-shadow:0 0 0 1px var(--accent)}
