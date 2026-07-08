@@ -1,0 +1,4 @@
+[submodule "fs/fastffs"]
+	path = fs/fastffs
+	url = git@github.com:simap/FASTFFS.git
+	branch = main
