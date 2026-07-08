@@ -1,0 +1,235 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLASHVIS — FASTFFS on NOR, live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a;
+  --line:#20313c; --line-soft:#182530;
+  --txt:#cdd9e0; --txt-dim:#647884; --txt-faint:#3c4c56;
+  --erased:#132029; --erased-edge:#233b44;
+  --prog:#eab54a; --prog-edge:#f4cf7e;
+  --stale:#4c4636; --stale-edge:#5f5741; --index:#63a6c9;
+  --program:#a9f1ff; --erase:#b978ff; --read:#63e6ff;
+  --accent:#6fd6c2; --accent-dim:#2f5d57; --err:#e5686d;
+  --sector-gap:6px; --cell-gap:2px; --radius:3px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(1200px 700px at 78% -8%, #12202b 0%, rgba(18,32,43,0) 60%),
+    radial-gradient(900px 600px at -6% 108%, #131a26 0%, rgba(19,26,38,0) 55%),
+    var(--bg);
+  color:var(--txt);font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;height:100%;overflow:hidden;
+}
+h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
+::selection{background:var(--accent-dim);color:#eafffb}
+
+.header{flex:none;display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;padding:15px 22px 13px;border-bottom:1px solid var(--line-soft)}
+.brand{display:flex;align-items:baseline;gap:12px}
+.logo{font-family:"Space Grotesk";font-weight:700;font-size:22px;letter-spacing:.14em}
+.logo b{color:var(--prog)}
+.tagline{color:var(--txt-dim);font-size:12.5px}
+.tagline .k{color:var(--accent)}
+.spec{margin-left:auto;color:var(--txt-faint);font-size:11.5px;letter-spacing:.05em;text-align:right}
+.spec b{color:var(--txt-dim);font-weight:500}
+
+.main{flex:1 1 auto;min-height:0;overflow:hidden;display:grid;grid-template-columns:minmax(0,1fr) 288px 336px;gap:22px;padding:20px 22px 14px;max-width:1360px;width:100%;margin:0 auto;align-items:stretch}
+.stage{display:flex;flex-direction:column;align-items:center;gap:11px;min-width:0;min-height:0;overflow:hidden}
+.diewrap{position:relative;width:100%;max-width:620px;max-height:calc(100% - 40px);aspect-ratio:1;padding:14px;border-radius:8px;
+  background:linear-gradient(180deg,#0e161d,#0b1117);border:1px solid var(--line);box-shadow:inset 0 0 0 1px #ffffff06,0 24px 60px -30px #000}
+.diewrap::before{content:"";position:absolute;top:8px;left:8px;width:9px;height:9px;border-top:2px solid var(--accent-dim);border-left:2px solid var(--accent-dim)}
+.die{display:grid;grid-template-columns:repeat(var(--sector-cols,8),1fr);gap:var(--sector-gap);width:100%;height:100%}
+.sector{position:relative;display:grid;grid-template-columns:repeat(var(--page-cols,4),1fr);gap:var(--cell-gap);padding:3px;border-radius:var(--radius);
+  background:#0c141b;border:1px solid #17242e;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+.sector:hover{border-color:var(--accent-dim)}
+.sector.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 16px -4px var(--accent)}
+.sector.erasing{animation:erase-wash var(--anim,.42s) ease both}
+.cell{position:relative;aspect-ratio:1;border-radius:1.5px;overflow:hidden;background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge);transition:box-shadow .16s ease}
+.cell .fill{position:absolute;left:0;right:0;bottom:0;height:0;background:var(--prog);transition:height .18s ease}
+.cell[data-s="prog"]{box-shadow:inset 0 0 0 1px var(--prog-edge),0 0 6px -2px #eab54a55}
+.cell[data-live="live"] .fill{background:var(--prog)}
+.cell[data-live="obsolete"] .fill{background:var(--stale)}
+.cell[data-live="obsolete"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
+.cell[data-live="meta"] .fill{background:var(--index)}
+.cell.prog{animation:prog var(--anim,.3s) ease}
+.cell.ping{animation:ping var(--anim,.62s) ease}
+@keyframes prog{0%{box-shadow:inset 0 0 0 1px #fff,0 0 12px 1px var(--program)}100%{box-shadow:inset 0 0 0 1px var(--prog-edge),0 0 6px -2px #eab54a55}}
+@keyframes ping{0%{box-shadow:inset 0 0 0 1px #eafcff,0 0 15px 3px var(--read);background:#173842}45%{box-shadow:inset 0 0 0 1px var(--read),0 0 12px 1px var(--read)}100%{box-shadow:inset 0 0 0 1px var(--erased-edge)}}
+@keyframes erase-wash{0%{box-shadow:0 0 0 1px var(--erase),0 0 22px -2px var(--erase);background:#241832}55%{box-shadow:0 0 0 1px var(--erase),0 0 26px 0 var(--erase);background:#2c1d3e}100%{box-shadow:none;background:#0c141b}}
+.die.heat .sector{background:var(--wc,#0c141b);border-color:#0006}
+.die.heat .cell{opacity:.13}
+.die.heat .sector.sel{box-shadow:0 0 0 1px var(--accent)}
+.stagefoot{display:flex;gap:16px;color:var(--txt-faint);font-size:11px;letter-spacing:.04em;flex-wrap:wrap;justify-content:center}
+.stagefoot b{color:var(--txt-dim);font-weight:500}
+
+.panel{display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
+.card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line-soft);border-radius:8px;padding:13px 14px}
+.card h3{margin:0 0 10px;font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim)}
+.legend{display:flex;flex-direction:column;gap:7px}
+.lrow{display:flex;align-items:center;gap:10px;font-size:12px}
+.sw{width:14px;height:14px;border-radius:2px;flex:none;box-shadow:inset 0 0 0 1px #fff2}
+.lrow small{margin-left:auto;color:var(--txt-faint);font-size:10.5px}
+.sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
+.sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)} .sw.program{background:var(--program)} .sw.erase{background:var(--erase)} .sw.read{background:var(--read)}
+.legend .note{margin-top:3px;font-size:10.5px;color:var(--txt-faint);line-height:1.45}
+.legend .note b{color:var(--txt-dim);font-weight:500}
+.util{height:9px;border-radius:5px;overflow:hidden;display:flex;background:#0a1016;border:1px solid var(--line-soft);margin-bottom:11px}
+.util i{display:block;height:100%;width:0;transition:width .25s ease}
+.util .u-live{background:var(--prog)} .util .u-obs{background:var(--stale)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:9px 14px}
+.stat{display:flex;flex-direction:column;gap:1px}
+.stat .n{font-size:17px;font-weight:500;font-variant-numeric:tabular-nums}
+.stat .n.amp{color:var(--prog)} .stat .n.ok{color:var(--accent)} .stat .n.bad{color:var(--err)}
+.stat .l{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--txt-faint)}
+.insp{font-size:12px;color:var(--txt-dim);min-height:56px}
+.insp .addr{font-size:15px;color:var(--txt)}
+.insp .row{display:flex;justify-content:space-between;margin-top:6px}
+.insp .row span:last-child{color:var(--txt)}
+.insp .hint{color:var(--txt-faint);font-style:italic}
+
+.console{align-self:stretch;display:flex;min-width:0;min-height:0}
+.term{flex:1;display:flex;flex-direction:column;min-height:0;background:#0a0f15;border:1px solid var(--line-soft);border-radius:8px;overflow:hidden}
+.termout{flex:1;min-height:0;overflow:auto;padding:10px 13px;font-size:12px;line-height:1.55}
+.termout .line{white-space:pre-wrap;word-break:break-word}
+.termout .in{color:var(--accent)} .termout .out{color:var(--txt)} .termout .err{color:var(--err)} .termout .sys{color:var(--txt-faint)}
+.terminput{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line-soft);padding:8px 13px}
+.terminput .p{color:var(--accent);font-weight:700}
+.terminput input{flex:1;background:none;border:none;outline:none;color:var(--txt);font-family:inherit;font-size:12.5px}
+.terminput .hintk{color:var(--txt-faint);font-size:10.5px}
+
+.transport{flex:none;border-top:1px solid var(--line-soft);background:linear-gradient(180deg,#0c131aee,#0a0f15);backdrop-filter:blur(4px);padding:12px 22px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.tgroup{display:flex;align-items:center;gap:8px}
+.sep{width:1px;height:24px;background:var(--line);margin:0 3px}
+.btn{font-family:inherit;font-size:12px;color:var(--txt);background:#16212b;border:1px solid var(--line);border-radius:6px;padding:7px 12px;cursor:pointer;transition:.13s;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{border-color:var(--accent-dim);background:#1a2833}
+.btn:active{transform:translateY(1px)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn.primary{background:var(--prog);color:#241a06;border-color:var(--prog);font-weight:600}
+.btn.primary:hover{background:var(--prog-edge)}
+.btn.warn:hover{border-color:#5a2a2c;color:#f2b0b2}
+.btn .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+label.ctl{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:11px;letter-spacing:.05em}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100px;height:3px;border-radius:2px;background:var(--line);outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px -1px var(--accent);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-radius:50%;background:var(--accent);cursor:pointer}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{font-family:inherit;font-size:11px;color:var(--txt-dim);background:#121b23;border:none;border-right:1px solid var(--line);padding:7px 9px;cursor:pointer}
+.seg button:last-child{border-right:none}
+.seg button:hover{color:var(--txt);background:#18242e}
+.seg button.on{background:var(--accent-dim);color:#eafffb}
+.toggle{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:11px;letter-spacing:.05em;cursor:pointer;user-select:none}
+.toggle input{position:absolute;opacity:0;pointer-events:none}
+.tswitch{width:34px;height:18px;border-radius:10px;background:#16212b;border:1px solid var(--line);position:relative;transition:.15s}
+.tswitch::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--txt-faint);transition:.15s}
+.toggle input:checked + .tswitch{background:var(--accent-dim);border-color:var(--accent)}
+.toggle input:checked + .tswitch::after{transform:translateX(16px);background:var(--accent)}
+
+@media (max-width:1080px){
+  html,body{height:auto}
+  body{overflow:auto;min-height:100%}
+  .main{grid-template-columns:1fr;overflow:visible;min-height:auto}
+  .stage,.panel{overflow:visible;min-height:auto}
+  .diewrap{max-height:none}
+  .console{min-height:280px}
+}
+@media (max-width:900px){.spec{display:none}}
+@media (prefers-reduced-motion:reduce){.cell,.sector,.cell .fill{transition:none!important;animation:none!important}}
+</style>
+
+<div class="header">
+  <div class="brand">
+    <span class="logo">FLASH<b>VIS</b></span>
+    <span class="tagline">real <span class="k">FASTFFS</span>, compiled to WASM, running live on an emulated NOR chip.</span>
+  </div>
+  <div class="spec"><b id="specGeo">256 KB · 64×4 KB</b><br><span id="specLive">booting…</span></div>
+</div>
+
+<div class="main">
+  <div class="stage">
+    <div class="diewrap"><div class="die" id="die"></div></div>
+    <div class="stagefoot">
+      <span><b id="fProg">0%</b> programmed</span>
+      <span><b id="fFree">0</b> pages blank</span>
+      <span>WA <b id="fAmp">1.0×</b></span>
+      <span><b id="fErase">0</b> erases</span>
+      <span>flash time <b id="fSim">0 ms</b></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="card">
+      <h3>Cell states</h3>
+      <div class="legend">
+        <div class="lrow"><span class="sw erased"></span>Erased <small>0xFF</small></div>
+        <div class="lrow"><span class="sw prog"></span>Live data <small>fill = bytes</small></div>
+        <div class="lrow"><span class="sw obsolete"></span>Obsolete <small>reclaimable</small></div>
+        <div class="lrow"><span class="sw index"></span>Metadata <small>index + records</small></div>
+        <div class="lrow"><span class="sw program"></span>Programming <small>1→0</small></div>
+        <div class="lrow"><span class="sw erase"></span>Erasing <small>sector → 0xFF</small></div>
+        <div class="lrow"><span class="sw read"></span>Reading <small>XIP, no wear</small></div>
+        <div class="note">Every animation is a real device op FASTFFS issued, paced by its
+          <b>ESP32-S3 flash timing</b>. Fill height is the <b>bytes programmed</b> in a page.</div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Telemetry</h3>
+      <div class="util" title="live · garbage · free"><i class="u-live" id="uProg"></i><i class="u-obs" id="uObs"></i></div>
+      <div class="grid2">
+        <div class="stat"><span class="n amp" id="sAmp">1.0×</span><span class="l">Write amp</span></div>
+        <div class="stat"><span class="n" id="sObs">0%</span><span class="l">Garbage</span></div>
+        <div class="stat"><span class="n" id="sFiles">0</span><span class="l">Files</span></div>
+        <div class="stat"><span class="n" id="sBytes">0 KB</span><span class="l">Live data</span></div>
+        <div class="stat"><span class="n ok" id="sLive">0</span><span class="l">Live sectors</span></div>
+        <div class="stat"><span class="n" id="sErase">0</span><span class="l">Erases</span></div>
+        <div class="stat"><span class="n" id="sRead">0</span><span class="l">Reads</span></div>
+        <div class="stat"><span class="n" id="sWear">0</span><span class="l">Peak wear</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Sector inspector</h3>
+      <div class="insp" id="insp"><span class="hint">Click a sector to inspect it.</span></div>
+    </div>
+  </div>
+    <div class="console">
+      <div class="term">
+        <div class="termout" id="termout"></div>
+        <div class="terminput">
+          <span class="p">›</span>
+          <input id="terminput" spellcheck="false" autocomplete="off"
+                 placeholder="fs.write('log.dat', randomBytes(900))  ·  cat('log.dat')  ·  ls()  ·  help()">
+          <span class="hintk">enter</span>
+        </div>
+      </div>
+    </div>
+</div>
+
+<div class="transport">
+  <div class="tgroup">
+    <button class="btn primary" id="btnRun"><span class="dot"></span><span id="runLabel">Pause</span></button>
+    <button class="btn" id="btnStep">Step</button>
+  </div>
+  <div class="sep"></div>
+  <div class="tgroup">
+    <button class="btn" id="btnWrite">Write file</button>
+    <button class="btn" id="btnLs">ls</button>
+    <button class="btn" id="btnDelete">Delete</button>
+    <button class="btn" id="btnGC">GC</button>
+    <button class="btn" id="btnFormat">Format</button>
+  </div>
+  <div class="sep"></div>
+  <label class="ctl">SPEED <input type="range" id="speed" min="0" max="100" value="40"> <span id="speedRead" class="hintk"></span></label>
+  <label class="ctl">BG&nbsp;GC <input type="range" id="gc" min="0" max="100" value="50"> <span id="gcRead" class="hintk"></span></label>
+  <label class="ctl">GRANULE
+    <span class="seg" id="gran">
+      <button data-g="1" class="on">1B</button><button data-g="4">4B</button><button data-g="16">16B</button><button data-g="64">64B</button><button data-g="256">256B</button>
+    </span>
+  </label>
+  <label class="toggle"><input type="checkbox" id="heat"><span class="tswitch"></span>WEAR HEATMAP</label>
+</div>
+
+<script type="module" src="./src/playground.js"></script>

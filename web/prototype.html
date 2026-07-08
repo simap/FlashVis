@@ -1,0 +1,504 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLASHVIS — SPI NOR, made visible</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a;
+  --line:#20313c; --line-soft:#182530;
+  --txt:#cdd9e0; --txt-dim:#647884; --txt-faint:#3c4c56;
+  --erased:#132029; --erased-edge:#233b44;
+  --valid:#eab54a; --valid-edge:#f4cf7e;
+  --stale:#4c4636; --stale-edge:#5f5741;
+  --program:#a9f1ff; --erase:#b978ff; --worn:#e5484d; --read:#63e6ff;
+  --accent:#6fd6c2; --accent-dim:#2f5d57;
+  --sector-gap:6px; --cell-gap:2px; --radius:3px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(1200px 700px at 78% -8%, #12202b 0%, rgba(18,32,43,0) 60%),
+    radial-gradient(900px 600px at -6% 108%, #131a26 0%, rgba(19,26,38,0) 55%),
+    var(--bg);
+  color:var(--txt);
+  font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;min-height:100%;
+}
+h1,h2,h3,.dsp{font-family:"Space Grotesk",system-ui,sans-serif}
+::selection{background:var(--accent-dim);color:#eafffb}
+
+/* header */
+.header{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;padding:16px 22px 14px;border-bottom:1px solid var(--line-soft)}
+.brand{display:flex;align-items:baseline;gap:12px}
+.logo{font-family:"Space Grotesk";font-weight:700;font-size:22px;letter-spacing:.14em;color:var(--txt)}
+.logo b{color:var(--valid)}
+.tagline{color:var(--txt-dim);font-size:12.5px}
+.tagline .k{color:var(--accent)}
+.spec{margin-left:auto;color:var(--txt-faint);font-size:11.5px;letter-spacing:.06em;text-align:right}
+.spec b{color:var(--txt-dim);font-weight:500}
+
+/* main */
+.main{flex:1;display:grid;grid-template-columns:minmax(0,1fr) 322px;gap:24px;padding:24px 22px;align-items:start;max-width:1180px;width:100%;margin:0 auto}
+.stage{display:flex;flex-direction:column;align-items:center;gap:12px;min-width:0}
+.diewrap{position:relative;width:100%;max-width:640px;aspect-ratio:1;padding:14px;border-radius:8px;
+  background:linear-gradient(180deg,#0e161d,#0b1117);border:1px solid var(--line);
+  box-shadow:inset 0 0 0 1px #ffffff06, 0 24px 60px -30px #000}
+.diewrap::before{content:"";position:absolute;top:8px;left:8px;width:9px;height:9px;border-top:2px solid var(--accent-dim);border-left:2px solid var(--accent-dim)}
+.die{display:grid;grid-template-columns:repeat(8,1fr);gap:var(--sector-gap);width:100%;height:100%}
+.sector{position:relative;display:grid;grid-template-columns:repeat(4,1fr);gap:var(--cell-gap);padding:3px;border-radius:var(--radius);
+  background:#0c141b;border:1px solid #17242e;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+.sector:hover{border-color:var(--accent-dim)}
+.sector.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 16px -4px var(--accent)}
+.sector.erasing{animation:erase-wash .42s ease both}
+.sector.worn{border-color:#5a2a2c}
+
+.cell{position:relative;aspect-ratio:1;border-radius:1.5px;overflow:hidden;
+  background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge);transition:box-shadow .16s ease}
+.cell .fill{position:absolute;left:0;right:0;bottom:0;height:0;background:var(--valid);transition:height .18s ease,background-color .16s ease}
+.cell[data-s="valid"]{box-shadow:inset 0 0 0 1px var(--valid-edge),0 0 6px -2px #eab54a55}
+.cell[data-s="valid"] .fill{background:var(--valid)}
+.cell[data-s="stale"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
+.cell[data-s="stale"] .fill{background:var(--stale)}
+.cell[data-s="worn"]{background:#2a1417;box-shadow:inset 0 0 0 1px #7a2f33;
+  background-image:repeating-linear-gradient(45deg,#3a181c 0 3px,#241012 3px 6px)}
+.cell[data-s="worn"] .fill{display:none}
+.cell.prog{animation:prog .30s ease}
+.cell.append{animation:append .34s ease}
+.cell.rel{animation:relocate .34s ease}
+.cell.ping{animation:readping .5s ease}
+.cell.head::after{content:"";position:absolute;inset:0;border-radius:1.5px;pointer-events:none;
+  box-shadow:inset 0 0 0 1px var(--accent),0 0 7px -2px var(--accent)}
+@keyframes prog{0%{box-shadow:inset 0 0 0 1px #fff,0 0 12px 1px var(--program)}100%{box-shadow:inset 0 0 0 1px var(--valid-edge),0 0 6px -2px #eab54a55}}
+@keyframes append{0%{box-shadow:inset 0 0 0 1px var(--accent),0 0 12px 1px var(--accent)}100%{box-shadow:inset 0 0 0 1px var(--valid-edge)}}
+@keyframes relocate{0%{box-shadow:inset 0 0 0 1px #eafffb,0 0 12px 1px var(--accent)}100%{box-shadow:inset 0 0 0 1px var(--valid-edge)}}
+@keyframes erase-wash{0%{box-shadow:0 0 0 1px var(--erase),0 0 22px -2px var(--erase);background:#241832}55%{box-shadow:0 0 0 1px var(--erase),0 0 26px 0 var(--erase);background:#2c1d3e}100%{box-shadow:none;background:#0c141b}}
+@keyframes readping{0%{box-shadow:inset 0 0 0 1px var(--read),0 0 10px 0 var(--read)}100%{box-shadow:inset 0 0 0 1px var(--erased-edge)}}
+.die.heat .sector{background:var(--wc,#0c141b);border-color:#0006}
+.die.heat .cell{opacity:.13}
+.die.heat .sector.sel{box-shadow:0 0 0 1px var(--accent)}
+
+.stagefoot{display:flex;gap:18px;color:var(--txt-faint);font-size:11px;letter-spacing:.05em;flex-wrap:wrap;justify-content:center}
+.stagefoot b{color:var(--txt-dim);font-weight:500}
+
+/* panel */
+.panel{display:flex;flex-direction:column;gap:16px;position:sticky;top:16px}
+.card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line-soft);border-radius:8px;padding:14px 15px}
+.card h3{margin:0 0 11px;font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim)}
+.legend{display:flex;flex-direction:column;gap:8px}
+.lrow{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--txt)}
+.sw{width:14px;height:14px;border-radius:2px;flex:none;box-shadow:inset 0 0 0 1px #fff2}
+.lrow small{margin-left:auto;color:var(--txt-faint);font-size:10.5px}
+.sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
+.sw.valid{background:var(--valid)} .sw.stale{background:var(--stale)}
+.sw.prog{background:var(--program)} .sw.erase{background:var(--erase)}
+.sw.worn{background:#2a1417;background-image:repeating-linear-gradient(45deg,#3a181c 0 3px,#241012 3px 6px);box-shadow:inset 0 0 0 1px #7a2f33}
+.legend .note{margin-top:2px;font-size:10.5px;color:var(--txt-faint);line-height:1.45}
+.legend .note b{color:var(--txt-dim);font-weight:500}
+
+.util{height:10px;border-radius:5px;overflow:hidden;display:flex;background:#0a1016;border:1px solid var(--line-soft);margin-bottom:12px}
+.util i{display:block;height:100%;transition:width .3s ease}
+.util .u-valid{background:var(--valid)} .util .u-stale{background:var(--stale)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+.stat{display:flex;flex-direction:column;gap:1px}
+.stat .n{font-size:18px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--txt)}
+.stat .n.amp{color:var(--valid)}
+.stat .n.hot{color:var(--worn)}
+.stat .l{font-size:10px;letter-spacing:.07em;text-transform:uppercase;color:var(--txt-faint)}
+
+.insp{font-size:12px;color:var(--txt-dim);min-height:64px}
+.insp .addr{font-size:16px;color:var(--txt);letter-spacing:.02em}
+.insp .row{display:flex;justify-content:space-between;margin-top:7px}
+.insp .row span:last-child{color:var(--txt)}
+.insp .files{margin-top:9px;display:flex;flex-wrap:wrap;gap:5px}
+.chip{font-size:10.5px;padding:2px 7px;border-radius:10px;background:#152029;border:1px solid var(--line);color:var(--txt-dim)}
+.insp .hint{color:var(--txt-faint);font-style:italic}
+.wear-bar{height:6px;border-radius:3px;background:#0a1016;border:1px solid var(--line-soft);overflow:hidden;margin-top:8px}
+.wear-bar i{display:block;height:100%}
+
+/* transport */
+.transport{border-top:1px solid var(--line-soft);background:linear-gradient(180deg,#0c131a,#0a0f15);padding:13px 22px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tgroup{display:flex;align-items:center;gap:8px}
+.sep{width:1px;height:26px;background:var(--line);margin:0 4px}
+.btn{font-family:inherit;font-size:12px;letter-spacing:.03em;color:var(--txt);background:#16212b;border:1px solid var(--line);border-radius:6px;padding:8px 13px;cursor:pointer;transition:.13s;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{border-color:var(--accent-dim);background:#1a2833}
+.btn:active{transform:translateY(1px)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn.primary{background:var(--valid);color:#241a06;border-color:var(--valid);font-weight:600}
+.btn.primary:hover{background:var(--valid-edge)}
+.btn.warn:hover{border-color:#5a2a2c;color:#f2b0b2}
+.btn .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+label.ctl{display:flex;align-items:center;gap:9px;color:var(--txt-dim);font-size:11px;letter-spacing:.06em}
+input[type=range]{-webkit-appearance:none;appearance:none;width:104px;height:3px;border-radius:2px;background:var(--line);outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px -1px var(--accent);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-radius:50%;background:var(--accent);cursor:pointer}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{font-family:inherit;font-size:11px;color:var(--txt-dim);background:#121b23;border:none;border-right:1px solid var(--line);padding:7px 9px;cursor:pointer;transition:.12s}
+.seg button:last-child{border-right:none}
+.seg button:hover{color:var(--txt);background:#18242e}
+.seg button.on{background:var(--accent-dim);color:#eafffb}
+.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.toggle{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:11px;letter-spacing:.05em;cursor:pointer;user-select:none}
+.toggle input{position:absolute;opacity:0;pointer-events:none}
+.tswitch{width:34px;height:18px;border-radius:10px;background:#16212b;border:1px solid var(--line);position:relative;transition:.15s}
+.tswitch::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--txt-faint);transition:.15s}
+.toggle input:checked + .tswitch{background:var(--accent-dim);border-color:var(--accent)}
+.toggle input:checked + .tswitch::after{transform:translateX(16px);background:var(--accent)}
+.toggle input:focus-visible + .tswitch{outline:2px solid var(--accent);outline-offset:2px}
+
+.about{position:fixed;inset:0;background:#060a0ecc;backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;padding:24px;z-index:20}
+.about.open{display:flex}
+.about .box{max-width:580px;background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line);border-radius:10px;padding:24px 26px}
+.about h2{margin:0 0 4px;font-size:20px;letter-spacing:.03em}
+.about p{color:var(--txt-dim);font-size:13px;margin:11px 0}
+.about b{color:var(--valid);font-weight:600}
+.about .key{color:var(--accent)}
+.about .x{float:right;color:var(--txt-dim);cursor:pointer;font-size:18px;line-height:1;border:none;background:none}
+.about ul{color:var(--txt-dim);font-size:12.5px;padding-left:18px;margin:10px 0}
+.about li{margin:4px 0}
+
+@media (max-width:900px){.main{grid-template-columns:1fr}.panel{position:static}.spec{display:none}}
+@media (prefers-reduced-motion:reduce){.cell,.sector,.cell .fill{transition:none!important;animation:none!important}}
+</style>
+
+<div class="header">
+  <div class="brand">
+    <span class="logo">FLASH<b>VIS</b></span>
+    <span class="tagline">SPI NOR flash, made visible — watch a <span class="k">log-structured</span> filesystem program, wear, and reclaim.</span>
+  </div>
+  <div class="spec">
+    <b>256 KB</b> · 64 sectors × 4 KB · 256 B pages<br>
+    <span id="specLive">idle</span>
+  </div>
+</div>
+
+<div class="main">
+  <div class="stage">
+    <div class="diewrap"><div class="die" id="die"></div></div>
+    <div class="stagefoot">
+      <span><b id="fUtil">0%</b> live</span>
+      <span><b id="fFree">0</b> pages free</span>
+      <span>pad waste <b id="fWaste">0%</b></span>
+      <span><b id="fErase">0</b> erase cycles</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="card">
+      <h3>Cell states</h3>
+      <div class="legend">
+        <div class="lrow"><span class="sw erased"></span>Erased <small>0xFF · ready</small></div>
+        <div class="lrow"><span class="sw valid"></span>Valid <small>live data</small></div>
+        <div class="lrow"><span class="sw stale"></span>Stale <small>superseded</small></div>
+        <div class="lrow"><span class="sw prog"></span>Programming <small>1→0</small></div>
+        <div class="lrow"><span class="sw erase"></span>Erasing <small>sector → 0xFF</small></div>
+        <div class="lrow"><span class="sw worn"></span>Worn <small>endurance out</small></div>
+        <div class="note">Fill height = <b>bytes programmed</b> in a 256 B page. The empty top is <b>0xFF slack</b> you can still append into — no erase.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Telemetry</h3>
+      <div class="util" title="valid / stale / free"><i class="u-valid" id="uValid" style="width:0"></i><i class="u-stale" id="uStale" style="width:0"></i></div>
+      <div class="grid2">
+        <div class="stat"><span class="n amp" id="sAmp">1.0×</span><span class="l">Write amp</span></div>
+        <div class="stat"><span class="n" id="sWaste">0%</span><span class="l">Padding waste</span></div>
+        <div class="stat"><span class="n" id="sHost">0 KB</span><span class="l">Host written</span></div>
+        <div class="stat"><span class="n" id="sErase">0</span><span class="l">Erase cycles</span></div>
+        <div class="stat"><span class="n" id="sWorn">0</span><span class="l">Worn sectors</span></div>
+        <div class="stat"><span class="n" id="sWmax">0</span><span class="l">Peak wear</span></div>
+        <div class="stat"><span class="n" id="sFiles">0</span><span class="l">Files</span></div>
+        <div class="stat"><span class="n" id="sFree">0</span><span class="l">Pages free</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Sector inspector</h3>
+      <div class="insp" id="insp"><span class="hint">Click a sector on the die to inspect it.</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="transport">
+  <div class="tgroup">
+    <button class="btn primary" id="btnRun"><span class="dot"></span><span id="runLabel">Pause</span></button>
+    <button class="btn" id="btnStep">Step</button>
+  </div>
+  <div class="sep"></div>
+  <div class="tgroup">
+    <button class="btn" id="btnWrite">Write file</button>
+    <button class="btn" id="btnAppend">Append</button>
+    <button class="btn" id="btnChurn">Churn</button>
+    <button class="btn" id="btnDelete">Delete</button>
+    <button class="btn" id="btnGC">Collect garbage</button>
+  </div>
+  <div class="sep"></div>
+  <label class="ctl">SPEED <input type="range" id="speed" min="1" max="30" value="9"></label>
+  <label class="ctl">GRANULE
+    <span class="seg" id="gran">
+      <button data-g="1" class="on">1B</button><button data-g="4">4B</button><button data-g="16">16B</button><button data-g="64">64B</button><button data-g="256">256B</button>
+    </span>
+  </label>
+  <label class="toggle"><input type="checkbox" id="heat"><span class="tswitch"></span>WEAR HEATMAP</label>
+  <div style="margin-left:auto;display:flex;gap:10px">
+    <button class="btn warn" id="btnWipe">Erase chip</button>
+    <button class="btn" id="btnAbout">?</button>
+  </div>
+</div>
+
+<div class="about" id="about">
+  <div class="box">
+    <button class="x" id="aboutClose">✕</button>
+    <h2>What you're looking at</h2>
+    <p>A small <b>SPI NOR</b> region running a <b>log-structured filesystem</b> (the LittleFS / SPIFFS / FASTFFS idea). NOR has one governing asymmetry:</p>
+    <ul>
+      <li><b>Program</b> clears bits <span class="key">1→0</span> at <b>byte</b> granularity — and you can keep programming into <span class="key">0xFF</span> space without erasing, because writing 0xFF clears nothing.</li>
+      <li>To set bits back to <span class="key">1</span> you must <b>erase</b>, and erase only works on a whole <b>4 KB sector</b> — the slow, wearing operation.</li>
+    </ul>
+    <p>Each cell is a 256 B page; its <b>fill height is the bytes programmed</b>. The <b>program granule</b> rounds every write up and pads with <span class="key">0xFF</span> — raise it and watch <b>padding waste</b> climb. <b>Append</b> grows a file into its last page's 0xFF slack in place, no erase — the move NAND can't make.</p>
+    <p>Updates never overwrite: they append a fresh copy and mark the old one <b>stale</b>. When free pages run low the <b>garbage collector</b> takes the sector with the most stale pages, relocates survivors, and erases it — bumping that sector's wear. Flip on the <b>heatmap</b> to see wear pool into hotspots (greedy GC, no wear leveling yet).</p>
+    <p style="color:var(--txt-faint);font-size:11.5px">Endurance is scaled to 200 cycles so wear-out is watchable; real NOR sectors survive ~100k. Space toggles run/pause.</p>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  // ---- geometry ----
+  const SX=8, SY=8, CX=4, CY=4;
+  const NSEC=SX*SY, PPS=CX*CY, NPAGE=NSEC*PPS;
+  const PAGE_BYTES=256, SECTOR_BYTES=PPS*PAGE_BYTES;
+  const ENDURANCE=200, RESERVE=Math.round(PPS*1.6);
+
+  // ---- state ----
+  const ST_ERASED=0, ST_VALID=1, ST_STALE=2, ST_WORN=3;
+  const page=new Array(NPAGE).fill(ST_ERASED);
+  const pageFile=new Array(NPAGE).fill(-1);
+  const pageBytes=new Array(NPAGE).fill(0);   // programmed bytes in a page (0..256)
+  const erases=new Array(NSEC).fill(0);
+  const sectorEls=new Array(NSEC), cellEls=new Array(NPAGE), fillEls=new Array(NPAGE);
+
+  let files=[], nextFileId=1;
+  let hostBytes=0, flashBytes=0, totalErase=0;
+  let head=0, selected=-1, running=true, heat=false, G=1;
+
+  const NAMES=["config.bin","boot.log","fw.img","keys.der","cal.dat","wifi.cfg",
+               "state.db","ota.tmp","certs.pem","index.map","event.log","fs.meta"];
+
+  const secOf=i=>Math.floor(i/PPS), rnd=n=>Math.floor(Math.random()*n);
+  const roundUp=(b,g)=>Math.ceil(b/g)*g;
+  const reduced=window.matchMedia("(prefers-reduced-motion:reduce)").matches;
+
+  function sectorState(s){let e=0,v=0,st=0,w=0;for(let k=0;k<PPS;k++){const t=page[s*PPS+k];
+    if(t===ST_ERASED)e++;else if(t===ST_VALID)v++;else if(t===ST_STALE)st++;else w++;}return{e,v,st,w};}
+  function freeCount(){let n=0;for(let i=0;i<NPAGE;i++)if(page[i]===ST_ERASED)n++;return n;}
+
+  // circular write frontier
+  function markHead(i){if(cellEls[head])cellEls[head].classList.remove("head");head=i;if(cellEls[head])cellEls[head].classList.add("head");}
+  function allocPage(exclSector){
+    for(let n=0;n<NPAGE;n++){const i=(head+n)%NPAGE;
+      if(page[i]===ST_ERASED && (exclSector===undefined || secOf(i)!==exclSector)){markHead((i+1)%NPAGE);return i;}}
+    return -1;
+  }
+
+  // ---- rendering ----
+  function setFill(i){
+    const el=cellEls[i], f=fillEls[i], t=page[i];
+    el.dataset.s = t===ST_ERASED?"erased":t===ST_VALID?"valid":t===ST_STALE?"stale":"worn";
+    f.style.height = (t===ST_VALID||t===ST_STALE) ? (pageBytes[i]/PAGE_BYTES*100)+"%" : "0";
+  }
+  function glow(i,cls){if(reduced)return;const el=cellEls[i];el.classList.remove(cls);void el.offsetWidth;el.classList.add(cls);
+    el.addEventListener("animationend",()=>el.classList.remove(cls),{once:true});}
+  function sweep(el){if(reduced)return;el.classList.remove("erasing");void el.offsetWidth;el.classList.add("erasing");
+    el.addEventListener("animationend",()=>el.classList.remove("erasing"),{once:true});}
+  function wearColor(w){
+    const t=Math.min(1,w/ENDURANCE), stops=[[29,75,82],[201,146,47],[229,72,77]];
+    const seg=t<.5?0:1, lt=t<.5?t*2:(t-.5)*2, a=stops[seg], b=stops[seg+1];
+    const c=a.map((v,k)=>Math.round(v+(b[k]-v)*lt));return`rgb(${c[0]},${c[1]},${c[2]})`;
+  }
+  function refreshHeat(){for(let s=0;s<NSEC;s++)sectorEls[s].style.setProperty("--wc",wearColor(erases[s]));}
+
+  // ---- primitives ----
+  function programPage(i,fid,bytes){page[i]=ST_VALID;pageFile[i]=fid;pageBytes[i]=bytes;flashBytes+=bytes;setFill(i);glow(i,"prog");}
+  function makeStale(i){page[i]=ST_STALE;pageFile[i]=-1;setFill(i);}
+
+  // ---- operations ----
+  function writeFile(bytes){
+    bytes = bytes || (80 + rnd(1120));
+    const prog = roundUp(bytes,G);
+    const need = Math.max(1, Math.ceil(prog/PAGE_BYTES));
+    if(freeCount() < need) return false;
+    const pages=[]; let remaining=prog;
+    for(let k=0;k<need;k++){const p=allocPage();const b=Math.min(PAGE_BYTES,remaining);programPage(p,nextFileId,b);pages.push(p);remaining-=b;}
+    hostBytes+=bytes;
+    files.push({id:nextFileId++, name:NAMES[rnd(NAMES.length)], bytes, pages});
+    return true;
+  }
+  function appendFile(){
+    if(!files.length) return writeFile();
+    const f=files[rnd(files.length)];
+    const add = 40 + rnd(360), prog = roundUp(add,G);
+    const last=f.pages[f.pages.length-1];
+    const slack=(page[last]===ST_VALID)?(PAGE_BYTES-pageBytes[last]):0;
+    if(slack + freeCount()*PAGE_BYTES < prog) return churn();  // no room to append cleanly
+    let need=prog;
+    if(slack>0){const put=Math.min(slack,need);pageBytes[last]+=put;flashBytes+=put;need-=put;setFill(last);glow(last,"append");}
+    while(need>0){const p=allocPage();const b=Math.min(PAGE_BYTES,need);programPage(p,f.id,b);f.pages.push(p);need-=b;glow(p,"append");}
+    f.bytes+=add; hostBytes+=add;
+    return true;
+  }
+  function churn(){
+    if(!files.length) return writeFile();
+    const f=files[rnd(files.length)], bytes=f.bytes, prog=roundUp(bytes,G);
+    const need=Math.max(1,Math.ceil(prog/PAGE_BYTES));
+    if(freeCount()<need) return false;
+    const old=f.pages, fresh=[]; let remaining=prog;
+    for(let k=0;k<need;k++){const p=allocPage();const b=Math.min(PAGE_BYTES,remaining);programPage(p,f.id,b);fresh.push(p);remaining-=b;}
+    old.forEach(makeStale);
+    f.pages=fresh; hostBytes+=bytes;
+    return true;
+  }
+  function deleteFile(){if(!files.length)return false;const idx=rnd(files.length);files[idx].pages.forEach(makeStale);files.splice(idx,1);return true;}
+
+  function eraseSector(s){
+    const base=s*PPS;
+    for(let k=0;k<PPS;k++){const i=base+k;page[i]=ST_ERASED;pageFile[i]=-1;pageBytes[i]=0;setFill(i);}
+    erases[s]++; totalErase++;
+    if(erases[s]>=ENDURANCE){for(let k=0;k<PPS;k++){page[base+k]=ST_WORN;setFill(base+k);}sectorEls[s].classList.add("worn");}
+    sweep(sectorEls[s]);
+    if(heat)sectorEls[s].style.setProperty("--wc",wearColor(erases[s]));
+  }
+  function gcStep(){
+    let best=-1,bestStale=-1;
+    for(let s=0;s<NSEC;s++){
+      if(erases[s]>=ENDURANCE)continue;
+      const {st,v,e}=sectorState(s);
+      if(e===PPS)continue; if(st===0)continue;
+      if(v>0 && freeCount()-v<1)continue;
+      if(st>bestStale){bestStale=st;best=s;}
+    }
+    if(best<0)return false;
+    const base=best*PPS;
+    for(let k=0;k<PPS;k++){
+      const i=base+k;
+      if(page[i]===ST_VALID){
+        const fid=pageFile[i], bytes=pageBytes[i], dst=allocPage(best);
+        if(dst<0)return false;
+        page[dst]=ST_VALID;pageFile[dst]=fid;pageBytes[dst]=bytes;flashBytes+=bytes;setFill(dst);glow(dst,"rel");
+        const f=files.find(x=>x.id===fid);if(f){const pi=f.pages.indexOf(i);if(pi>=0)f.pages[pi]=dst;}
+        page[i]=ST_STALE;
+      }
+    }
+    eraseSector(best);
+    return true;
+  }
+  function readPing(){if(reduced)return;const live=[];for(let i=0;i<NPAGE;i++)if(page[i]===ST_VALID)live.push(i);if(live.length)glow(live[rnd(live.length)],"ping");}
+
+  function tick(){
+    if(freeCount()<=RESERVE){if(gcStep()){updateHUD();return;}}
+    const r=Math.random();
+    if(r<0.34) churn();
+    else if(r<0.56) appendFile();
+    else if(r<0.74){ if(files.length<10) writeFile(); else churn(); }
+    else if(r<0.86) deleteFile();
+    else churn();
+    if(Math.random()<0.5) readPing();
+    updateHUD();
+  }
+
+  // ---- HUD ----
+  const $=id=>document.getElementById(id);
+  function setTxt(id,v){const e=$(id);if(e)e.textContent=v;}
+  function updateHUD(){
+    const c=counts();
+    const liveData=files.reduce((a,f)=>a+f.bytes,0);
+    const reserved=c.v*PAGE_BYTES;
+    const waste=reserved? Math.max(0,Math.round(100*(1-liveData/reserved))):0;
+    const usableBytes=(NPAGE-c.w)*PAGE_BYTES;
+    const util=usableBytes? Math.round(100*liveData/usableBytes):0;
+    const amp=hostBytes? flashBytes/hostBytes:1;
+    let worn=0,maxW=0;for(let s=0;s<NSEC;s++){if(erases[s]>=ENDURANCE)worn++;if(erases[s]>maxW)maxW=erases[s];}
+
+    $("uValid").style.width=(100*c.v/NPAGE)+"%";
+    $("uStale").style.width=(100*c.st/NPAGE)+"%";
+    setTxt("sAmp",amp.toFixed(1)+"×"); setTxt("sWaste",waste+"%");
+    setTxt("sHost",(hostBytes/1024).toFixed(1)+" KB");
+    setTxt("sErase",totalErase); setTxt("sWorn",worn); setTxt("sWmax",maxW);
+    setTxt("sFiles",files.length); setTxt("sFree",c.e);
+    setTxt("fUtil",util+"%"); setTxt("fFree",c.e); setTxt("fWaste",waste+"%"); setTxt("fErase",totalErase);
+    $("sWorn").classList.toggle("hot",worn>0);
+    $("specLive").textContent=(running?"programming":"paused")+" · G="+G+"B · "+c.e+" free";
+    if(heat)refreshHeat();
+    if(selected>=0)renderInspector(selected);
+  }
+  function counts(){let e=0,v=0,st=0,w=0;for(let i=0;i<NPAGE;i++){const t=page[i];
+    if(t===ST_ERASED)e++;else if(t===ST_VALID)v++;else if(t===ST_STALE)st++;else w++;}return{e,v,st,w};}
+
+  function renderInspector(s){
+    const {e,v,st,w}=sectorState(s);
+    const addr=(s*SECTOR_BYTES).toString(16).toUpperCase().padStart(5,"0");
+    const worn=erases[s]>=ENDURANCE, wpct=Math.min(100,Math.round(100*erases[s]/ENDURANCE));
+    let used=0;for(let k=0;k<PPS;k++)if(page[s*PPS+k]===ST_VALID)used+=pageBytes[s*PPS+k];
+    const fset=new Set();for(let k=0;k<PPS;k++){const fid=pageFile[s*PPS+k];if(fid>0){const f=files.find(x=>x.id===fid);if(f)fset.add(f.name);}}
+    let h=`<div class="addr">sector ${s} · 0x${addr}</div>`;
+    h+=`<div class="row"><span>erase cycles</span><span>${erases[s]}${worn?" · worn":""}</span></div>`;
+    h+=`<div class="wear-bar"><i style="width:${wpct}%;background:${wearColor(erases[s])}"></i></div>`;
+    h+=`<div class="row"><span>valid · stale · free</span><span>${v} · ${st} · ${e}</span></div>`;
+    h+=`<div class="row"><span>bytes live</span><span>${used} / ${SECTOR_BYTES}</span></div>`;
+    if(fset.size)h+=`<div class="files">`+[...fset].map(n=>`<span class="chip">${n}</span>`).join("")+`</div>`;
+    else if(!worn)h+=`<div class="files"><span class="hint">no live data</span></div>`;
+    $("insp").innerHTML=h;
+  }
+
+  // ---- build DOM ----
+  const die=$("die");
+  for(let s=0;s<NSEC;s++){
+    const sec=document.createElement("div");sec.className="sector";
+    for(let k=0;k<PPS;k++){
+      const gi=s*PPS+k;
+      const cell=document.createElement("div");cell.className="cell";cell.dataset.s="erased";
+      const fill=document.createElement("i");fill.className="fill";cell.appendChild(fill);
+      sec.appendChild(cell);cellEls[gi]=cell;fillEls[gi]=fill;
+    }
+    sec.addEventListener("click",()=>{if(selected>=0)sectorEls[selected].classList.remove("sel");selected=s;sec.classList.add("sel");renderInspector(s);});
+    die.appendChild(sec);sectorEls[s]=sec;
+  }
+  cellEls[0].classList.add("head");
+
+  // ---- loop ----
+  let timer=null;
+  const speedMs=()=>Math.round(560/(+$("speed").value));
+  function schedule(){clearInterval(timer);if(running)timer=setInterval(tick,speedMs());}
+
+  // ---- controls ----
+  $("btnRun").addEventListener("click",()=>{running=!running;$("runLabel").textContent=running?"Pause":"Run";
+    $("btnRun").querySelector(".dot").style.background=running?"currentColor":"#241a06";schedule();updateHUD();});
+  $("btnStep").addEventListener("click",tick);
+  $("btnWrite").addEventListener("click",()=>{writeFile();updateHUD();});
+  $("btnAppend").addEventListener("click",()=>{appendFile();updateHUD();});
+  $("btnChurn").addEventListener("click",()=>{churn();updateHUD();});
+  $("btnDelete").addEventListener("click",()=>{deleteFile();updateHUD();});
+  $("btnGC").addEventListener("click",()=>{gcStep();updateHUD();});
+  $("speed").addEventListener("input",schedule);
+  $("gran").addEventListener("click",e=>{const b=e.target.closest("button");if(!b)return;
+    G=+b.dataset.g;[...$("gran").children].forEach(x=>x.classList.toggle("on",x===b));updateHUD();});
+  $("heat").addEventListener("change",e=>{heat=e.target.checked;die.classList.toggle("heat",heat);if(heat)refreshHeat();});
+  $("btnWipe").addEventListener("click",()=>{
+    for(let s=0;s<NSEC;s++){const base=s*PPS, had=sectorState(s).e<PPS;
+      for(let k=0;k<PPS;k++){page[base+k]=ST_ERASED;pageFile[base+k]=-1;pageBytes[base+k]=0;setFill(base+k);}
+      sectorEls[s].classList.remove("worn");if(had){erases[s]++;totalErase++;sweep(sectorEls[s]);}}
+    files=[];hostBytes=0;flashBytes=0;markHead(0);if(heat)refreshHeat();updateHUD();});
+  $("btnAbout").addEventListener("click",()=>$("about").classList.add("open"));
+  $("aboutClose").addEventListener("click",()=>$("about").classList.remove("open"));
+  $("about").addEventListener("click",e=>{if(e.target===$("about"))$("about").classList.remove("open");});
+  document.addEventListener("keydown",e=>{if(e.key==="Escape")$("about").classList.remove("open");
+    if(e.key===" "&&e.target.tagName!=="INPUT"&&e.target.tagName!=="BUTTON"){e.preventDefault();$("btnRun").click();}});
+
+  // ---- seed ----
+  for(let n=0;n<7;n++)writeFile();
+  updateHUD();schedule();
+})();
+</script>
