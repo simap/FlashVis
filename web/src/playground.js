@@ -7,6 +7,28 @@
  */
 import { createRunner } from './runner.js';
 import { createViz } from './viz.js';
+import { createChurnModel, CHURN_CLASS, CHURN_EVENT } from './churn.js';
+
+// Auto-workload churn config, scaled to the 256 KiB (4096×64) device. The model
+// drives the FS toward a steady-state live size instead of overfilling it. Sizes
+// are kept well under capacity (no 350 KiB class, forced-large disabled) so a
+// single write never runs the chip out of space; deletes keep live ≤ target+slack.
+const CHURN_SEED = 0x00c0ffee;
+const DEVICE_BYTES = 4096 * 64;                    // 256 KiB
+const CHURN_TARGET_LIVE = 96 * 1024;               // ~37.5% of the chip — leaves GC headroom
+const CHURN_TARGET_SLACK = 16 * 1024;              // tolerance above target before forced deletes
+const CHURN_TARGET_WRITTEN = 0xffffffff;           // effectively never "DONE" — run forever
+const CHURN_FORCE_LARGE_AFTER = 0xffffffff;        // disabled: never force a large write
+const churnProfile = () => ({
+  namePrefix: 'w',
+  replacePercent: 25,
+  protectFirstLarge: false,
+  classes: [
+    { key: CHURN_CLASS.SMALL,  name: 'small',  weight: 800, minSize: 2 * 1024,  maxSize: 6 * 1024 },
+    { key: CHURN_CLASS.MEDIUM, name: 'medium', weight: 150, minSize: 8 * 1024,  maxSize: 20 * 1024 },
+    { key: CHURN_CLASS.LARGE,  name: 'large',  weight: 50,  minSize: 40 * 1024, maxSize: 40 * 1024 },
+  ],
+});
 
 const $ = (id) => document.getElementById(id);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -41,6 +63,15 @@ async function boot() {
   const geometry = { sectorSize: 4096, sectorCount: 64, pageSize: 256, granule: 1 };
   log('loading FASTFFS (WASM)…', 'sys');
   const runner = await createRunner(geometry);
+  const churn = createChurnModel({
+    seed: CHURN_SEED,
+    targetLiveBytes: CHURN_TARGET_LIVE,
+    targetWrittenBytes: CHURN_TARGET_WRITTEN,
+    targetSlackBytes: CHURN_TARGET_SLACK,
+    forceLargeAfterBytes: CHURN_FORCE_LARGE_AFTER,
+    profile: churnProfile(),
+    slotCount: 256,
+  });
   const viz = createViz(runner.device);
   viz.mountDie($('die'));
   viz.attachInspector($('insp'));
@@ -95,7 +126,7 @@ async function boot() {
     return files;
   };
 
-  freshFilesystem(runner);   // empty + paused — nothing is written until Run or a console op
+  freshFilesystem(runner, churn);   // empty + paused — nothing is written until Run or a console op
   log('formatted + mounted — empty and paused. Press Run, or drive it from the console.', 'sys');
 
   setInterval(() => refreshHUD(runner, viz), 160);
@@ -119,15 +150,15 @@ async function boot() {
     if (!running) return;
     if (atMax) {
       const t0 = performance.now();
-      while (performance.now() - t0 < 8 && viz.pending() < 3000) workloadStep(fs, gcRatio, names);
+      while (performance.now() - t0 < 8 && viz.pending() < 3000) workloadStep(fs, gcRatio, churn);
     } else if (viz.pending() === 0) {
-      workloadStep(fs, gcRatio, names);
+      workloadStep(fs, gcRatio, churn);
     }
   }, 16);
 
   // ---- controls ----
   $('btnRun').addEventListener('click', () => setRunning(!running));
-  $('btnStep').addEventListener('click', () => workloadStep(fs, gcRatio, names));
+  $('btnStep').addEventListener('click', () => workloadStep(fs, gcRatio, churn));
   $('btnWrite').addEventListener('click', () => fs.write(NAMES[rnd(NAMES.length)], randomBytes(300 + rnd(4000))));
   $('btnLs').addEventListener('click', () => lsStream(true));
   $('btnDelete').addEventListener('click', () => {
@@ -136,7 +167,7 @@ async function boot() {
     else log('  (nothing to delete)', 'sys');
   });
   $('btnGC').addEventListener('click', () => fs.gcStep());
-  $('btnFormat').addEventListener('click', () => { freshFilesystem(runner); log('re-formatted + mounted (empty chip)', 'sys'); });
+  $('btnFormat').addEventListener('click', () => { freshFilesystem(runner, churn); log('re-formatted + mounted (empty chip)', 'sys'); });
 
   atMax = applySpeed(+$('speed').value, viz);
   $('speed').addEventListener('input', (e) => { atMax = applySpeed(+e.target.value, viz); });
@@ -149,7 +180,7 @@ async function boot() {
     const b = e.target.closest('button'); if (!b) return;
     [...$('gran').children].forEach((x) => x.classList.toggle('on', x === b));
     runner.config({ granule: +b.dataset.g });
-    freshFilesystem(runner);
+    freshFilesystem(runner, churn);
     log(`program granule → ${b.dataset.g} B (re-formatted)`, 'sys');
   });
   $('heat').addEventListener('change', (e) => viz.setHeatmap(e.target.checked, $('die')));
@@ -189,25 +220,30 @@ async function boot() {
   help();
 }
 
-function freshFilesystem(runner) {
+function freshFilesystem(runner, churn) {
   runner.format();
   runner.mount();
+  if (churn) churn.reset();   // start the churn model over from its seed, matching the empty chip
 }
 
 // gcRatio = share of steps spent on a background GC step vs a foreground file op.
 // Turn it down and FASTFFS falls back to inline (foreground) GC during writes —
 // watch individual write() times spike in the log and garbage pile up.
-// Churn model: pick create/replace/delete/read from our own record of what
-// exists (runner.names()), so a step never has to list the directory first.
-function workloadStep(fs, gcRatio, names) {
-  try {
-    if (Math.random() < gcRatio) { fs.gcStep(); return; }   // background GC step
-    const known = names();
-    const r = Math.random();
-    if (r < 0.6 || !known.length) fs.write(NAMES[rnd(NAMES.length)], randomBytes(200 + rnd(4200)));
-    else if (r < 0.8) fs.remove(known[rnd(known.length)]);
-    else fs.read(known[rnd(known.length)]);
-  } catch { /* logged by timed() */ }
+// Churn model: the ported FASTFFS generator (churn.js) decides the next op and
+// drives the FS toward a steady-state live size. Each step is either a background
+// GC step or one model event (a write or a delete), applied to the model only
+// after the FS op so the model's slot table stays in lockstep with the chip.
+function workloadStep(fs, gcRatio, churn) {
+  if (Math.random() < gcRatio) { try { fs.gcStep(); } catch { /* logged by timed() */ } return; }
+  const ev = churn.next();
+  if (ev.type === CHURN_EVENT.WRITE) {
+    try { fs.write(ev.name, randomBytes(ev.size)); } catch { /* logged by timed() */ }
+    churn.apply(ev);
+  } else if (ev.type === CHURN_EVENT.DELETE) {
+    try { fs.remove(ev.name); } catch { /* logged by timed() */ }
+    churn.apply(ev);
+  }
+  // DONE / NO_SLOT: nothing to issue this step.
 }
 
 // slider 0..100 → sim-ns per real-ms on a log scale. Real flash time = 1e6.
