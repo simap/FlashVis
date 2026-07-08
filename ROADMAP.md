@@ -30,20 +30,36 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
 - [x] **`fffs_inspect_live_map` upstreamed to FASTFFS `main`** (`c18ab22`, pushed to
       `origin`). A fresh clone now gets per-page obsolete coloring; the parent gitlink already
       pointed at this SHA, so no submodule bump was needed.
-- [ ] Geometry controls (sector size/count, program granule) wired through `ff_config`.
 - [ ] Strip the now-dead CSS in `index.html`: `@keyframes prog/ping/erase-wash` plus the
       `.cell.prog`/`.sector.erasing` rules, all replaced by the Web Animations API.
+- [ ] **Port the FASTFFS churn model to JS** (`benchmarks/churn_model/`). Give it a target
+      live size so the auto-runner fills toward a steady state instead of monotonically
+      overfilling the FS and throwing out-of-space errors.
+- [ ] **Churn workload tuning knobs.** Expose the churn model's parameters in the UI — target
+      live size, file-size distribution, create/replace/delete mix, seed — so the workload can
+      be shaped (and reproduced) instead of hardcoded.
+- [ ] **Integrate LittleFS**: submodule under `fs/littlefs/`, a `bindings/littlefs/shim.c`
+      onto the same three HAL imports, WASM build, plus whatever live/inspect hooks the viz needs.
+- [ ] **UI: switch filesystem implementation.** A control to pick which FS drives the die;
+      switching is simple — fresh state, no cross-FS carryover.
+- [ ] **UI: lockstep multiple filesystems.** Run the same deterministic churn workload across
+      several FS implementations in parallel; the UI switches which die/log view is shown (each
+      FS has its own timing, so logs and playback pace differ). Two modes:
+  - **Race** — each FS runs the workload as fast as possible; monitor their progress against
+    each other.
+  - **Pace** — the simulation paces to the slowest FS so all stay at the same workload step
+    (files in sync, die images directly comparable), while tracking each FS's total active time.
 
 ## Borrow from FASTFFS later (per Ben)
-The FASTFFS repo already contains realistic, cross-filesystem workload and fault machinery we
-should reuse rather than reinvent:
-- `benchmarks/churn_model/` — a churn workload model (create/replace/delete mixes).
-- `benchmarks/vfs_bench_common/` — a common VFS benchmark harness run against multiple
-  filesystems (LittleFS, FatFs, JesFS, SPIFFS) — the basis for side-by-side comparison in the viz.
-- `tools/fffs_api_crash_sweep.c` — simulates partial writes / power loss during churn; great for
-  visualizing crash-safety and recovery.
-- `benchmarks/esp32s3_*` — real device configs worth mirroring as presets.
+The FASTFFS repo has more reusable workload and fault machinery worth pulling rather than
+reinventing (the churn model and VFS workloads are already promoted into **Next** above):
+- `tools/fffs_api_crash_sweep.c` — simulates partial writes / power loss during churn; the basis
+  for a future crash-safety / recovery visualization (nothing on the near roadmap models this yet).
+- `benchmarks/esp32s3_*` — more real device configs. The ESP32-S3 *timing* preset is already
+  mirrored in `device.js`; these would seed a preset picker if we revisit configurable geometry.
 
 ## Later filesystems
-- [ ] LittleFS and SPIFFS behind the same shim contract (`fs/*/`), so the playground can load and
-      compare drivers on identical workloads.
+Behind the same shim contract (`fs/*/`) — once LittleFS proves the second-driver path and the
+switch/lockstep UI above, adding more drivers is mechanical:
+- [ ] SPIFFS
+- [ ] JesFS

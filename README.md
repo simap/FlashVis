@@ -31,6 +31,15 @@ Because the chip lives in JS, NOR semantics, wear counting, and the event stream
 free — and write amplification, fragmentation, and wear hotspots are *measured from the real
 driver*, not fabricated.
 
+## Principles
+
+- **Real driver, emulated chip.** The actual filesystem runs (compiled to WASM); only the NOR
+  device is emulated, and faithfully — AND-only programming, sector erase, wear counted.
+- **Measured, not faked.** Write amplification, fragmentation, wear, and op timing come off the
+  real driver and a measured device preset — no fabricated numbers.
+- **Simulation and animation in lockstep.** The die shows exactly what the driver did, paced to
+  real flash time.
+
 ## Layout
 
     bindings/fastffs/shim.c   FASTFFS backend (read/program/erase) + flat WASM API
