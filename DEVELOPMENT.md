@@ -56,11 +56,18 @@ Non-obvious invariants, each documented where it's enforced — change the code,
 - **Three FS facades.** `runner` (low-level) → `fs` (synchronous, used by the auto-workload) →
   `pfs` (paced — what the console sees as `fs`; `await` blocks for the op's simulated time via
   `viz.barrier`). The workload and Delete pick victims from `runner.names()`, never a dir scan.
-- **Decode WASM strings from a `slice()` copy, never a HEAP view.** `ALLOW_MEMORY_GROWTH` makes
-  `HEAPU8.buffer` a *resizable* ArrayBuffer, and browser `TextDecoder.decode()` — including the one
-  inside emscripten's `UTF8ToString` — rejects a view backed by one. `runner.js` `list()`/`dirRead()`
-  copy first. Node's `TextDecoder` is lax, so the headless guards can't catch a regression here; it
-  surfaces only in the browser (e.g. `ls()` throwing "ArrayBuffer value must not be resizable").
+- **Fixed WASM memory; decode strings from a `slice()` copy anyway.** The shim builds with a fixed
+  `-sINITIAL_MEMORY` and no `ALLOW_MEMORY_GROWTH` ([ADR-0013](adr/0013-fixed-wasm-memory.md)), so
+  `HEAPU8.buffer` is a plain ArrayBuffer. That matters because with growth *on* the buffer is
+  resizable, and browser `TextDecoder.decode()` — including emscripten's `UTF8ToString` — rejects a
+  view backed by a resizable buffer (Node's is lax, so headless guards miss it; it only shows in the
+  browser, e.g. `ls()` throwing "must not be resizable"). `runner.js` `list()`/`dirRead()` decode
+  from copies so it stays safe even if growth ever returns.
+- **The memory budget is a hard ceiling, `ABORTING_MALLOC`.** An over-budget allocation aborts, it
+  doesn't grow — so a much larger geometry or file count than the tests exercise could need a bigger
+  `-sINITIAL_MEMORY`. The integrity churn test guards the floor: it allocs a full `read()` buffer
+  (`sectorSize*sectorCount`) per read-back, so an undersized heap crashes `npm run ci` (empirically
+  below ~384 KiB for the default geometry; FASTFFS is built at 16 MB, ~40× that).
 
 Full rationale lives in ADRs: Web Animations API over CSS keyframes
 ([ADR-0009](adr/0009-timed-playback-and-pacing.md)); ESP32-S3 timing preset and inspect-driven

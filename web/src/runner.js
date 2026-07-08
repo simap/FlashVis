@@ -94,9 +94,10 @@ export async function createRunner(geometry = {}) {
       try {
         const size = M._ff_dir_read(p, cap);
         if (size < 0) return null;
-        // Decode from a slice() copy, never a HEAP view: ALLOW_MEMORY_GROWTH makes
-        // HEAPU8.buffer a *resizable* ArrayBuffer, and TextDecoder.decode() (incl. the
-        // one inside emscripten's UTF8ToString) refuses a view backed by one.
+        // Decode from a slice() copy, never a HEAP view. We build fixed-memory (ADR-0013)
+        // so HEAPU8.buffer is a plain ArrayBuffer and a view would work — but copying stays
+        // safe if ALLOW_MEMORY_GROWTH ever returns: a resizable buffer makes browser
+        // TextDecoder (incl. the one in emscripten's UTF8ToString) reject views onto it.
         let end = p; while (end < p + cap && M.HEAPU8[end] !== 0) end++;
         return { name: dec.decode(M.HEAPU8.slice(p, end)), size };
       } finally { M._free(p); }
