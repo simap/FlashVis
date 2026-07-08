@@ -36,9 +36,12 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       sequence (reproduces FASTFFS benchmark runs; feeds every FS the same logical workload for
       lockstep), idiomatic JS above the PRNG. A target live size fills toward a steady state
       instead of monotonically overfilling. See [ADR-0010](adr/0010-churn-model-in-js.md).
-- [ ] **Churn workload tuning knobs.** Expose the churn model's parameters in the UI — target
-      live size, file-size distribution, create/replace/delete mix, seed — so the workload can
-      be shaped (and reproduced) instead of hardcoded.
+- [ ] **Console FS API sweep.** A two-tier console surface — friendly top-level pokes
+      (`writeFile`/`readFile`/`deleteFile`/`ls`/`getFiles`, all paced, returning descriptors so a
+      script self-tracks) over a raw handle-based `fs.` layer (`fs.open`/`fs.openDir` file/dir
+      proxies with partial/seeked I/O, stat, prefix), on a static handle pool in the shim, plus a
+      setup-mode toggle. Brings the shim ABI to its final shape **before** LittleFS, so the second
+      driver is built against it. See [ADR-0014](adr/0014-console-fs-api.md).
 - [ ] **Integrate LittleFS**: submodule under `fs/littlefs/`, a `bindings/littlefs/shim.c`
       onto the same three HAL imports and the uniform shim ABI ([ADR-0011](adr/0011-uniform-fs-driver-abi.md)),
       WASM build, plus a native `lfs_inspect.c` liveness hook ([ADR-0012](adr/0012-per-fs-liveness-inspect.md)).
@@ -52,6 +55,10 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
     each other.
   - **Pace** — the simulation paces to the slowest FS so all stay at the same workload step
     (files in sync, die images directly comparable), while tracking each FS's total active time.
+- [ ] **Churn workload tuning knobs.** Expose the churn model's parameters in the UI — target
+      live size, file-size distribution, create/replace/delete mix, seed — so the workload can be
+      shaped (and reproduced) instead of hardcoded. (Later — the hardcoded model is fine for
+      testing as is; this is more an exploration nicety.)
 
 ## Borrow from FASTFFS later
 The FASTFFS repo has more reusable workload and fault machinery worth pulling rather than

@@ -31,6 +31,7 @@ new ADR that supersedes it, so the trail of *why it changed* survives.
 | [0011](0011-uniform-fs-driver-abi.md) | A uniform FS-driver ABI behind the WASM shim | Accepted |
 | [0012](0012-per-fs-liveness-inspect.md) | Per-FS liveness via native inspect hooks | Accepted |
 | [0013](0013-fixed-wasm-memory.md) | Fixed WASM memory footprint (no `ALLOW_MEMORY_GROWTH`) | Accepted |
+| [0014](0014-console-fs-api.md) | Console FS API — friendly pokes + raw handles over a static pool | Accepted |
 
 ADRs 0001–0004 document the throwaway JS prototype that established the visual language.
 They're kept as history; the live architecture starts at 0005.
