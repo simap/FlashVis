@@ -64,10 +64,13 @@ Non-obvious invariants, each documented where it's enforced — change the code,
   browser, e.g. `ls()` throwing "must not be resizable"). `runner.js` `list()`/`dirRead()` decode
   from copies so it stays safe even if growth ever returns.
 - **The memory budget is a hard ceiling, `ABORTING_MALLOC`.** An over-budget allocation aborts, it
-  doesn't grow — so a much larger geometry or file count than the tests exercise could need a bigger
-  `-sINITIAL_MEMORY`. The integrity churn test guards the floor: it allocs a full `read()` buffer
-  (`sectorSize*sectorCount`) per read-back, so an undersized heap crashes `npm run ci` (empirically
-  below ~384 KiB for the default geometry; FASTFFS is built at 16 MB, ~40× that).
+  doesn't grow. The budget is driven by geometry — the shim's whole-file `read()` cache is
+  `sectorSize*sectorCount`, the whole device capacity — not by which FS is loaded (the filesystems
+  themselves want tens of KB), so only a device geometry larger than 16 MB would need a bigger
+  `-sINITIAL_MEMORY`.
+  The integrity churn test guards the floor: it allocs a full `read()` buffer per read-back, so an
+  undersized heap crashes `npm run ci` (empirically below ~384 KiB for the default geometry; the
+  shared budget is 16 MB, ~40× that).
 
 Full rationale lives in ADRs: Web Animations API over CSS keyframes
 ([ADR-0009](adr/0009-timed-playback-and-pacing.md)); ESP32-S3 timing preset and inspect-driven
