@@ -2,23 +2,51 @@
  * Loads a filesystem WASM module, binds it to an emulated NOR device, and
  * exposes a small, friendly FS API. All the WASM pointer marshalling lives here
  * so the playground and console can speak in strings and Uint8Arrays.
+ *
+ * FS-agnostic per ADR-0011: the module is picked by `fsId` (dist/<fsId>.mjs)
+ * rather than hard-bound to FASTFFS, and the optional introspection methods
+ * (gcStep/sectorClasses/liveMap) are gated on the loaded module's advertised
+ * `ff_caps()` bitmask plus symbol presence, so a driver that omits or disclaims
+ * one degrades to null/no-op instead of throwing on a missing `_ff_*` export.
  */
-import createModule from '../../dist/fastffs.mjs';
 import { createNorDevice } from './device.js';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-export async function createRunner(geometry = {}) {
+// ff_caps() bits (ADR-0011) — must match every ff_* shim (bindings/*/shim.c).
+const FF_CAP_GC             = 1 << 0;
+const FF_CAP_SECTOR_CLASSES = 1 << 1;
+const FF_CAP_LIVE_MAP       = 1 << 2;
+// FF_CAP_APPEND (1 << 3): ff_open mode 2 ('a') is implemented — not runner-gated
+// yet (open() just forwards the mode and lets ff_open reject it), listed here
+// for the bit layout to stay visibly complete against the ADR-0011 contract.
+
+const FF_ABI_VERSION = 1;
+
+export async function createRunner(geometry = {}, fsId = 'fastffs') {
   const sectorSize  = geometry.sectorSize  ?? 4096;
   const sectorCount = geometry.sectorCount ?? 64;
   const pageSize    = geometry.pageSize    ?? 256;
   let   granule     = geometry.granule     ?? 1;
 
   const device = createNorDevice({ sectorSize, sectorCount, pageSize });
+  const { default: createModule } = await import(`../../dist/${fsId}.mjs`);
   const M = await createModule();
   device.attach(M);
   M.flashDevice = device;
+
+  const abiVersion = M._ff_abi_version();
+  if (abiVersion !== FF_ABI_VERSION) {
+    throw new Error(`createRunner: ${fsId} reports ff_abi_version ${abiVersion}, runner expects ${FF_ABI_VERSION}`);
+  }
+  const caps = M._ff_caps() >>> 0;
+  // Gate an optional method on BOTH symbol presence and its cap bit: a shim may
+  // omit the export outright, or export it while disclaiming full support.
+  const hasCap = (name, bit) => typeof M['_ff_' + name] === 'function' && (caps & bit) !== 0;
+  const canGc             = hasCap('gc_step', FF_CAP_GC);
+  const canSectorClasses  = hasCap('sector_classes', FF_CAP_SECTOR_CLASSES);
+  const canLiveMap        = hasCap('live_map', FF_CAP_LIVE_MAP);
 
   let hostBytes = 0;        // bytes the "host" asked to write — the WA denominator
   const tracked = new Set(); // names we've written (a churn-model view of what exists)
@@ -62,6 +90,8 @@ export async function createRunner(geometry = {}) {
 
   const api = {
     device,
+    name: fsId,
+    caps,
     geometry: { sectorSize, sectorCount, pageSize, get granule() { return granule; } },
     get hostBytes() { return hostBytes; },
 
@@ -205,15 +235,19 @@ export async function createRunner(geometry = {}) {
       } finally { M._free(out); }
     },
 
-    /** One opportunistic GC step; returns the fffs_gc_action code. */
-    gcStep() { return check(M._ff_gc_step(), 'gc'); },
+    /** One opportunistic GC step; returns the fffs_gc_action code, or null (no-op)
+     *  when the driver doesn't advertise FF_CAP_GC / export ff_gc_step. */
+    gcStep() { return canGc ? check(M._ff_gc_step(), 'gc') : null; },
 
     fsinfo() {
       return { files: M._ff_committed_files() >>> 0, bytes: M._ff_committed_bytes() >>> 0 };
     },
 
-    /** Per-sector role: 0 erased, 1 live, 2 obsolete, 3 index, 4 other. Silent (no device traffic). */
+    /** Per-sector role: 0 erased, 1 live, 2 obsolete, 3 index, 4 other. Silent (no
+     *  device traffic). Null when the driver doesn't advertise FF_CAP_SECTOR_CLASSES
+     *  / export ff_sector_classes. */
     sectorClasses() {
+      if (!canSectorClasses) return null;
       const p = M._malloc(sectorCount);
       try {
         if (M._ff_sector_classes(p) < 0) return null;
@@ -221,8 +255,11 @@ export async function createRunner(geometry = {}) {
       } finally { M._free(p); }
     },
 
-    /** Per-page liveness (reachability walk): 0 erased, 1 metadata, 2 obsolete, 3 live-data. Silent. */
+    /** Per-page liveness (reachability walk): 0 erased, 1 metadata, 2 obsolete,
+     *  3 live-data. Silent. Null when the driver doesn't advertise FF_CAP_LIVE_MAP
+     *  / export ff_live_map. */
     liveMap() {
+      if (!canLiveMap) return null;
       const pages = (sectorSize * sectorCount) / pageSize;
       const p = M._malloc(pages);
       try {
