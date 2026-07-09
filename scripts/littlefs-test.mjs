@@ -2,8 +2,8 @@
  * Pipeline proof: drive REAL LittleFS (compiled to WASM) against the JS-emulated
  * NOR device, entirely in Node, through the FS-agnostic runner (ADR-0011):
  * createRunner(geometry, 'littlefs'). Format → mount → write → read-back → list,
- * plus the ABI/caps contract (ff_abi_version, ff_caps, and the Phase-1 cap set —
- * see the locked contract: GC|APPEND, no sector_classes/live_map yet).
+ * plus the ABI/caps contract (ff_abi_version, ff_caps) and the native liveness
+ * hook (ff_live_map, ADR-0012): caps GC|APPEND|LIVE_MAP, sector_classes still off.
  */
 import { createRunner } from '../web/src/runner.js';
 
@@ -40,14 +40,20 @@ console.log('list      ->\n' + list.map((e) => `  ${e.name}\t${e.size}`).join('\
 console.log('fsinfo    ->', runner.fsinfo());
 console.log('device    ->', runner.device.stats);
 
-// ADR-0011 capability gating: Phase-1 LittleFS advertises GC|APPEND (0x9) and
-// omits ff_sector_classes/ff_live_map — the runner must degrade those to null
-// rather than crash on a missing export.
+// ADR-0011 capability gating: LittleFS advertises GC|APPEND|LIVE_MAP (0xd) and
+// omits ff_sector_classes — the runner must degrade that to null rather than
+// crash on the missing export, while liveMap() returns a real classification.
 const okAbi = runner.name === 'littlefs';
-const okCaps = runner.caps === 0x9; // FF_CAP_GC | FF_CAP_APPEND, per the locked contract
+const okCaps = runner.caps === 0xd; // FF_CAP_GC | FF_CAP_APPEND | FF_CAP_LIVE_MAP
 const okGc = runner.gcStep() !== null;
 const okSectorClasses = runner.sectorClasses() === null;
-const okLiveMap = runner.liveMap() === null;
+// The native hook (ADR-0012) classifies erased/metadata/obsolete/live per page.
+// With two files written, expect a valid map that shows both metadata and live
+// data — proving it actually walked the FS, not just returned zeros.
+const npages = (SECTOR_SIZE * SECTOR_COUNT) / PAGE_SIZE;
+const lm = runner.liveMap();
+const okLiveMap = lm !== null && lm.length === npages && [...lm].every((v) => v >= 0 && v <= 3)
+  && [...lm].some((v) => v === 1) && [...lm].some((v) => v === 3);
 const okContent = got === payload;
 const okList = list.some((e) => e.name === 'hello.txt' && e.size === enc.encode(payload).length)
   && list.some((e) => e.name === 'firmware.bin' && e.size === big.length);
@@ -60,7 +66,7 @@ if (failed.length) {
   process.exit(1);
 }
 console.log('\nPASS — LittleFS formatted, mounted, wrote two files and read one back,');
-console.log('       ABI version 1 confirmed, caps 0x9 (GC|APPEND), sectorClasses/liveMap');
-console.log('       correctly gated to null, issuing', runner.device.stats.reads, 'reads /',
+console.log('       ABI version 1 confirmed, caps 0xd (GC|APPEND|LIVE_MAP), sectorClasses');
+console.log('       gated to null, live map classifies metadata+data, issuing', runner.device.stats.reads, 'reads /',
             runner.device.stats.programs, 'programs /', runner.device.stats.erases,
             'erases against the emulated NOR device.');

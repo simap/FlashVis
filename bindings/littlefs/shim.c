@@ -25,11 +25,13 @@ extern int js_flash_prog(uint32_t off, const void *buffer, uint32_t size);
 extern int js_flash_erase(uint32_t off, uint32_t size);
 extern int js_flash_read_quiet(uint32_t off, void *buffer, uint32_t size);
 
-static int g_quiet = 0; /* when set, backend reads are silent (used for inspection) */
+/* g_quiet / g_lfs / g_mounted / g_sector_* are non-static: the liveness hook in
+ * lfs_inspect.c (compiled as a separate TU, ADR-0012) reaches them via extern. */
+int g_quiet = 0; /* when set, backend reads are silent (used for inspection) */
 
 /* ---- geometry (set by ff_config, before format/mount) ---- */
-static uint32_t g_sector_size     = 4096;
-static uint32_t g_sector_count    = 64;
+uint32_t g_sector_size     = 4096;
+uint32_t g_sector_count    = 64;
 static uint32_t g_program_granule = 1;
 
 /* Fixed sizes per the locked contract: cache_size=256 (a factor of the 4096
@@ -64,9 +66,9 @@ static int be_sync(const struct lfs_config *c) {
 }
 
 /* ---- caller-owned filesystem state (LFS_NO_MALLOC: every buffer is static) ---- */
-static lfs_t              g_lfs;
+lfs_t                     g_lfs;
 static struct lfs_config  g_cfg;
-static int                g_mounted = 0;
+int                       g_mounted = 0;
 
 static uint8_t g_read_buffer[LFS_CACHE_SIZE];
 static uint8_t g_prog_buffer[LFS_CACHE_SIZE];
@@ -422,4 +424,6 @@ uint32_t ff_committed_bytes(void) { return committed_walk().bytes; }
 #define FF_CAP_APPEND          (1u << 3)
 
 uint32_t ff_abi_version(void) { return 1; }
-uint32_t ff_caps(void) { return FF_CAP_GC | FF_CAP_APPEND; }
+/* LIVE_MAP is on: the native liveness hook lives in lfs_inspect.c (ADR-0012).
+ * SECTOR_CLASSES stays off — the per-page live map is the driver's coloring. */
+uint32_t ff_caps(void) { return FF_CAP_GC | FF_CAP_APPEND | FF_CAP_LIVE_MAP; }

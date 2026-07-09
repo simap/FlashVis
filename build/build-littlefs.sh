@@ -9,8 +9,11 @@ if [ ! -e fs/littlefs/lfs.h ]; then
 fi
 
 LFS=fs/littlefs
+# lfs_inspect.c #includes lfs.c to reach its static helpers for the liveness hook
+# (ADR-0012), so it is compiled IN PLACE OF lfs.c — one copy of the core, no
+# duplicate symbols. shim.c still links the public lfs_* from that single copy.
 CORE="\
-  $LFS/lfs.c \
+  bindings/littlefs/lfs_inspect.c \
   $LFS/lfs_util.c"
 
 mkdir -p dist
@@ -26,7 +29,7 @@ emcc \
   -Oz -std=c11 \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=node,web \
   -sINITIAL_MEMORY=16MB -sABORTING_MALLOC=1 \
-  -sEXPORTED_FUNCTIONS=_ff_config,_ff_format,_ff_mount,_ff_unmount,_ff_write,_ff_read,_ff_open,_ff_file_read,_ff_file_write,_ff_file_seek,_ff_file_stat,_ff_file_close,_ff_delete,_ff_exists,_ff_stat,_ff_mkdir,_ff_list,_ff_gc_step,_ff_committed_files,_ff_committed_bytes,_ff_abi_version,_ff_caps,_ff_dir_open,_ff_dir_read,_ff_dir_close,_malloc,_free \
+  -sEXPORTED_FUNCTIONS=_ff_config,_ff_format,_ff_mount,_ff_unmount,_ff_write,_ff_read,_ff_open,_ff_file_read,_ff_file_write,_ff_file_seek,_ff_file_stat,_ff_file_close,_ff_delete,_ff_exists,_ff_stat,_ff_mkdir,_ff_list,_ff_gc_step,_ff_committed_files,_ff_committed_bytes,_ff_abi_version,_ff_caps,_ff_dir_open,_ff_dir_read,_ff_dir_close,_ff_live_map,_malloc,_free \
   -sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString,stringToUTF8,lengthBytesUTF8 \
   --js-library build/flash_hal.js \
   -o dist/littlefs.mjs
