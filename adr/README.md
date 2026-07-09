@@ -32,6 +32,8 @@ new ADR that supersedes it, so the trail of *why it changed* survives.
 | [0012](0012-per-fs-liveness-inspect.md) | Per-FS liveness via native inspect hooks | Accepted |
 | [0013](0013-fixed-wasm-memory.md) | Fixed WASM memory footprint (no `ALLOW_MEMORY_GROWTH`) | Accepted |
 | [0014](0014-console-fs-api.md) | Console FS API — friendly pokes + raw handles over a static pool | Accepted |
+| [0015](0015-session-manager-and-executor-seam.md) | A session abstraction, split from a manager, for the FS picker (and later lockstep) | Accepted |
+| [0016](0016-lockstep-coordinator.md) | A lockstep coordinator drives N sessions off one canonical step sequence | Accepted |
 
 ADRs 0001–0004 document the throwaway JS prototype that established the visual language.
 They're kept as history; the live architecture starts at 0005.
