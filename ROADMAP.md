@@ -45,16 +45,24 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
 - [x] **Integrate LittleFS**: submodule under `fs/littlefs/`, a `bindings/littlefs/shim.c`
       onto the same three HAL imports and the uniform shim ABI ([ADR-0011](adr/0011-uniform-fs-driver-abi.md)),
       WASM build, plus a native `lfs_inspect.c` liveness hook ([ADR-0012](adr/0012-per-fs-liveness-inspect.md)).
-- [ ] **UI: switch filesystem implementation.** A control to pick which FS drives the die;
+- [x] **UI: switch filesystem implementation.** A control to pick which FS drives the die;
       switching is simple — fresh state, no cross-FS carryover. Rides on the FS-agnostic
-      `runner.js` from [ADR-0011](adr/0011-uniform-fs-driver-abi.md).
-- [ ] **UI: lockstep multiple filesystems.** Run the same deterministic churn workload across
+      `runner.js` from [ADR-0011](adr/0011-uniform-fs-driver-abi.md). See
+      [ADR-0015](adr/0015-session-manager-and-executor-seam.md) (session/manager split) and
+      [ADR-0016](adr/0016-lockstep-coordinator.md) (the picker became a multi-select once
+      lockstep landed — see below).
+- [x] **UI: lockstep multiple filesystems.** Run the same deterministic churn workload across
       several FS implementations in parallel; the UI switches which die/log view is shown (each
       FS has its own timing, so logs and playback pace differ). Two modes:
   - **Race** — each FS runs the workload as fast as possible; monitor their progress against
     each other.
   - **Pace** — the simulation paces to the slowest FS so all stay at the same workload step
     (files in sync, die images directly comparable), while tracking each FS's total active time.
+
+      A coordinator (`web/src/lockstep.js`) generates one canonical, seeded step sequence and
+      gives every participating session its own cursor into it — Race gates each session on its
+      own player draining, Pace barrier-syncs every session per step. See
+      [ADR-0016](adr/0016-lockstep-coordinator.md).
 - [ ] **Churn workload tuning knobs.** Expose the churn model's parameters in the UI — target
       live size, file-size distribution, create/replace/delete mix, seed — so the workload can be
       shaped (and reproduced) instead of hardcoded. (Later — the hardcoded model is fine for
@@ -70,6 +78,34 @@ reinventing (the churn model and VFS workloads are already promoted into **Next*
 
 ## Later filesystems
 Behind the same shim contract (`fs/*/`) — once LittleFS proves the second-driver path and the
-switch/lockstep UI above, adding more drivers is mechanical:
-- [ ] SPIFFS
-- [ ] JesFS
+switch/lockstep UI above, adding more drivers is mechanical. Each mirrors the library the FASTFFS
+ESP32-S3 benchmark suite integrated (`fs/fastffs/benchmarks/esp32s3_*`), so flashvis visualizes the
+same code that was benchmarked — and each already has a `benchfs_ops_t` backend adapter there whose
+op set our shim ABI mines ([ADR-0011](adr/0011-uniform-fs-driver-abi.md)), so the adapter is largely
+reusable. Only the FS core is load-bearing; the surrounding ESP-IDF VFS/POSIX plumbing is scaffolding
+a bare WASM embedding replaces itself.
+
+- [ ] **SPIFFS** — [pellepl/spiffs](https://github.com/pellepl/spiffs) (MIT; ESP-IDF vendors a
+      lightly-patched fork). Easiest port, the LittleFS bar: NOR-native, driven by an injectable
+      `spiffs_config` HAL (`hal_read_f` / `hal_write_f` / `hal_erase_f`) that maps one-to-one onto
+      the shim's read / prog / erase.
+- [ ] **JesFS** — [joembedded/JesFs](https://github.com/joembedded/JesFs) (MIT; the benchmark pins
+      `3a1dff76` as a submodule). NOR/SPI-native; its HAL is SPI-*command* level (RDID / page-program
+      / 4 KiB-erase opcodes) rather than read / prog / erase — but the benchmark already ships both
+      adapters we'd reuse: a JesFS→`benchfs_ops_t` common-API adapter (`esp32s3_jesfs/main/main.c`)
+      whose op set our shim already mirrors, and a fake-SPI lower layer (`jesfs_ll_esp_partition.c`)
+      that already decodes the SPI opcodes into block read/prog/erase. Porting is mostly swapping its
+      bottom `esp_partition_read/write/erase_range` for the three HAL imports (and answering RDID with
+      a plausible JEDEC id/density) — not writing a shim from scratch.
+- [ ] **FAT + FTL** — two stacked libraries, mirroring the benchmark's `esp_vfs_fat_spiflash_mount_rw_wl`:
+  - **[ChaN FatFs](http://elm-chan.org/fsw/ff/)** (BSD-1-clause-style) — portable ANSI-C, but does
+    no erase and no wear-leveling: it expects an overwrite-in-place block device via `disk_read` /
+    `disk_write` (512 B logical sectors). Inert over raw NOR without the layer beneath it.
+  - **FTL — ESP-IDF `wear_levelling`** (Apache-2.0) — the sector-remap wear-leveling layer FatFs
+    rides on; it, not FatFs, owns erase. Caveat: **no standalone upstream** — it lives only inside
+    `espressif/esp-idf` (`components/wear_levelling/`, C++), so "the same library" means lifting an
+    IDF component and re-stubbing its `Flash_Access` backend onto the three HAL imports. Highest
+    effort of the four; NOR-oriented, so no NAND mismatch (Dhara was considered and ruled out for
+    exactly that reason).
+
+    Stack: FatFs `disk_read` / `disk_write` (512 B) → `wear_levelling` remap → NOR read / prog / erase.
