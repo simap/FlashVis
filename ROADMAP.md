@@ -67,6 +67,11 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       live size, file-size distribution, create/replace/delete mix, seed — so the workload can be
       shaped (and reproduced) instead of hardcoded. (Later — the hardcoded model is fine for
       testing as is; this is more an exploration nicety.)
+- [ ] **About-filesystems explainer.** An in-app primer: how NOR flash works (erase-before-write,
+      sector/page granularity, wear, `0xFF` as the erased state), and how each filesystem copes with
+      those limits (log-structured writes, wear-leveling, garbage collection). The garbage% story
+      lives here — it's GC-ratio-dependent, FASTFFS's background GC keeps it low (so the 50% default
+      undersells it), and the residual is compaction-only, run under allocation pressure.
 
 ## Borrow from FASTFFS later
 The FASTFFS repo has more reusable workload and fault machinery worth pulling rather than
