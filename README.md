@@ -17,8 +17,10 @@ WebAssembly and runs them in the browser against an emulated **NOR** chip, anima
   and a live·garbage·free bar, alongside the wear heatmap and write-amplification.
 - ✅ **Playground.** Control panel + JS console over the FS API (streaming `ls`, `await`-paced
   ops), a churn auto-workload, and a background-GC ratio slider.
-- ⏳ **Next:** geometry controls, upstream the inspect helper, then LittleFS/SPIFFS behind the
-  same shim. See [ROADMAP.md](ROADMAP.md).
+- ✅ **Second driver: LittleFS.** LittleFS v2.9.3 behind the same uniform shim ABI, with its own
+  native liveness hook — byte-exact through churn (`npm run test:littlefs`, `test:littlefs-integrity`).
+- ⏳ **Next:** the switch / lockstep-multiple-filesystems UI, then SPIFFS behind the same shim.
+  See [ROADMAP.md](ROADMAP.md).
 
 ## How it fits together
 

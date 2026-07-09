@@ -42,7 +42,7 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       proxies with partial/seeked I/O, stat, prefix), on a static handle pool in the shim, plus a
       setup-mode toggle. Brings the shim ABI to its final shape **before** LittleFS, so the second
       driver is built against it. See [ADR-0014](adr/0014-console-fs-api.md).
-- [ ] **Integrate LittleFS**: submodule under `fs/littlefs/`, a `bindings/littlefs/shim.c`
+- [x] **Integrate LittleFS**: submodule under `fs/littlefs/`, a `bindings/littlefs/shim.c`
       onto the same three HAL imports and the uniform shim ABI ([ADR-0011](adr/0011-uniform-fs-driver-abi.md)),
       WASM build, plus a native `lfs_inspect.c` liveness hook ([ADR-0012](adr/0012-per-fs-liveness-inspect.md)).
 - [ ] **UI: switch filesystem implementation.** A control to pick which FS drives the die;
