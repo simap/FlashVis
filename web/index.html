@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FLASHVIS — FASTFFS on NOR, live</title>
+<title>FLASHVIS — flash filesystems on NOR, live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -43,6 +43,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .diewrap{position:relative;width:100%;max-width:620px;max-height:calc(100% - 40px);aspect-ratio:1;padding:14px;border-radius:8px;
   background:linear-gradient(180deg,#0e161d,#0b1117);border:1px solid var(--line);box-shadow:inset 0 0 0 1px #ffffff06,0 24px 60px -30px #000}
 .diewrap::before{content:"";position:absolute;top:8px;left:8px;width:9px;height:9px;border-top:2px solid var(--accent-dim);border-left:2px solid var(--accent-dim)}
+.die-stack{width:100%;height:100%}
 .die{display:grid;grid-template-columns:repeat(var(--sector-cols,8),1fr);gap:var(--sector-gap);width:100%;height:100%}
 .sector{position:relative;display:grid;grid-template-columns:repeat(var(--page-cols,4),1fr);gap:var(--cell-gap);padding:3px;border-radius:var(--radius);
   background:#0c141b;border:1px solid #17242e;cursor:pointer;transition:border-color .15s,box-shadow .15s}
@@ -123,6 +124,17 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-ra
 .toggle input:checked + .tswitch{background:var(--accent-dim);border-color:var(--accent)}
 .toggle input:checked + .tswitch::after{transform:translateX(16px);background:var(--accent)}
 
+.cmptable{display:flex;flex-direction:column;gap:5px}
+.cmprow{display:grid;grid-template-columns:1.3fr .7fr 1fr .7fr .6fr .8fr;gap:8px;align-items:center;
+  font-size:11px;color:var(--txt-dim);padding:5px 7px;border-radius:5px;border:1px solid transparent;cursor:pointer}
+.cmprow:hover{background:#101a22}
+.cmprow.sel{border-color:var(--accent-dim);background:#0f1922;color:var(--txt)}
+.cmprow.head{cursor:default;color:var(--txt-faint);font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;padding-bottom:0}
+.cmprow.head:hover{background:none}
+.cmprow .cmpname{font-weight:600;color:var(--txt)}
+.cmprow span:not(.cmpname){text-align:right;font-variant-numeric:tabular-nums}
+.cardhint{font-weight:400;letter-spacing:0;text-transform:none;color:var(--txt-faint)}
+
 @media (max-width:1080px){
   html,body{height:auto}
   body{overflow:auto;min-height:100%}
@@ -133,19 +145,20 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-ra
 }
 @media (max-width:900px){.spec{display:none}}
 @media (prefers-reduced-motion:reduce){.cell,.sector,.cell .fill{transition:none!important;animation:none!important}}
+.hidden{display:none!important}
 </style>
 
 <div class="header">
   <div class="brand">
     <span class="logo">FLASH<b>VIS</b></span>
-    <span class="tagline">real <span class="k">FASTFFS</span>, compiled to WASM, running live on an emulated NOR chip.</span>
+    <span class="tagline">real <span class="k" id="tagFsName">FASTFFS</span>, compiled to WASM, running live on an emulated NOR chip.</span>
   </div>
   <div class="spec"><b id="specGeo">256 KB · 64×4 KB</b><br><span id="specLive">booting…</span></div>
 </div>
 
 <div class="main">
   <div class="stage">
-    <div class="diewrap"><div class="die" id="die"></div></div>
+    <div class="diewrap"><div class="die-stack" id="dieStack"></div></div>
     <div class="stagefoot">
       <span><b id="fProg">0%</b> programmed</span>
       <span><b id="fFree">0</b> pages blank</span>
@@ -172,16 +185,32 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-ra
     </div>
     <div class="card">
       <h3>Telemetry</h3>
-      <div class="util" title="live · garbage · free"><i class="u-live" id="uProg"></i><i class="u-obs" id="uObs"></i></div>
+      <div class="util" id="utilBar" title="live · garbage · free"><i class="u-live" id="uProg"></i><i class="u-obs" id="uObs"></i></div>
       <div class="grid2">
         <div class="stat"><span class="n amp" id="sAmp">1.0×</span><span class="l">Write amp</span></div>
-        <div class="stat"><span class="n" id="sObs">0%</span><span class="l">Garbage</span></div>
+        <div class="stat" id="statGarbage"><span class="n" id="sObs">0%</span><span class="l">Garbage</span></div>
         <div class="stat"><span class="n" id="sFiles">0</span><span class="l">Files</span></div>
         <div class="stat"><span class="n" id="sBytes">0 KB</span><span class="l">Live data</span></div>
         <div class="stat"><span class="n ok" id="sLive">0</span><span class="l">Live sectors</span></div>
         <div class="stat"><span class="n" id="sErase">0</span><span class="l">Erases</span></div>
         <div class="stat"><span class="n" id="sRead">0</span><span class="l">Reads</span></div>
         <div class="stat"><span class="n" id="sWear">0</span><span class="l">Peak wear</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Compare <small class="cardhint">— click a row to display it</small></h3>
+      <div class="cmptable" id="cmpTable">
+        <div class="cmprow head">
+          <span class="cmpname">FS</span><span>Step</span><span>Active time</span><span>WA</span><span>Files</span><span>Garbage</span>
+        </div>
+        <div class="cmprow" id="cmpRow-fastffs" data-fs="fastffs">
+          <span class="cmpname">FASTFFS</span><span id="cmpStep-fastffs">0</span><span id="cmpSim-fastffs">0 ms</span>
+          <span id="cmpWa-fastffs">1.0×</span><span id="cmpFiles-fastffs">0</span><span id="cmpGarbage-fastffs">0%</span>
+        </div>
+        <div class="cmprow" id="cmpRow-littlefs" data-fs="littlefs">
+          <span class="cmpname">LittleFS</span><span id="cmpStep-littlefs">0</span><span id="cmpSim-littlefs">0 ms</span>
+          <span id="cmpWa-littlefs">1.0×</span><span id="cmpFiles-littlefs">0</span><span id="cmpGarbage-littlefs">0%</span>
+        </div>
       </div>
     </div>
     <div class="card">
@@ -203,6 +232,17 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-ra
 </div>
 
 <div class="transport">
+  <label class="ctl" title="click to toggle participation — 2+ selected runs lockstep">FS
+    <span class="seg" id="fsPick">
+      <button id="fsPick-fastffs" data-fs="fastffs" class="on">FASTFFS</button><button id="fsPick-littlefs" data-fs="littlefs">LittleFS</button>
+    </span>
+  </label>
+  <label class="ctl" id="ctlMode">MODE
+    <span class="seg" id="lsMode">
+      <button id="modePick-race" data-mode="race" class="on">RACE</button><button id="modePick-pace" data-mode="pace">PACE</button>
+    </span>
+  </label>
+  <div class="sep"></div>
   <div class="tgroup">
     <button class="btn primary" id="btnRun"><span class="dot"></span><span id="runLabel">Pause</span></button>
     <button class="btn" id="btnStep">Step</button>
@@ -217,7 +257,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-ra
   </div>
   <div class="sep"></div>
   <label class="ctl">SPEED <input type="range" id="speed" min="0" max="100" value="40"> <span id="speedRead" class="hintk"></span></label>
-  <label class="ctl">BG&nbsp;GC <input type="range" id="gc" min="0" max="100" value="50"> <span id="gcRead" class="hintk"></span></label>
+  <label class="ctl" id="ctlGc">BG&nbsp;GC <input type="range" id="gc" min="0" max="100" value="50"> <span id="gcRead" class="hintk"></span></label>
   <label class="ctl">GRANULE
     <span class="seg" id="gran">
       <button data-g="1" class="on">1B</button><button data-g="4">4B</button><button data-g="16">16B</button><button data-g="64">64B</button><button data-g="256">256B</button>

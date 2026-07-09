@@ -55,6 +55,7 @@ export function createViz(device) {
   let scale = 20000;         // sim-ns spent per real-ms (Infinity ⇒ no delay)
   let cur = null;            // steps of the op currently playing
   let curStep = 0, curRem = 0, curAnimMs = MIN_ANIM, lastNow = 0;
+  let rafId = 0, stopped = false;  // the frame loop's rAF handle + a stop flag (teardown)
   let heat = false, selected = -1, inspectorEl = null, onSelectCb = null;
   let lastMap = null;
   let prep = false;          // setup mode (ADR-0014): suppress animation, drain synchronously
@@ -170,7 +171,7 @@ export function createViz(device) {
       } else { curRem -= budget; break; }
     }
     if (selected >= 0) renderInspector(selected);
-    requestAnimationFrame(frame);
+    if (!stopped) rafId = requestAnimationFrame(frame);   // don't reschedule once stopped (teardown)
   }
 
   // Setup mode (ADR-0014): drain the whole queue to the die NOW, with no timed
@@ -236,7 +237,22 @@ export function createViz(device) {
         });
         dieEl.appendChild(sec); sectorEls[s] = sec;
       }
-      requestAnimationFrame(frame);
+      rafId = requestAnimationFrame(frame);
+    },
+
+    /** Stop the frame loop for good — cancels the pending rAF and blocks any
+     *  reschedule, so a torn-down session's player stops pinning its device +
+     *  WASM module and detached cells instead of animating forever (ADR-0015). */
+    stop() {
+      stopped = true;
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+      // Resolve any queued barriers before going dark, mirroring the reset
+      // intake — else a torn-down session removed mid-paceStep() leaves the
+      // coordinator's Promise.all(barrier) awaiter hanging forever (paceBusy
+      // wedged, Pace frozen), since this player will never drain them.
+      for (const q of queue) if (q.op === 'barrier') q.resolve();
+      queue.length = 0;
     },
 
     attachInspector(el) { inspectorEl = el; },

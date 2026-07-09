@@ -1,13 +1,32 @@
 /*
- * Playground: boots the runner + viz, wires the control panel, JS console, and a
- * self-pacing auto-workload. Every filesystem call is wrapped by timed(), which
- * captures the device ops it issued and logs the real simulated flash cost, e.g.
+ * Playground: the SESSION MANAGER (ADR-0015), now driving N sessions through a
+ * lockstep coordinator (ADR-0016) instead of exactly one. Boots the shared
+ * shell — control panel, HUD, JS console — owns the FS registry, ONE churn
+ * generator, and the coordinator that fans it out to every PARTICIPATING
+ * session. Exactly one session is DISPLAYED at a time: its die is shown, its
+ * op-log feeds the console, and its HUD/liveness numbers drive the shared
+ * stat DOM. Every filesystem call a session issues is wrapped by its own
+ * timed(), which captures the device ops it issued and logs the real
+ * simulated flash cost, e.g.
  *   ls() → 3.10 ms · 31 read
  *   write(boot.log, 912 B) → 24.8 ms · 1 erase 6 prog 3 read
+ *
+ * The churn *generator* and the gc-vs-event decision live in lockstep.js, not
+ * here and not in any session — this file just wires the shared controls
+ * (Run/Step/SPEED/BG-GC/mode/participants) to the coordinator, and the
+ * display switch to whichever session is currently shown.
  */
-import { createRunner } from './runner.js';
-import { createViz } from './viz.js';
-import { createChurnModel, CHURN_CLASS, CHURN_EVENT } from './churn.js';
+import { createSession } from './session.js';
+import { createChurnModel, CHURN_CLASS } from './churn.js';
+import { createLockstep } from './lockstep.js';
+import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
+
+// FS registry (ADR-0015): fsId → display name. Adding a driver is: a new entry
+// here, a matching picker button + compare row in index.html (ids
+// "fsPick-<fsId>" / "cmpRow-<fsId>"), and dist/<fsId>.mjs built (ADR-0011) —
+// the manager, the session, and the coordinator need nothing else.
+const FS_REGISTRY = { fastffs: 'FASTFFS', littlefs: 'LittleFS' };
+const DEFAULT_FS = 'fastffs';
 
 // Auto-workload churn config, scaled to the 256 KiB (4096×64) device. The model
 // drives the FS toward a steady-state live size instead of overfilling it. Sizes
@@ -32,6 +51,7 @@ const churnProfile = () => ({
 
 const $ = (id) => document.getElementById(id);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)} ms` : `${(ms / 1000).toFixed(2)} s`; };
 
 // A large, varied name pool so the workload mostly creates new files rather than
 // overwriting a handful — with enough collisions to still exercise replacement.
@@ -54,15 +74,16 @@ function randomBytes(n) {
   return a;
 }
 const rnd = (n) => Math.floor(Math.random() * n);
-
-let currentBatch = null; // collects the device ops issued during one timed() call
+const enc = new TextEncoder();
+const sizeOf = (d) => (typeof d === 'string' ? enc.encode(d).length : d.length);
 
 boot().catch((e) => log(String(e && e.stack || e), 'err'));
 
 async function boot() {
   const geometry = { sectorSize: 4096, sectorCount: 64, pageSize: 256, granule: 1 };
-  log('loading FASTFFS (WASM)…', 'sys');
-  const runner = await createRunner(geometry);
+  let granule = geometry.granule;
+  let prepMode = false;
+
   const churn = createChurnModel({
     seed: CHURN_SEED,
     targetLiveBytes: CHURN_TARGET_LIVE,
@@ -72,167 +93,235 @@ async function boot() {
     profile: churnProfile(),
     slotCount: 256,
   });
-  const viz = createViz(runner.device);
-  viz.mountDie($('die'));
-  viz.attachInspector($('insp'));
+  // The coordinator (ADR-0016) owns the ONE canonical step sequence generated
+  // from this churn model + its own seeded gc-vs-event coin — sessions never
+  // decide what runs next, they only execute what they're handed.
+  const coordinator = createLockstep({ churn });
 
-  let mapDirty = true; // liveness needs a re-walk — only set on program/erase/reset
-  runner.device.onEvent((ev) => {
-    if (currentBatch && ev.op !== 'reset') currentBatch.push(ev);
-    if (ev.op === 'prog' || ev.op === 'erase' || ev.op === 'reset') mapDirty = true;
-  });
+  // Participating sessions (fsId → session) and which one is DISPLAYED. Every
+  // control below that used to read a single `activeSession` still does —
+  // it's just reassigned by setDisplayed() instead of by an exclusive switch.
+  const sessions = new Map();
+  let displayedFsId = DEFAULT_FS;
+  let activeSession = null;
+
+  async function mkSession(fsId) {
+    return createSession(fsId, {
+      geometry: { ...geometry, granule },
+      container: $('dieStack'),
+      // Route this session's op-log only while it's the displayed one — a
+      // session's onLog is fixed at creation (session.js has no setter), so
+      // the check happens live against the outer `displayedFsId` on every
+      // call instead of needing to rebind anything.
+      onLog: (msg, cls) => { if (fsId === displayedFsId) log(msg, cls); },
+      name: FS_REGISTRY[fsId],
+    });
+  }
+
+  log(`loading ${FS_REGISTRY[DEFAULT_FS]} (WASM)…`, 'sys');
+  const first = await mkSession(DEFAULT_FS);
+  sessions.set(DEFAULT_FS, first);
+  coordinator.setSessions([...sessions.values()]);
+
+  // ---- display switch: show one session's die/HUD/log/console, hide the rest ----
+  function setDisplayed(fsId) {
+    // Detach the outgoing session's inspector so its still-running rAF loop
+    // (sessions keep animating while hidden — Race/Pace both need that) stops
+    // writing into the shared #insp panel the moment it's no longer shown.
+    if (activeSession) activeSession.attachInspector(null);
+    displayedFsId = fsId;
+    activeSession = sessions.get(fsId);
+    for (const [id, s] of sessions) s.setActive(id === fsId);
+    activeSession.attachInspector($('insp'));
+    activeSession.setPrep(prepMode);
+    $('insp').innerHTML = '<span class="hint">Click a sector to inspect it.</span>';
+    applyCapsGating(activeSession.caps);
+    $('tagFsName').textContent = activeSession.name;
+    for (const id of Object.keys(FS_REGISTRY)) {
+      $('fsPick-' + id)?.classList.toggle('on', sessions.has(id));
+      $('cmpRow-' + id)?.classList.toggle('sel', id === fsId);
+    }
+  }
+  setDisplayed(DEFAULT_FS);
 
   $('specGeo').textContent =
-    `${(runner.device.size / 1024) | 0} KB · ${geometry.sectorCount}×${geometry.sectorSize / 1024} KB · ESP32-S3 timing`;
+    `${(activeSession.device.size / 1024) | 0} KB · ${geometry.sectorCount}×${geometry.sectorSize / 1024} KB · ESP32-S3 timing`;
 
-  // timed FS facade — logs each op's simulated flash cost
-  const timed = (label, fn) => {
-    currentBatch = [];
-    let res, err = null;
-    try { res = fn(); } catch (e) { err = e; }
-    const batch = currentBatch; currentBatch = null;
-    logOp(label, batch, err);
-    return res;
-  };
-  const sizeOf = (d) => (typeof d === 'string' ? new TextEncoder().encode(d).length : d.length);
-  const fs = {
-    write: (n, d) => timed(`write(${n}, ${sizeOf(d)} B)`, () => runner.write(n, d)),
-    read: (n) => timed(`read(${n})`, () => runner.read(n)),
-    cat: (n) => timed(`cat(${n})`, () => runner.cat(n)),
-    remove: (n) => timed(`delete(${n})`, () => runner.remove(n)),
-    stat: (n) => timed(`stat(${n})`, () => runner.stat(n)),
-    mkdir: (n) => timed(`mkdir(${n})`, () => runner.mkdir(n)),
-    list: () => timed('ls()', () => runner.list()),
-    gcStep: () => timed('gc()', () => runner.gcStep()),
-    exists: (n) => runner.exists(n),
-    fsinfo: () => runner.fsinfo(),
-    device: runner.device, geometry: runner.geometry, get hostBytes() { return runner.hostBytes; },
-  };
-
-  // Run an op, then resolve after the player finishes playing it (await = pace to sim time).
-  // In prep/setup mode (ADR-0014) skip the barrier and flush the die synchronously —
-  // full speed, no animation, but timed() still logs each op.
-  let prepMode = false;
-  const pace = (fn) => {
-    const res = fn();
-    if (prepMode) { viz.flush(); return Promise.resolve(res); }
-    return viz.barrier().then(() => res);
-  };
-  const names = () => runner.names();
-
-  // Streaming ls: open a pooled dir handle, then await each fffs_dir_read and print
-  // the entry as it arrives. `prefix` scopes the scan (empty ⇒ whole FS).
-  const lsStream = async (printEach, prefix = '') => {
-    const files = [];
-    const dir = await pace(() => runner.openDir(prefix));
-    for (;;) {
-      const e = await pace(() => dir.read());
-      if (!e) break;
-      if (printEach) log(`  ${e.name}  ${e.size} B`, 'out');
-      files.push(e);
-    }
-    await pace(() => dir.close());
-    if (printEach && !files.length) log('  (empty)', 'out');
-    return files;
-  };
-
-  freshFilesystem(runner, churn);   // empty + paused — nothing is written until Run or a console op
+  coordinator.reset();   // empty + paused — nothing is written until Run or a console op
   log('formatted + mounted — empty and paused. Press Run, or drive it from the console.', 'sys');
 
-  setInterval(() => refreshHUD(runner, viz), 160);
-  // The liveness walk re-scans the on-flash index (mount-like), so only run it
-  // when the flash actually changed — not on a fixed timer while idle/reading.
-  setInterval(() => { if (mapDirty) { mapDirty = false; refreshLiveness(runner, viz); } }, 250);
+  setInterval(() => activeSession.refreshHUD($), 160);
+  // The liveness walk re-scans the on-flash index (mount-like); refreshLiveness
+  // itself no-ops unless the DISPLAYED session's flash changed since the last call.
+  setInterval(() => activeSession.refreshLiveness($), 250);
+  // Compare strip: every participant, not just the displayed one (ADR-0016) —
+  // this is the only place that reads every session's numbers at once.
+  setInterval(() => renderCompareRows(), 250);
+  function renderCompareRows() {
+    const snaps = coordinator.snapshots();
+    for (const snap of snaps) {
+      const row = $('cmpRow-' + snap.fsId);
+      if (!row) continue;
+      row.classList.remove('hidden');
+      const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+      set('cmpStep-' + snap.fsId, String(snap.stepCursor));
+      set('cmpSim-' + snap.fsId, fmtTime(snap.simNs));
+      set('cmpWa-' + snap.fsId, snap.wa.toFixed(1) + '×');
+      set('cmpFiles-' + snap.fsId, String(snap.files));
+      set('cmpGarbage-' + snap.fsId, Math.round(100 * snap.garbagePct) + '%');
+    }
+    for (const id of Object.keys(FS_REGISTRY)) {
+      if (!sessions.has(id)) $('cmpRow-' + id)?.classList.add('hidden');
+    }
+  }
+  renderCompareRows();
 
-  // ---- auto-workload: one op at a time, only once the last has fully played ----
-  let running = false;   // start paused — the initial seed animates in, then it idles
+  // ---- Run/Pause, Step: act on the WHOLE participating set via the coordinator ----
   const setRunning = (v) => {
-    running = v;
+    if (v) coordinator.start(); else coordinator.stop();
     $('runLabel').textContent = v ? 'Pause' : 'Run';
     $('btnRun').querySelector('.dot').style.background = v ? 'currentColor' : '#241a06';
   };
-  setRunning(false);
-  let gcRatio = 0.5, atMax = false;
-  // Finite speed: one op at a time, gated on the player draining (paced by the
-  // animation). "max · no delay": a wall-clock-bounded burst with no gate, so the
-  // sim runs at execution speed instead of one op per frame.
-  setInterval(() => {
-    if (!running) return;
-    if (atMax) {
-      const t0 = performance.now();
-      while (performance.now() - t0 < 8 && viz.pending() < 3000) workloadStep(fs, gcRatio, churn);
-    } else if (viz.pending() === 0) {
-      workloadStep(fs, gcRatio, churn);
+  setRunning(false);   // start paused — the initial seed animates in, then it idles
+
+  // ---- participants (ROADMAP: lockstep multiple filesystems) ----
+  // Clicking a picker button TOGGLES that FS's participation (multi-select) —
+  // at least one must always stay selected. Any change resets every
+  // participant to a fresh chip (ADR-0015's "no carryover" rule, extended).
+  for (const fsId of Object.keys(FS_REGISTRY)) {
+    $('fsPick-' + fsId)?.addEventListener('click', () => toggleParticipant(fsId));
+  }
+  async function toggleParticipant(fsId) {
+    const willJoin = !sessions.has(fsId);
+    if (!willJoin && sessions.size === 1) {
+      log('at least one filesystem must stay selected', 'sys');
+      return;
     }
-  }, 16);
+    if (willJoin) {
+      log(`loading ${FS_REGISTRY[fsId]} (WASM)…`, 'sys');
+      let s;
+      try { s = await mkSession(fsId); }
+      catch (e) { log(`failed to add ${FS_REGISTRY[fsId]}: ${(e && e.message) || e}`, 'err'); return; }
+      sessions.set(fsId, s);
+      s.setHeatmap($('heat').checked);
+      s.setPrep(prepMode);
+    } else {
+      sessions.get(fsId).teardown();
+      sessions.delete(fsId);
+      if (displayedFsId === fsId) displayedFsId = sessions.keys().next().value;
+    }
+    coordinator.setSessions([...sessions.values()]);
+    coordinator.reset();
+    applySpeed(+$('speed').value);   // re-fan the current scale to the new set
+    setDisplayed(displayedFsId);
+    renderCompareRows();
+    const names = [...sessions.values()].map((s) => s.name).join(', ');
+    log(`participants: ${names} — fresh, empty chip${sessions.size > 1 ? 's' : ''}.`, 'sys');
+  }
+
+  // ---- Race / Pace mode ----
+  const markMode = (m) => {
+    $('modePick-race')?.classList.toggle('on', m === 'race');
+    $('modePick-pace')?.classList.toggle('on', m === 'pace');
+  };
+  markMode(coordinator.mode);   // reflect the coordinator's default ('race') at boot
+  for (const m of ['race', 'pace']) {
+    $('modePick-' + m)?.addEventListener('click', () => {
+      coordinator.setMode(m);
+      markMode(m);
+      log(`lockstep mode → ${m}`, 'sys');
+    });
+  }
 
   // ---- controls ----
-  $('btnRun').addEventListener('click', () => setRunning(!running));
-  $('btnStep').addEventListener('click', () => workloadStep(fs, gcRatio, churn));
-  $('btnWrite').addEventListener('click', () => fs.write(NAMES[rnd(NAMES.length)], randomBytes(300 + rnd(4000))));
-  $('btnLs').addEventListener('click', () => lsStream(true));
+  $('btnRun').addEventListener('click', () => setRunning(!coordinator.running));
+  $('btnStep').addEventListener('click', () => coordinator.step());
+  $('btnWrite').addEventListener('click', () => activeSession.fs.write(NAMES[rnd(NAMES.length)], randomBytes(300 + rnd(4000))));
+  $('btnLs').addEventListener('click', () => activeSession.lsStream(true));
   $('btnDelete').addEventListener('click', () => {
-    const known = names();
-    if (known.length) fs.remove(known[rnd(known.length)]);
+    const known = activeSession.names();
+    if (known.length) activeSession.fs.remove(known[rnd(known.length)]);
     else log('  (nothing to delete)', 'sys');
   });
-  $('btnGC').addEventListener('click', () => fs.gcStep());
-  $('btnFormat').addEventListener('click', () => { freshFilesystem(runner, churn); log('re-formatted + mounted (empty chip)', 'sys'); });
+  $('btnGC').addEventListener('click', () => activeSession.fs.gcStep());
+  $('btnFormat').addEventListener('click', () => {
+    coordinator.reset();
+    log(`re-formatted + mounted (empty chip${sessions.size > 1 ? 's' : ''})`, 'sys');
+  });
 
-  atMax = applySpeed(+$('speed').value, viz);
-  $('speed').addEventListener('input', (e) => { atMax = applySpeed(+e.target.value, viz); });
+  // slider 0..100 → sim-ns per real-ms on a log scale. Real flash time = 1e6.
+  // Low = slow-mo, mid ≈ real-time, high = faster than real-time, 100 = no delay.
+  function applySpeed(v) {
+    let scale, label;
+    if (v >= 100) { scale = Infinity; label = 'max · no delay'; }
+    else {
+      const lo = Math.log10(3000), hi = Math.log10(1e8);
+      scale = Math.pow(10, lo + (hi - lo) * (v / 99));
+      const x = scale / 1e6; // >1 faster than real flash, <1 slower
+      label = (x >= 0.9 && x <= 1.15) ? '≈ real-time'
+        : x < 1 ? `${(1 / x < 10 ? (1 / x).toFixed(1) : Math.round(1 / x))}× slow-mo`
+        : `${x < 10 ? x.toFixed(1) : Math.round(x)}× real-time`;
+    }
+    coordinator.setSpeed(scale);
+    $('speedRead').textContent = label;
+  }
+  applySpeed(+$('speed').value);
+  $('speed').addEventListener('input', (e) => applySpeed(+e.target.value));
 
-  const applyGc = (v) => { gcRatio = v / 100; $('gcRead').textContent = v === 0 ? 'off' : `${v}%`; };
+  const applyGc = (v) => { coordinator.setGcRatio(v / 100); $('gcRead').textContent = v === 0 ? 'off' : `${v}%`; };
   applyGc(+$('gc').value);
   $('gc').addEventListener('input', (e) => applyGc(+e.target.value));
 
   $('gran').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     [...$('gran').children].forEach((x) => x.classList.toggle('on', x === b));
-    runner.config({ granule: +b.dataset.g });
-    freshFilesystem(runner, churn);
-    log(`program granule → ${b.dataset.g} B (re-formatted)`, 'sys');
+    granule = +b.dataset.g;
+    for (const s of sessions.values()) s.runner.config({ granule });
+    coordinator.reset();
+    log(`program granule → ${granule} B (re-formatted)`, 'sys');
   });
-  $('heat').addEventListener('change', (e) => viz.setHeatmap(e.target.checked, $('die')));
+  $('heat').addEventListener('change', (e) => { for (const s of sessions.values()) s.setHeatmap(e.target.checked); });
 
   // ---- JS console ----
   // Paced console facade: `await fs.write(...)` waits for the op to play out (its
   // simulated flash time), so an awaited loop steps through one op at a time.
-  // The internal auto-workload keeps using the synchronous `fs`.
-  // Paced console facade: `await fs.write(...)` blocks for the op's simulated time
-  // (scaled by SPEED), locking a console loop to the animation. `list` streams.
+  // The coordinator's auto-workload keeps using each session's synchronous
+  // runChurnEvent/runGcStep. Every helper below reads `activeSession` live, so
+  // the display switch rebinds the whole console surface for free.
   // Raw handle proxy (ADR-0014 Tier 2): each op is logged by timed() and paced by
   // pace(), so `await f.read(n)` blocks for the partial read's simulated flash time.
   const pacedFile = (h) => ({
-    read: (n) => pace(() => timed(`file.read(${n} B)`, () => h.read(n))),
-    write: (d) => pace(() => timed(`file.write(${sizeOf(d)} B)`, () => h.write(d))),
-    seek: (o, w = 'set') => pace(() => timed(`file.seek(${o}, ${w})`, () => h.seek(o, w))),
-    stat: () => pace(() => timed('file.stat()', () => h.stat())),
-    close: () => pace(() => timed('file.close()', () => h.close())),
+    read: (n) => activeSession.pace(() => activeSession.timed(`file.read(${n} B)`, () => h.read(n))),
+    write: (d) => activeSession.pace(() => activeSession.timed(`file.write(${sizeOf(d)} B)`, () => h.write(d))),
+    seek: (o, w = 'set') => activeSession.pace(() => activeSession.timed(`file.seek(${o}, ${w})`, () => h.seek(o, w))),
+    stat: () => activeSession.pace(() => activeSession.timed('file.stat()', () => h.stat())),
+    close: () => activeSession.pace(() => activeSession.timed('file.close()', () => h.close())),
   });
   const pacedDir = (d) => ({
-    read: () => pace(() => d.read()),
-    close: () => pace(() => d.close()),
+    read: () => activeSession.pace(() => d.read()),
+    close: () => activeSession.pace(() => d.close()),
   });
   const pfs = {
-    write: (n, d) => pace(() => fs.write(n, d)),
-    read: (n) => pace(() => fs.read(n)),
-    cat: (n) => pace(() => fs.cat(n)),
-    remove: (n) => pace(() => fs.remove(n)),
-    stat: (n) => pace(() => fs.stat(n)),
-    mkdir: (n) => pace(() => fs.mkdir(n)),
-    gcStep: () => pace(() => fs.gcStep()),
-    list: (prefix) => lsStream(false, prefix),
-    exists: (n) => fs.exists(n),
-    open: async (name, mode = 'r') => pacedFile(await pace(() => timed(`open(${name}, ${mode})`, () => runner.open(name, mode)))),
-    openDir: async (prefix = '') => pacedDir(await pace(() => runner.openDir(prefix))),
-    format: () => runner.format(),
-    mount: () => runner.mount(),
-    unmount: () => runner.unmount(),
-    sectorClasses: () => runner.sectorClasses(),
-    liveMap: () => runner.liveMap(),
-    fsinfo: () => fs.fsinfo(),
-    device: runner.device, geometry: runner.geometry, get hostBytes() { return runner.hostBytes; },
+    write: (n, d) => activeSession.pace(() => activeSession.fs.write(n, d)),
+    read: (n) => activeSession.pace(() => activeSession.fs.read(n)),
+    cat: (n) => activeSession.pace(() => activeSession.fs.cat(n)),
+    remove: (n) => activeSession.pace(() => activeSession.fs.remove(n)),
+    stat: (n) => activeSession.pace(() => activeSession.fs.stat(n)),
+    mkdir: (n) => activeSession.pace(() => activeSession.fs.mkdir(n)),
+    gcStep: () => activeSession.pace(() => activeSession.fs.gcStep()),
+    list: (prefix) => activeSession.lsStream(false, prefix),
+    exists: (n) => activeSession.fs.exists(n),
+    open: async (name, mode = 'r') => pacedFile(await activeSession.pace(() => activeSession.timed(`open(${name}, ${mode})`, () => activeSession.runner.open(name, mode)))),
+    openDir: async (prefix = '') => pacedDir(await activeSession.pace(() => activeSession.runner.openDir(prefix))),
+    format: () => activeSession.runner.format(),
+    mount: () => activeSession.runner.mount(),
+    unmount: () => activeSession.runner.unmount(),
+    sectorClasses: () => activeSession.runner.sectorClasses(),
+    liveMap: () => activeSession.runner.liveMap(),
+    fsinfo: () => activeSession.fs.fsinfo(),
+    get device() { return activeSession.device; },
+    get geometry() { return activeSession.geometry; },
+    get hostBytes() { return activeSession.fs.hostBytes; },
   };
 
   // Tier-1 friendly pokes (ADR-0014): optional args, data-agnostic, all paced, each
@@ -241,23 +330,29 @@ async function boot() {
   let fileSeq = 0;
   const STOCK_SIZE = 1024;
   const autoName = () => `f${(fileSeq++).toString(36).padStart(3, '0')}.dat`;
-  const pickKnown = () => { const k = names(); if (!k.length) throw new Error('no files yet — write one first'); return k[rnd(k.length)]; };
+  const pickKnown = () => { const k = activeSession.names(); if (!k.length) throw new Error('no files yet — write one first'); return k[rnd(k.length)]; };
   const writeFile = async (name, size = STOCK_SIZE) => { const n = name ?? autoName(); await pfs.write(n, randomBytes(size)); return { name: n, size }; };
   const readFile = async (name) => { const n = name ?? pickKnown(); const bytes = await pfs.read(n); return { name: n, size: bytes.length }; };
   const deleteFile = async (name) => { const n = name ?? pickKnown(); const st = await pfs.stat(n); await pfs.remove(n); return { name: n, size: st ? st.size : 0 }; };
   // mkdir -p: create each missing parent by looping the single-level shim primitive
   // (a no-op success on flat FASTFFS; real on LittleFS later). See ADR-0014 Namespace.
   const mkdirP = async (path) => { let cur = ''; for (const p of String(path).split('/').filter(Boolean)) { cur += (cur ? '/' : '') + p; await pfs.mkdir(cur); } return 'ok'; };
-  const getFiles = (prefix) => lsStream(false, prefix);
+  const getFiles = (prefix) => activeSession.lsStream(false, prefix);
 
   const scope = {
-    fs: pfs, device: runner.device, viz, randomBytes, help,
+    fs: pfs, get device() { return activeSession.device; }, get viz() { return activeSession.viz; }, randomBytes, help,
     writeFile, readFile, deleteFile, mkdir: mkdirP, getFiles,
-    ls: (prefix) => lsStream(true, prefix),
-    cat: (n) => pace(() => fs.cat(n)),
-    gc: async (n = 1) => { let a; for (let i = 0; i < Math.max(1, n | 0); i++) a = await pace(() => fs.gcStep()); return a; },
+    ls: (prefix) => activeSession.lsStream(true, prefix),
+    cat: (n) => activeSession.pace(() => activeSession.fs.cat(n)),
+    gc: async (n = 1) => { let a; for (let i = 0; i < Math.max(1, n | 0); i++) a = await activeSession.pace(() => activeSession.fs.gcStep()); return a; },
     // Setup mode: full speed, no animation, still logs — for bulk seed/framework code.
-    prep: (enable = true) => { prepMode = !!enable; viz.setPrep(prepMode); log(`prep ${prepMode ? 'on — full speed, no animation (still logging)' : 'off — paced + animated'}`, 'sys'); },
+    // Applies to every participant (not just the displayed one) so a bulk script
+    // seeds the whole lockstep set uniformly.
+    prep: (enable = true) => {
+      prepMode = !!enable;
+      for (const s of sessions.values()) s.setPrep(prepMode);
+      log(`prep ${prepMode ? 'on — full speed, no animation (still logging)' : 'off — paced + animated'}`, 'sys');
+    },
     print: (...a) => log(a.map(formatVal).join(' '), 'out'),
     text: (s) => new TextEncoder().encode(s),
   };
@@ -300,100 +395,26 @@ async function boot() {
   });
   log('console ready — await fs.write(...) paces to simulated time.', 'sys');
   help();
-}
 
-function freshFilesystem(runner, churn) {
-  runner.format();
-  runner.mount();
-  if (churn) churn.reset();   // start the churn model over from its seed, matching the empty chip
-}
-
-// gcRatio = share of steps spent on a background GC step vs a foreground file op.
-// Turn it down and FASTFFS falls back to inline (foreground) GC during writes —
-// watch individual write() times spike in the log and garbage pile up.
-// Churn model: the ported FASTFFS generator (churn.js) decides the next op and
-// drives the FS toward a steady-state live size. Each step is either a background
-// GC step or one model event (a write or a delete), applied to the model only
-// after the FS op so the model's slot table stays in lockstep with the chip.
-function workloadStep(fs, gcRatio, churn) {
-  if (Math.random() < gcRatio) { try { fs.gcStep(); } catch { /* logged by timed() */ } return; }
-  const ev = churn.next();
-  if (ev.type === CHURN_EVENT.WRITE) {
-    try { fs.write(ev.name, randomBytes(ev.size)); } catch { /* logged by timed() */ }
-    churn.apply(ev);
-  } else if (ev.type === CHURN_EVENT.DELETE) {
-    try { fs.remove(ev.name); } catch { /* logged by timed() */ }
-    churn.apply(ev);
+  // ---- display switch: clicking a compare row shows that participant ----
+  for (const fsId of Object.keys(FS_REGISTRY)) {
+    $('cmpRow-' + fsId)?.addEventListener('click', () => {
+      if (!sessions.has(fsId) || fsId === displayedFsId) return;
+      setDisplayed(fsId);
+      renderCompareRows();
+      log(`${activeSession.name} displayed.`, 'sys');
+    });
   }
-  // DONE / NO_SLOT: nothing to issue this step.
 }
 
-// slider 0..100 → sim-ns per real-ms on a log scale. Real flash time = 1e6.
-// Low = slow-mo, mid ≈ real-time, high = faster than real-time, 100 = no delay.
-function applySpeed(v, viz) {
-  let scale, label;
-  if (v >= 100) { scale = Infinity; label = 'max · no delay'; }
-  else {
-    const lo = Math.log10(3000), hi = Math.log10(1e8);
-    scale = Math.pow(10, lo + (hi - lo) * (v / 99));
-    const x = scale / 1e6; // >1 faster than real flash, <1 slower
-    label = (x >= 0.9 && x <= 1.15) ? '≈ real-time'
-      : x < 1 ? `${(1 / x < 10 ? (1 / x).toFixed(1) : Math.round(1 / x))}× slow-mo`
-      : `${x < 10 ? x.toFixed(1) : Math.round(x)}× real-time`;
-  }
-  viz.setScale(scale);
-  $('speedRead').textContent = label;
-  return !isFinite(scale);
-}
-
-// Cheap, frequent: device counters + display fractions (no flash re-scan).
-function refreshHUD(runner, viz) {
-  const m = viz.metrics();
-  const s = runner.device.stats;
-  const info = runner.fsinfo();
-  const wa = runner.hostBytes ? (s.programBytes / runner.hostBytes) : 1;
-  let peakWear = 0; for (const w of runner.device.wear) if (w > peakWear) peakWear = w;
-
-  set('sAmp', wa.toFixed(1) + '×'); set('fAmp', wa.toFixed(1) + '×');
-  set('fProg', Math.round(100 * m.displayedBytes / m.capacityBytes) + '%');
-  set('fFree', m.erasedPages);
-  set('sFiles', info.files);
-  set('sBytes', (info.bytes / 1024).toFixed(1) + ' KB');
-  set('sErase', s.erases); set('fErase', s.erases);
-  set('sRead', s.reads); set('sWear', peakWear);
-  set('fSim', fmtTime(s.simNs));
-  $('specLive').textContent = `mounted · ${info.files} files · ${fmtTime(s.simNs)} of flash time`;
-}
-
-// Expensive, on-change only: reachability walk → die tint + precise live/garbage.
-function refreshLiveness(runner, viz) {
-  const map = runner.liveMap();
-  if (!map) return;
-  viz.applyLiveMap(map);
-  const c = viz.liveCounts();
-  const programmed = c.live + c.obsolete + c.metadata;
-  set('sObs', programmed ? Math.round(100 * c.obsolete / programmed) + '%' : '0%');
-  $('uProg').style.width = (100 * c.live / viz.npages) + '%';
-  $('uObs').style.width = (100 * c.obsolete / viz.npages) + '%';
-  let liveSectors = 0; const pps = viz.pagesPerSector;
-  for (let sec = 0; sec * pps < map.length; sec++)
-    for (let k = 0; k < pps; k++) if (map[sec * pps + k] === 3) { liveSectors++; break; }
-  set('sLive', liveSectors);
-}
-
-const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)} ms` : `${(ms / 1000).toFixed(2)} s`; };
-function set(id, v) { const e = $(id); if (e) e.textContent = v; }
-
-function logOp(label, batch, err) {
-  if (err) { log(`${label} → ${err.message || err}`, 'err'); return; }
-  const ns = batch.reduce((a, e) => a + e.ns, 0);
-  const c = { read: 0, prog: 0, erase: 0 };
-  for (const e of batch) c[e.op] = (c[e.op] || 0) + 1;
-  const parts = [];
-  if (c.erase) parts.push(`${c.erase} erase`);
-  if (c.prog) parts.push(`${c.prog} prog`);
-  if (c.read) parts.push(`${c.read} read`);
-  log(`${label} → ${fmtTime(ns)}${parts.length ? ' · ' + parts.join(' ') : ''}`, 'out');
+// Caps-gating (ADR-0011/0015): hide controls the DISPLAYED FS disclaims instead
+// of showing a dead/no-op control. Driven off the runtime `caps` bitmask, never
+// assumed from the fsId — a driver's advertised capabilities are the contract.
+function applyCapsGating(caps) {
+  const toggle = (id, hide) => { const e = $(id); if (e) e.classList.toggle('hidden', hide); };
+  toggle('ctlGc', !(caps & FF_CAP_GC));
+  toggle('statGarbage', !(caps & FF_CAP_LIVE_MAP));
+  toggle('utilBar', !(caps & FF_CAP_LIVE_MAP));
 }
 
 function runConsole(src, scope) {
@@ -431,6 +452,10 @@ function help() {
     '  const d = await fs.openDir(prefix?)      → d.read() → {name,size}|null, d.close()',
     'MODES:  fs.format() / fs.mount() / fs.unmount()   ·   fs.sectorClasses() / fs.liveMap()',
     '  prep(true)   full-speed setup: no animation, no await-pacing, still logs; prep(false) resumes',
+    'FS:  the FS row (top of the transport bar) toggles which filesystems PARTICIPATE — 2+ selected runs',
+    '  them lockstep (RACE/PACE); click a Compare row to pick which one is DISPLAYED. Fresh, empty chips,',
+    '  no carryover, on every participant change. A control disappears when the displayed FS disclaims',
+    '  that capability (ADR-0011).',
     'DEVICE / VIEW:',
     '  device   flash, wear[], stats{reads,programs,erases,simNs,programBytes}',
     '  fs.geometry   { sectorSize, sectorCount, pageSize, granule }',

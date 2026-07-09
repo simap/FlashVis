@@ -15,9 +15,11 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 // ff_caps() bits (ADR-0011) — must match every ff_* shim (bindings/*/shim.c).
-const FF_CAP_GC             = 1 << 0;
-const FF_CAP_SECTOR_CLASSES = 1 << 1;
-const FF_CAP_LIVE_MAP       = 1 << 2;
+// Exported so the UI (playground.js) can gate controls on the *same* bits the
+// runner gates its optional methods on, instead of re-declaring the mask.
+export const FF_CAP_GC             = 1 << 0;
+export const FF_CAP_SECTOR_CLASSES = 1 << 1;
+export const FF_CAP_LIVE_MAP       = 1 << 2;
 // FF_CAP_APPEND (1 << 3): ff_open mode 2 ('a') is implemented — not runner-gated
 // yet (open() just forwards the mode and lets ff_open reject it), listed here
 // for the bit layout to stay visibly complete against the ADR-0011 contract.
