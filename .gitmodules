@@ -2,3 +2,6 @@
 	path = fs/fastffs
 	url = git@github.com:simap/FASTFFS.git
 	branch = main
+[submodule "fs/littlefs"]
+	path = fs/littlefs
+	url = https://github.com/littlefs-project/littlefs.git
