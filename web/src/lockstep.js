@@ -20,6 +20,18 @@
  * The gc-vs-event coin flip uses a SEEDED PRNG, never Math.random(), so the
  * canonical sequence — and therefore the cross-session comparison — is
  * reproducible run to run.
+ *
+ * Sequence entries come in three kinds:
+ *   { kind:'gc' }                  — one opportunistic GC step
+ *   { kind:'event', ev }           — one churn write/delete (the auto-workload)
+ *   { kind:'poke', op, args }      — one hand-issued operation (ADR-0017)
+ * A poke is ADR-0017's model made concrete: every manual operation — mutations
+ * AND queries (read/ls/stat) alike — is broadcast() onto this one timeline at the
+ * frontier ("present") and executed by each session when its cursor reaches it,
+ * exactly like a churn step. So a poke replays IDENTICALLY on every FS regardless
+ * of which one is focused or how far apart Race has drifted their cursors — the
+ * comparison stays trustworthy. Focus is a pure view concern the manager owns;
+ * nothing here knows or cares which FS is on screen.
  */
 import { CHURN_EVENT } from './churn.js';
 
@@ -38,6 +50,11 @@ function mulberry32(seed) {
 }
 
 const GEN_SEED = 0x5eed0001;
+// Broadcast write-content seeds are drawn from their OWN stream (POKE_SEED), never
+// from the churn generator's PRNG — injecting a poke must not shift the auto-
+// workload's gc/op interleave, or the canonical churn sequence would stop being
+// reproducible the moment a user hand-issued a command (ADR-0017).
+const POKE_SEED = 0x900d5eed;
 
 /**
  * @param {Object} opts
@@ -64,8 +81,9 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
   const cursors = new Map();      // session -> next unconsumed index into `sequence`
   const sequence = [];            // canonical step log, generated lazily, ever-growing
   let rnd = mulberry32(GEN_SEED);
+  let pokeRng = mulberry32(POKE_SEED);   // separate stream for broadcast write-content seeds (see POKE_SEED)
   let ratio = gcRatio;
-  let mode = 'race';              // 'race' | 'pace'
+  let mode = 'pace';              // 'race' | 'pace' — Pace is the default (ADR-0017/0018 boot in Pace)
   let running = false;
   let scale = 20000;              // sim-ns per real-ms — the SAME scale the players use; numeric copy for the race clock
   let atMax = false;              // no-delay flag — set by setSpeed(Infinity)
@@ -94,6 +112,7 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
   function runEntry(session, entry) {
     try {
       if (entry.kind === 'gc') session.runGcStep();
+      else if (entry.kind === 'poke') session.runPoke(entry.op, entry.args);
       else session.runChurnEvent(entry.ev);
     } catch { /* logged by the session's own timed() */ }
   }
@@ -201,16 +220,50 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
     },
     /** Fresh, empty chip on every participant, generator restarted from its seed,
      *  sequence and cursors cleared. Called whenever the participant set changes
-     *  (ADR-0015's "no carryover" rule extended to N sessions). Also zeroes the
+     *  (ADR-0015's "no carryover" rule extended to N sessions). Clearing `sequence`
+     *  drops any queued poke entries along with the churn steps, and re-seeding
+     *  pokeRng makes a fresh run's broadcast content reproducible. Also zeroes the
      *  shared Race clock so a fresh set starts from an empty sim-time budget. */
     reset() {
       for (const s of sessions) s.freshFormat();
       churn.reset();
       sequence.length = 0;
       rnd = mulberry32(GEN_SEED);
+      pokeRng = mulberry32(POKE_SEED);
       for (const s of sessions) cursors.set(s, 0);
       raceClock = 0;
       lastTickNow = 0;
+    },
+    /** Append a hand-issued operation at the sequence frontier ("present"), so the
+     *  leader hits it next and each follower hits it when its cursor arrives — one
+     *  broadcast, replayed identically on every FS (ADR-0017). `op` ∈ {write, read,
+     *  ls, delete, stat, mkdir, gc, format}; `args` is op-specific (session.runPoke
+     *  interprets it). For a `write`, a content seed is generated ONCE here (its own
+     *  PRNG stream — never the churn PRNG) and stashed in args.seed, so every FS
+     *  writes byte-identical content, exactly as a churn write does. Returns
+     *  `{ index, entry }` — the entry's position in the canonical sequence and the
+     *  entry object itself — so the UI can track its queued→live→done lifecycle
+     *  against the focused session's cursor. */
+    broadcast(op, args = {}) {
+      const a = { ...args };
+      if (op === 'write' && a.seed === undefined) a.seed = (pokeRng() * 0x100000000) >>> 0;
+      const entry = { kind: 'poke', op, args: a };
+      const index = sequence.length;
+      sequence.push(entry);
+      return { index, entry };
+    },
+    /** What a session still has queued ahead of it: `gap` is how far its cursor
+     *  sits behind the frontier (frontier − cursor — 0 in Pace, positive for a Race
+     *  follower), and `entries` are the not-yet-executed POKE entries in that span,
+     *  each as `{ index, entry }` (same shape broadcast() returns), for the tape to
+     *  render as ⧗ queued (ADR-0018). Churn steps in the gap are counted in `gap`
+     *  but omitted from `entries` — they're the auto-workload, not injected commands. */
+    pendingFor(session) {
+      const c = cursors.get(session) ?? 0;
+      const frontier = sequence.length;
+      const entries = [];
+      for (let i = c; i < frontier; i++) if (sequence[i].kind === 'poke') entries.push({ index: i, entry: sequence[i] });
+      return { entries, gap: frontier - c };
     },
     /** Per-session comparison readout for the UI's compare strip. Garbage% comes
      *  from session.livenessCounts() (ADR-0015 accessor) — cached behind that

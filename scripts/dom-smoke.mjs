@@ -93,6 +93,7 @@ if (dom.getEl('cmpFiles-littlefs').textContent !== '0') fail(`littlefs should be
 // loop — whose ticks are microseconds apart — advances the sim clock
 // deterministically. Each runIntervals() = one coordinator tick; the interleaved
 // dom.tick() drains the (no-delay) players so the backlog cap never bites.
+dom.dispatch('modePick-race');              // select Race explicitly — the coordinator now boots in Pace (ADR-0017/0018)
 dom.getEl('speed').value = '100';           // max · no delay ⇒ fixed sim-ns chunk per race tick
 dom.dispatch('speed', 'input');
 dom.dispatch('btnRun');

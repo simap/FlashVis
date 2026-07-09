@@ -3,12 +3,15 @@
  * viz, die DOM, op-log capture (timed()), and liveness tracking (ADR-0015).
  *
  * A session is a pure EXECUTOR: it runs whatever op it's handed (a churn
- * event, a GC step, a console call) and paces/logs/animates it, but never
- * decides what to run next. The churn *generator* and the gc-vs-churn ratio
- * decision live one layer up, in the manager (playground.js), so a future
- * lockstep coordinator can drive N sessions off one shared churn without
- * touching session internals — see runChurnEvent()/runGcStep() below, the
- * seam that coordinator will call through.
+ * event, a broadcast poke, a GC step, a console call) and paces/logs/animates
+ * it, but never decides what to run next. The churn *generator*, the
+ * gc-vs-churn ratio, and the one canonical broadcast sequence (ADR-0017) all
+ * live one layer up, in the coordinator, so it can drive N sessions off one
+ * shared timeline without touching session internals — see runChurnEvent() /
+ * runPoke() / runGcStep() below, the seam that coordinator calls through.
+ *
+ * Each session owns its own tape too: a per-FS journal buffer (ADR-0018), since
+ * every filesystem has its own timing, results, and pending state.
  */
 import { createRunner } from './runner.js';
 import { createViz } from './viz.js';
@@ -89,9 +92,37 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     cachedCounts = { live, obsolete, metadata };
   }
 
+  // Per-session journal / tape (ADR-0017/0018): this session owns its own op-log
+  // scrollback — each FS has its own timing, results, and pending state, so the
+  // tape is per-FS and follows focus. Entries carry a lifecycle `state` the
+  // coordinator advances ('queued' → 'live' → 'done'); a result line emitted by
+  // an already-executed op defaults to 'done'. The legacy onLog sink still fires
+  // for every line, so existing callers (the shared termout) are unaffected —
+  // the journal is purely additive.
+  const journal = [];
+  const journalSubs = [];
+  let journalSeq = 0;
+  const notifyJournal = (change) => { for (const cb of journalSubs) cb(change); };
+  /** Append one line to the journal and the legacy onLog sink. Returns the entry
+   *  so its `state` can later be advanced in place via setJournalState. */
+  function appendJournal(text, cls = 'out', state = 'done') {
+    const entry = { id: journalSeq++, text, cls, state };
+    journal.push(entry);
+    onLog?.(text, cls);
+    notifyJournal({ type: 'append', entry, journal });
+    return entry;
+  }
+  /** Advance an existing entry's lifecycle state and notify subscribers. No-op
+   *  when the state is unchanged. Returns the entry. */
+  function setJournalState(entry, state) {
+    if (!entry || entry.state === state) return entry;
+    entry.state = state;
+    notifyJournal({ type: 'update', entry, journal });
+    return entry;
+  }
+
   function logOp(label, batch, err) {
-    if (!onLog) return;
-    if (err) { onLog(`${label} → ${err.message || err}`, 'err'); return; }
+    if (err) { appendJournal(`${label} → ${err.message || err}`, 'err'); return; }
     const ns = batch.reduce((a, e) => a + e.ns, 0);
     const c = { read: 0, prog: 0, erase: 0 };
     for (const e of batch) c[e.op] = (c[e.op] || 0) + 1;
@@ -99,7 +130,7 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     if (c.erase) parts.push(`${c.erase} erase`);
     if (c.prog) parts.push(`${c.prog} prog`);
     if (c.read) parts.push(`${c.read} read`);
-    onLog(`${label} → ${fmtTime(ns)}${parts.length ? ' · ' + parts.join(' ') : ''}`, 'out');
+    appendJournal(`${label} → ${fmtTime(ns)}${parts.length ? ' · ' + parts.join(' ') : ''}`, 'out');
   }
 
   // Logs each op's simulated flash cost. Swallows a thrown error (logs it
@@ -145,11 +176,11 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     for (;;) {
       const e = await pace(() => dir.read());
       if (!e) break;
-      if (printEach) onLog?.(`  ${e.name}  ${e.size} B`, 'out');
+      if (printEach) appendJournal(`  ${e.name}  ${e.size} B`, 'out');
       files.push(e);
     }
     await pace(() => dir.close());
-    if (printEach && !files.length) onLog?.('  (empty)', 'out');
+    if (printEach && !files.length) appendJournal('  (empty)', 'out');
     return files;
   };
 
@@ -171,6 +202,36 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     },
     /** One opportunistic GC step, timed + logged; null no-op when unsupported. */
     runGcStep() { return fs.gcStep(); },
+
+    /** Execute ONE broadcast filesystem operation on this session (ADR-0017):
+     *  timed + logged + animated exactly like runChurnEvent, landing in this
+     *  session's journal and costing simulated flash time. `op` and its `args`:
+     *    write  { name, size, seed }  content = deterministicBytes(seed, size),
+     *                                 so the same poke is byte-identical on every FS
+     *    read   { name }
+     *    ls     { }                   whole-FS listing (its dir scan is the traffic)
+     *    delete { name }
+     *    stat   { name }
+     *    mkdir  { name }
+     *    gc     { }                   one GC step (null no-op when unsupported)
+     *    format { }                   re-format + mount (fresh, empty chip)
+     *  Returns whatever the underlying op yields. Throws on an unknown op. */
+    runPoke(op, args = {}) {
+      switch (op) {
+        case 'write': {
+          const size = args.size >>> 0;
+          return timed(`write(${args.name}, ${size} B)`, () => runner.write(args.name, deterministicBytes(args.seed >>> 0, size)));
+        }
+        case 'read':   return fs.read(args.name);
+        case 'ls':     return fs.list();
+        case 'delete': return fs.remove(args.name);
+        case 'stat':   return fs.stat(args.name);
+        case 'mkdir':  return fs.mkdir(args.name);
+        case 'gc':     return fs.gcStep();
+        case 'format': return timed('format()', () => { runner.format(); runner.mount(); });
+        default: throw new Error(`runPoke: unknown op '${op}'`);
+      }
+    },
     /** Fresh, empty chip. Churn-model reset is the manager's job, not the session's. */
     freshFormat() { runner.format(); runner.mount(); },
 
@@ -238,6 +299,22 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     names: () => runner.names(),
     lsStream,
     fs,
+
+    // ---- per-session journal / tape (ADR-0017/0018) ----
+    /** This session's op-log scrollback: [{ id, text, cls, state }], newest last.
+     *  `state` ∈ 'queued' | 'live' | 'done'. Read-only for the UI; mutate state
+     *  through setJournalState so subscribers are notified. */
+    journal,
+    /** Subscribe to journal changes. cb({ type: 'append'|'update', entry, journal })
+     *  fires on every append and every state change. Returns an unsubscribe fn. */
+    onJournal(cb) { journalSubs.push(cb); return () => { const i = journalSubs.indexOf(cb); if (i >= 0) journalSubs.splice(i, 1); }; },
+    /** Append a line to the tape (also mirrored to the legacy onLog sink). The
+     *  coordinator uses this for lifecycle lines — pass state 'queued'/'live';
+     *  op-result lines self-append as 'done'. Returns the entry. */
+    appendJournal,
+    /** Advance an entry's lifecycle state ('queued' → 'live' → 'done') in place,
+     *  notifying subscribers. No-op when unchanged. */
+    setJournalState,
 
     /** Stop the player, unmount, and remove this session's die from the DOM.
      *  viz.stop() first so no rAF loop survives to pin the device + WASM module
