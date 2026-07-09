@@ -1,6 +1,6 @@
 # ADR 0017: Multi-FS by default — every operation broadcasts through one timeline; the view focuses one FS
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0019](0019-atomic-command-broadcast.md) — the broadcast/focus stance holds; the op-level granularity and completion model do not.
 - **Date:** 2026-07-09
 - **Deciders:** —
 

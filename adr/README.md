@@ -34,8 +34,9 @@ new ADR that supersedes it, so the trail of *why it changed* survives.
 | [0014](0014-console-fs-api.md) | Console FS API — friendly pokes + raw handles over a static pool | Accepted |
 | [0015](0015-session-manager-and-executor-seam.md) | A session abstraction, split from a manager, for the FS picker (and later lockstep) | Accepted |
 | [0016](0016-lockstep-coordinator.md) | A lockstep coordinator drives N sessions off one canonical step sequence | Accepted |
-| [0017](0017-broadcast-operations-focus-the-view.md) | Multi-FS by default — every operation broadcasts through one timeline; the view focuses one FS | Accepted |
+| [0017](0017-broadcast-operations-focus-the-view.md) | Multi-FS by default — every operation broadcasts through one timeline; the view focuses one FS | Superseded by [0019](0019-atomic-command-broadcast.md) |
 | [0018](0018-console-tape-and-scoreboard.md) | The console tape as journal of truth; the scoreboard shell | Accepted |
+| [0019](0019-atomic-command-broadcast.md) | Broadcast the atomic command, not the op; a local inner API; complete on quiescence | Accepted |
 
 ADRs 0001–0004 document the throwaway JS prototype that established the visual language.
 They're kept as history; the live architecture starts at 0005.
