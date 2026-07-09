@@ -353,3 +353,22 @@ int ff_live_map(uint8_t *out, uint32_t page_size) {
     g_quiet = 0;
     return rc;
 }
+
+/* ---- ADR-0011: uniform FS-driver ABI — version + capability advertisement ---- */
+
+/* Bump whenever the ff_* contract (semantics/signatures, not just additions)
+ * changes in a way old callers can't tolerate. runner.js asserts this on load. */
+#define FF_ABI_VERSION 1
+
+/* ff_caps() bitmask — capability bits shared across every ff_* shim (ADR-0011).
+ * runner.js gates the matching optional method on both symbol-presence and
+ * its bit here, so a shim can omit an export outright or export-but-disclaim it. */
+#define FF_CAP_GC              (1u << 0)  /* ff_gc_step is implemented */
+#define FF_CAP_SECTOR_CLASSES  (1u << 1)  /* ff_sector_classes is implemented */
+#define FF_CAP_LIVE_MAP        (1u << 2)  /* ff_live_map is implemented */
+#define FF_CAP_APPEND          (1u << 3)  /* ff_open mode 2 ('a') is implemented */
+
+uint32_t ff_abi_version(void) { return FF_ABI_VERSION; }
+
+/* FASTFFS: GC + both inspect hooks; no append (ff_open only knows modes 0/1). */
+uint32_t ff_caps(void) { return FF_CAP_GC | FF_CAP_SECTOR_CLASSES | FF_CAP_LIVE_MAP; }

@@ -37,7 +37,7 @@ emcc \
   -Oz -std=c11 \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sENVIRONMENT=node,web \
   -sINITIAL_MEMORY=16MB -sABORTING_MALLOC=1 \
-  -sEXPORTED_FUNCTIONS=_ff_config,_ff_format,_ff_mount,_ff_unmount,_ff_write,_ff_read,_ff_open,_ff_file_read,_ff_file_write,_ff_file_seek,_ff_file_stat,_ff_file_close,_ff_delete,_ff_exists,_ff_stat,_ff_mkdir,_ff_list,_ff_gc_step,_ff_committed_files,_ff_committed_bytes,_ff_sector_classes,_ff_live_map,_ff_dir_open,_ff_dir_read,_ff_dir_close,_malloc,_free \
+  -sEXPORTED_FUNCTIONS=_ff_config,_ff_format,_ff_mount,_ff_unmount,_ff_write,_ff_read,_ff_open,_ff_file_read,_ff_file_write,_ff_file_seek,_ff_file_stat,_ff_file_close,_ff_delete,_ff_exists,_ff_stat,_ff_mkdir,_ff_list,_ff_gc_step,_ff_committed_files,_ff_committed_bytes,_ff_sector_classes,_ff_live_map,_ff_dir_open,_ff_dir_read,_ff_dir_close,_ff_abi_version,_ff_caps,_malloc,_free \
   -sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString,stringToUTF8,lengthBytesUTF8 \
   --js-library build/flash_hal.js \
   -o dist/fastffs.mjs
