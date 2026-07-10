@@ -37,6 +37,7 @@ new ADR that supersedes it, so the trail of *why it changed* survives.
 | [0017](0017-broadcast-operations-focus-the-view.md) | Multi-FS by default — every operation broadcasts through one timeline; the view focuses one FS | Superseded by [0019](0019-atomic-command-broadcast.md) |
 | [0018](0018-console-tape-and-scoreboard.md) | The console tape as journal of truth; the scoreboard shell | Accepted |
 | [0019](0019-atomic-command-broadcast.md) | Broadcast the atomic command, not the op; a local inner API; complete on quiescence | Accepted |
+| [0020](0020-run-pause-gates-stimulus.md) | Run/Pause gates stimulus (the churn generator), not execution; Speed is the sole execution control | Accepted |
 
 ADRs 0001–0004 document the throwaway JS prototype that established the visual language.
 They're kept as history; the live architecture starts at 0005.
