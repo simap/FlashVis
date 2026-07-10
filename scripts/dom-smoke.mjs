@@ -1,184 +1,159 @@
 /*
- * Dom-smoke: boot the WHOLE playground (control panel + viz + WASM FASTFFS)
- * headless in Node against a fake DOM, then drive one real op and assert the UI
- * reflected real device traffic. This is the end-to-end guard the unit-ish
- * fastffs/integrity tests don't cover: it exercises viz.js and playground.js,
- * not just the runner. It also exercises the lockstep coordinator (ADR-0016):
- * adding a second participant, Race-mode progress on both, and the display
- * switch rebinding the shared HUD/console to whichever session is shown.
+ * Dom-smoke: boot the console/comparison UI (ADR-0018/0019) headless in Node
+ * against a fake DOM, driving it through the compiler/broadcast path and
+ * asserting the tape, scoreboard, and present-gap behavior react correctly.
  *
- * It imports playground.js dynamically AFTER the fake DOM is installed, because
- * the module boots itself on import.
+ * Unlike the pre-ADR-0019 version of this file, this does NOT boot against
+ * real WASM / the real session.js+lockstep.js: those are owned by a parallel
+ * backend lane and, as of this writing, still implement the OLDER op-level
+ * broadcast (ADR-0017) — they don't yet expose the ADR-0019 contract
+ * playground.js is built against (broadcast(commandFn,label),
+ * pendingFor().behind, session.journal/onJournal). Instead this installs
+ * scripts/stub-backend.mjs — a lightweight stand-in that matches the
+ * DOCUMENTED contract — via globalThis.__flashvisBackend before importing
+ * playground.js (see loadBackend() there). That keeps this guard exercising
+ * the real, shipped compiler/UI code deterministically. Once the backend
+ * lands ADR-0019, this should be re-pointed at the real modules (drop the
+ * override) to restore full real-WASM end-to-end coverage.
  */
 import { installFakeDom } from './fake-dom.mjs';
+import { createSession, createLockstep } from './stub-backend.mjs';
 
 const dom = installFakeDom();
 const fail = (msg) => { console.error('FAIL —', msg); dom.uninstall(); process.exit(1); };
 
-// termout accumulates the playground's log lines; scan it for readiness / errors.
-const termout = dom.getEl('termout');
-const lines = () => termout.children.map((c) => ({ text: c.textContent, cls: c.className }));
-const has = (needle, from = 0) => lines().slice(from).some((l) => l.text.includes(needle));
-const errorsSince = (from = 0) => lines().slice(from).filter((l) => l.cls.includes('err'));
+globalThis.__flashvisBackend = { createSession, createLockstep };
 
 await import('../web/src/playground.js');   // starts boot()
 
-// Let boot() resolve (it awaits the WASM module load), ticking frames meanwhile.
+// ---- wait for boot() to finish wiring everything ----
 let ready = false;
 for (let i = 0; i < 400 && !ready; i++) {
   await new Promise((r) => setTimeout(r, 0));
   dom.tick(1);
-  ready = has('console ready');
+  ready = dom.getEl('bootStatus').textContent === 'ready';
 }
-if (!ready) fail('playground never reached "console ready" (boot hung or threw)');
-if (errorsSince().length) fail(`errors logged during boot: ${errorsSince().map((l) => l.text).join(' | ')}`);
+if (!ready) fail('playground never reached bootStatus "ready" (boot hung or threw)');
+if (dom.getEl('specLive').textContent.includes('boot failed')) fail(`boot failed: ${dom.getEl('specLive').textContent}`);
 
-// Fire the HUD/liveness/compare intervals once so the spec line + compare row reflect the mounted FS.
 dom.runIntervals();
 
-// The active session mounted its own .die into the shared #dieStack container
-// (one child per sector), and the spec line came from real geometry.
+// ---- both filesystems are live from page load (ADR-0017) ----
 const dieStack = dom.getEl('dieStack');
-if (dieStack.children.length !== 1) fail(`dieStack has ${dieStack.children.length} mounted dies, expected 1`);
-let die = dieStack.children[0];
-if (die.children.length !== 64) fail(`die has ${die.children.length} sectors, expected 64`);
-const geo = dom.getEl('specGeo').textContent;
-if (!/KB/.test(geo) || !/ESP32-S3 timing/.test(geo)) fail(`specGeo looks wrong: "${geo}"`);
-if (!dom.getEl('specLive').textContent.includes('mounted')) fail('specLive not mounted');
+if (dieStack.children.length !== 2) fail(`dieStack has ${dieStack.children.length} mounted dies, expected 2 (both FS live from load)`);
 
-// Drive a real write via the Write button, play it out, refresh the HUD.
+// ---- scoreboard-switcher header (ADR-0018): one segment per participant ----
+const sbFastffs = dom.getEl('sbSeg-fastffs'), sbLittlefs = dom.getEl('sbSeg-littlefs');
+if (!sbFastffs.classList.contains('on')) fail('fastffs should be the initially-focused scoreboard segment');
+if (sbLittlefs.classList.contains('on')) fail('littlefs should not be focused initially');
+
+// ---- FIX 1: boot logs help()+format() as BROADCAST commands, so BOTH tapes
+// show both — not just the focused one. Check the focused (fastffs) tape,
+// then switch focus and check littlefs's own tape independently. ----
+const tapeText = () => dom.getEl('tape').children.map((c) => c.textContent).join('\n');
+if (!tapeText().includes('help()')) fail(`focused (fastffs) tape missing 'help()' at boot:\n${tapeText()}`);
+if (!tapeText().includes('format()')) fail(`focused (fastffs) tape missing 'format()' at boot:\n${tapeText()}`);
+
+dom.dispatch('sbSeg-littlefs');
+if (!sbLittlefs.classList.contains('on')) fail('clicking the littlefs segment should focus it');
+if (sbFastffs.classList.contains('on')) fail('fastffs should lose focus after switching to littlefs');
+if (!tapeText().includes('help()')) fail(`littlefs's OWN tape missing 'help()' after focusing it — boot commands did not reach every session:\n${tapeText()}`);
+if (!tapeText().includes('format()')) fail(`littlefs's OWN tape missing 'format()' after focusing it:\n${tapeText()}`);
+
+// ---- FIX 4: present-gap chip suppressed in normal (steady, paused) Pace —
+// driven off pendingFor().behind, not gap>0. ----
+if (!dom.getEl('tapeGap').classList.contains('hidden')) fail('present-gap header should be hidden in steady Pace at boot');
+
+// ---- buttons inject commands (ADR-0018): Write goes through the exact same
+// compile+broadcast path as typing, and shows up on the tape with a real
+// result. A command only ADVANCES past "queued" while the workload engine is
+// running (Run/Step gates the sequence cursor, same as the real coordinator) —
+// so press Run for the rest of the interactive tests. ----
+dom.dispatch('sbSeg-fastffs');   // back to fastffs
+dom.dispatch('btnRun');
+const preWrite = dom.getEl('tape').children.length;
 dom.dispatch('btnWrite');
-dom.tick(30);
+let wrote = false;
+for (let i = 0; i < 200 && !wrote; i++) {
+  await new Promise((r) => setTimeout(r, 0));
+  dom.tick(1); dom.runIntervals();
+  wrote = tapeText().includes('writeFile()') && /write\(f/.test(tapeText());
+}
+if (!wrote) fail(`Write button never produced a writeFile() command + its write(...) result on the tape:\n${tapeText()}`);
+if (dom.getEl('tape').children.length <= preWrite) fail('tape did not grow after the Write button');
 dom.runIntervals();
+const filesAfterWrite = parseInt(dom.getEl('sFiles').textContent, 10);
+if (!(filesAfterWrite >= 1)) fail(`expected >=1 file after Write, HUD shows "${dom.getEl('sFiles').textContent}"`);
 
-if (errorsSince().length) fail(`errors after write: ${errorsSince().map((l) => l.text).join(' | ')}`);
-const files = parseInt(dom.getEl('sFiles').textContent, 10);
-if (!(files >= 1)) fail(`expected >=1 committed file after write, HUD shows "${dom.getEl('sFiles').textContent}"`);
-const simText = dom.getEl('fSim').textContent;
-if (/^0(\.0)? ms$/.test(simText) || simText === '') fail(`expected non-zero flash time, HUD shows "${simText}"`);
+// ---- console compiler (ADR-0019): type a multi-statement line with an
+// UNDECLARED loop var — the canonical footgun the sandbox must trap — and
+// confirm it runs as one atomic command with no crash and no global leak. ----
+const input = dom.getEl('terminput');
+const before = filesAfterWrite;
+input.value = "let last; for (i = 0; i < 5; i++) { let f = await writeFile('cs' + i, 32); last && await deleteFile(last.name); last = f; }";
+input.dispatch('keydown', { key: 'Enter' });
+let settled = false;
+for (let i = 0; i < 300 && !settled; i++) {
+  await new Promise((r) => setTimeout(r, 0));
+  dom.tick(1); dom.runIntervals();
+  settled = /delete\(cs\d\)/.test(tapeText());
+}
+if (!settled) fail(`typed multi-statement command with undeclared 'i' never completed its deletes:\n${tapeText()}`);
+if (typeof globalThis.i !== 'undefined') fail(`undeclared loop var 'i' leaked to globalThis.i = ${globalThis.i}`);
+dom.runIntervals();
+const filesAfterScript = parseInt(dom.getEl('sFiles').textContent, 10);
+if (!(filesAfterScript > before)) fail(`expected file count to grow after the typed script (before=${before}, after=${filesAfterScript})`);
 
-// The op log recorded the write with a real cost.
-if (!has('write(')) fail('no write(...) entry in the op log');
+// ---- Race mode: an artificial stagger in the stub makes littlefs lag behind
+// fastffs, so pendingFor(littlefs).behind should go true, the gap header
+// should show while littlefs is focused, and Catch-up should flip to Pace. ----
+dom.dispatch('modePick-race');   // still running from the Write/script tests above
+let diverged = false;
+for (let i = 0; i < 300 && !diverged; i++) {
+  await new Promise((r) => setTimeout(r, 0));
+  dom.tick(1); dom.runIntervals();
+  const f = parseInt(dom.getEl('sbStep-fastffs').textContent, 10);
+  const l = parseInt(dom.getEl('sbStep-littlefs').textContent, 10);
+  diverged = f > l && l >= 0;
+}
+if (!diverged) fail('Race mode never diverged the two step cursors (stub stagger not taking effect?)');
 
-// ---- lockstep (ADR-0016): add LittleFS as a second participant ----
-const preAdd = lines().length;
-dom.dispatch('fsPick-littlefs');
-let added = false;
-for (let i = 0; i < 400 && !added; i++) {
+dom.dispatch('sbSeg-littlefs');
+dom.runIntervals();
+if (dom.getEl('tapeGap').classList.contains('hidden')) fail('present-gap header should show once littlefs (the Race laggard) is focused');
+if (!dom.getEl('tapeGapText').textContent.includes('behind present')) fail(`gap header text looks wrong: "${dom.getEl('tapeGapText').textContent}"`);
+
+dom.dispatch('btnCatchup');
+if (!dom.getEl('modePick-pace').classList.contains('on')) fail('Catch-up should switch mode to Pace');
+let caughtUp = false;
+for (let i = 0; i < 300 && !caughtUp; i++) {
+  await new Promise((r) => setTimeout(r, 0));
+  dom.tick(1); dom.runIntervals();
+  caughtUp = dom.getEl('tapeGap').classList.contains('hidden');
+}
+if (!caughtUp) fail('present-gap header never cleared after Catch-up → Pace converged the cursors');
+dom.dispatch('btnRun');   // pause again
+
+// ---- participants: toggling still works, and "at least one" holds ----
+dom.dispatch('fsPick-littlefs');   // drop littlefs
+if (dieStack.children.length !== 1) fail(`expected 1 mounted die after dropping littlefs, got ${dieStack.children.length}`);
+dom.dispatch('fsPick-fastffs');    // can't drop the last one
+if (dieStack.children.length !== 1) fail('dropping the last participant should be a no-op');
+let rejoined = false;
+dom.dispatch('fsPick-littlefs');   // rejoin
+for (let i = 0; i < 200 && !rejoined; i++) {
   await new Promise((r) => setTimeout(r, 0));
   dom.tick(1);
-  added = has('participants:', preAdd) && has('LittleFS', preAdd);
+  rejoined = dieStack.children.length === 2;
 }
-if (!added) fail('adding LittleFS as a second participant never logged "participants: ..." (toggleParticipant hung or threw)');
-if (errorsSince(preAdd).length) fail(`errors while adding LittleFS: ${errorsSince(preAdd).map((l) => l.text).join(' | ')}`);
+if (!rejoined) fail('littlefs never rejoined as a participant');
 
-// Both dies stay mounted (participants aren't torn down, only display toggles visibility).
-if (dieStack.children.length !== 2) fail(`dieStack has ${dieStack.children.length} mounted dies with 2 participants, expected 2`);
-if (!dom.getEl('fsPick-fastffs').classList.contains('on')) fail('fastffs should still be a selected participant');
-if (!dom.getEl('fsPick-littlefs').classList.contains('on')) fail('littlefs should be a selected participant after toggling it on');
-
-// A participant-set change resets everyone (ADR-0015's "no carryover", extended) — both fresh.
-dom.runIntervals();
-if (dom.getEl('cmpFiles-fastffs').textContent !== '0') fail(`fastffs should be fresh after adding a participant, cmpFiles shows "${dom.getEl('cmpFiles-fastffs').textContent}"`);
-if (dom.getEl('cmpFiles-littlefs').textContent !== '0') fail(`littlefs should be fresh after adding a participant, cmpFiles shows "${dom.getEl('cmpFiles-littlefs').textContent}"`);
-
-// ---- Race mode: the corrected invariant (ADR-0016). Race clocks by SIMULATED
-// flash time, not animation — a shared sim-time budget advances and every
-// session runs until its own simNs reaches it. So after a while: total active
-// time (simNs) is ROUGHLY EQUAL across the two FSes, while their workload STEP
-// cursors DIVERGE (the cheaper-per-op FS fits more steps into the same sim-time).
-//
-// Driven at max speed on purpose: at no-delay the shared clock advances by a
-// FIXED sim-ns chunk per tick (independent of real elapsed), so this headless
-// loop — whose ticks are microseconds apart — advances the sim clock
-// deterministically. Each runIntervals() = one coordinator tick; the interleaved
-// dom.tick() drains the (no-delay) players so the backlog cap never bites.
-dom.dispatch('modePick-race');              // select Race explicitly — the coordinator now boots in Pace (ADR-0017/0018)
-dom.getEl('speed').value = '100';           // max · no delay ⇒ fixed sim-ns chunk per race tick
-dom.dispatch('speed', 'input');
-dom.dispatch('btnRun');
-for (let i = 0; i < 60; i++) { dom.runIntervals(); dom.tick(4); }
-dom.dispatch('btnRun');                     // pause again
-dom.runIntervals();
-
-if (errorsSince(preAdd).length) fail(`errors while racing: ${errorsSince(preAdd).map((l) => l.text).join(' | ')}`);
-
-// Parse the compare strip's formatted active-time back to milliseconds (fmtTime:
-// "<n> ms" or "<n> s"), so we can assert simNs is roughly equal numerically.
-const simMs = (text) => {
-  const m = text.trim().match(/^([\d.]+)\s*(ms|s)$/);
-  return m ? parseFloat(m[1]) * (m[2] === 's' ? 1000 : 1) : NaN;
-};
-const stepFastffs = parseInt(dom.getEl('cmpStep-fastffs').textContent, 10);
-const stepLittlefs = parseInt(dom.getEl('cmpStep-littlefs').textContent, 10);
-if (!(stepFastffs > 0)) fail(`expected fastffs' step cursor to advance in Race mode, shows "${dom.getEl('cmpStep-fastffs').textContent}"`);
-if (!(stepLittlefs > 0)) fail(`expected littlefs' step cursor to advance in Race mode, shows "${dom.getEl('cmpStep-littlefs').textContent}"`);
-// STEP cursors must DIVERGE — two FSes with different per-op cost can't complete
-// the identical step count within the same sim-time budget.
-if (stepFastffs === stepLittlefs) fail(`Race step cursors should diverge (different per-op cost), both = ${stepFastffs}`);
-const simFastffs = dom.getEl('cmpSim-fastffs').textContent;
-const simLittlefs = dom.getEl('cmpSim-littlefs').textContent;
-const msFastffs = simMs(simFastffs), msLittlefs = simMs(simLittlefs);
-if (!(msFastffs > 0)) fail(`expected fastffs to accrue simulated flash time in Race mode, shows "${simFastffs}"`);
-if (!(msLittlefs > 0)) fail(`expected littlefs to accrue simulated flash time in Race mode, shows "${simLittlefs}"`);
-// ACTIVE TIME must be ROUGHLY EQUAL — both raced against the same sim-time clock,
-// so they diverge only by one op's overshoot plus fmtTime rounding (well under 20%).
-const simSpread = Math.abs(msFastffs - msLittlefs) / Math.max(msFastffs, msLittlefs);
-if (simSpread > 0.2) fail(`Race active time should be roughly equal across FS, spread ${(100 * simSpread).toFixed(1)}% (fastffs ${simFastffs}, littlefs ${simLittlefs})`);
-
-// ---- Display switch: rebind die/HUD/console to LittleFS without tearing anything down ----
-const preSwitch = lines().length;
-dom.dispatch('cmpRow-littlefs');
-dom.runIntervals();
-if (dom.getEl('tagFsName').textContent !== 'LittleFS') fail(`tagFsName not rebound to LittleFS: "${dom.getEl('tagFsName').textContent}"`);
-if (dieStack.children.length !== 2) fail(`dieStack should still have 2 mounted dies after a display switch (only visibility changes), has ${dieStack.children.length}`);
-if (errorsSince(preSwitch).length) fail(`errors during display switch: ${errorsSince(preSwitch).map((l) => l.text).join(' | ')}`);
-
-// The rebound HUD reflects LittleFS's own file count (not fastffs's) — HUD refresh follows the display.
-const littlefsFilesShown = parseInt(dom.getEl('sFiles').textContent, 10);
-const littlefsFilesCmp = parseInt(dom.getEl('cmpFiles-littlefs').textContent, 10);
-if (littlefsFilesShown !== littlefsFilesCmp) fail(`HUD sFiles (${littlefsFilesShown}) doesn't match LittleFS's own file count (${littlefsFilesCmp}) after display switch`);
-
-// ---- Pace mode: repeated manual Steps converge both cursors to equal, no
-// matter how much Race left them diverged. Each Step only advances the
-// session(s) currently at the minimum cursor (ADR-0016's `due` filter), so
-// convergence is gradual and bounded — poll for an observable change after
-// each dispatch instead of assuming a fixed number of steps closes the gap. ----
-dom.dispatch('modePick-pace');
-async function waitForCursorChange(prevMin) {
-  for (let i = 0; i < 100; i++) {
-    await new Promise((r) => setTimeout(r, 0));
-    dom.tick(2);
-    dom.runIntervals();
-    const f = parseInt(dom.getEl('cmpStep-fastffs').textContent, 10);
-    const l = parseInt(dom.getEl('cmpStep-littlefs').textContent, 10);
-    if (Math.min(f, l) > prevMin) return { f, l };
-  }
-  return null;
-}
-// Race can leave the cursors up to ~(max step count) apart, and each Pace Step
-// closes the gap by exactly one (only the single min-cursor session is `due`),
-// so the round cap must exceed the widest possible divergence — 300 clears it
-// with margin for the ~150-step spreads this workload produces.
-let f = parseInt(dom.getEl('cmpStep-fastffs').textContent, 10);
-let l = parseInt(dom.getEl('cmpStep-littlefs').textContent, 10);
-let rounds = 0;
-do {
-  const prevMin = Math.min(f, l);
-  dom.dispatch('btnStep');
-  const res = await waitForCursorChange(prevMin);
-  if (!res) fail(`Pace-mode Step stalled converging cursors (fastffs=${f}, littlefs=${l})`);
-  f = res.f; l = res.l;
-  rounds++;
-} while (f !== l && rounds < 300);
-if (f !== l) fail(`Pace mode never converged both cursors to equal after ${rounds} steps (fastffs=${f}, littlefs=${l})`);
-if (!(f > 0)) fail('Pace-mode cursors converged at 0 — no progress made');
-
-console.log(`PASS — playground booted against real WASM, built ${die.children.length} sectors,`);
-console.log(`       drove a write (${files} file committed, ${simText} of flash time) with viz + HUD live,`);
-console.log(`       raced FASTFFS + LittleFS on one sim-time clock: active time ~equal`);
-console.log(`         (${simFastffs} vs ${simLittlefs}, ${(100 * simSpread).toFixed(1)}% spread) while steps diverged (${stepFastffs} vs ${stepLittlefs}),`);
-console.log(`       rebound the die/HUD to LittleFS via the display switch (${littlefsFilesShown} files shown),`);
-console.log(`       and converged Pace mode to equal cursors (${f}) after ${rounds} step(s).`);
+console.log('PASS — booted the console/comparison UI against a stub backend (ADR-0018/0019 contract):');
+console.log('  both FS live from load, scoreboard focus-switch works,');
+console.log('  boot help()/format() broadcast to BOTH tapes (fix 1),');
+console.log('  present-gap chip stays hidden in steady Pace (fix 4) and appears/clears correctly around a Race→Catch-up cycle,');
+console.log('  Write button injects a real writeFile() command onto the tape,');
+console.log(`  a typed multi-statement command with an undeclared loop var ran atomically with no global 'i' leak (files ${before} → ${filesAfterScript}),`);
+console.log('  and participant toggling still holds the "at least one" invariant.');
 dom.uninstall();
 process.exit(0);

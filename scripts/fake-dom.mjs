@@ -14,16 +14,27 @@
  */
 
 class FakeEl {
-  constructor(tag = 'div') {
+  // `registry` is the same id→element map `document.getElementById` reads
+  // (only passed by `document.createElement` — see installFakeDom). Setting
+  // `.id` on an element created that way registers it, so a dynamically built
+  // element (e.g. a scoreboard segment built + appended at runtime, ADR-0018)
+  // is the SAME object a later `getElementById`/dispatch resolves to — not a
+  // second, listener-less phantom auto-vivified by the plain lookup path
+  // static HTML-id elements rely on (see getEl below).
+  constructor(tag = 'div', registry = null) {
     this.tagName = tag.toUpperCase();
     this.children = [];
     this.dataset = {};
     this.className = '';
+    this._id = '';
+    this._registry = registry;
     this.textContent = '';
-    this.innerHTML = '';
+    this._innerHTML = '';
     this.value = '50';            // sane default for slider .value reads
     this.scrollTop = 0;
     this.scrollHeight = 0;
+    this.tabIndex = -1;
+    this._attrs = {};
     this._listeners = new Map();
     const classes = new Set();
     this.classList = {
@@ -41,6 +52,17 @@ class FakeEl {
       set: (t, k, v) => { t[k] = v; return true; },
     });
   }
+  get id() { return this._id; }
+  set id(v) { this._id = v; if (this._registry && v) this._registry.set(v, this); }
+  // No real parsing — just enough fidelity for the common "clear + rebuild"
+  // pattern real code uses (e.g. renderTapeFull/renderLegend): setting
+  // innerHTML drops this element's CURRENT children, matching a real
+  // browser's observable effect on `.children`/`.firstChild`/etc., even
+  // though the string itself isn't parsed into new child nodes here.
+  get innerHTML() { return this._innerHTML; }
+  set innerHTML(v) { this._innerHTML = v; this.children = []; }
+  setAttribute(k, v) { this._attrs[k] = String(v); }   // e.g. aria-pressed on a lane
+  getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; }
   appendChild(c) { this.children.push(c); return c; }
   removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); return c; }
   get firstChild() { return this.children[0] ?? null; }
@@ -75,7 +97,7 @@ export function installFakeDom() {
 
   set('document', {
     getElementById: getEl,
-    createElement: (tag) => new FakeEl(tag),
+    createElement: (tag) => new FakeEl(tag, byId),
   });
   set('matchMedia', () => ({ matches: false, addEventListener() {}, addListener() {} }));
   set('requestAnimationFrame', (cb) => { rafQueue.push(cb); return rafQueue.length; });
