@@ -1,39 +1,42 @@
 /*
- * Playground: the SESSION MANAGER (ADR-0015), now driving N sessions through a
- * lockstep coordinator (ADR-0016) instead of exactly one. Boots the shared
- * shell — control panel, HUD, JS console — owns the FS registry, ONE churn
- * generator, and the coordinator that fans it out to every PARTICIPATING
- * session. Exactly one session is DISPLAYED at a time: its die is shown, its
- * op-log feeds the console, and its HUD/liveness numbers drive the shared
- * stat DOM. Every filesystem call a session issues is wrapped by its own
- * timed(), which captures the device ops it issued and logs the real
- * simulated flash cost, e.g.
- *   ls() → 3.10 ms · 31 read
- *   write(boot.log, 912 B) → 24.8 ms · 1 erase 6 prog 3 read
+ * Playground: the console command-compiler + comparison UI (ADR-0018/0019).
  *
- * The churn *generator* and the gc-vs-event decision live in lockstep.js, not
- * here and not in any session — this file just wires the shared controls
- * (Run/Step/SPEED/BG-GC/mode/participants) to the coordinator, and the
- * display switch to whichever session is currently shown.
+ * Two jobs live here:
+ *
+ * 1. COMMAND COMPILER (ADR-0019). A console line — or a button's injected
+ *    command — is compiled into ONE atomic `commandFn = async (api) => …` and
+ *    handed to `coordinator.broadcast(commandFn, label)`. The coordinator runs
+ *    it per-session against that session's own local, paced `api`; nothing in
+ *    here ever touches a session directly once broadcast. The compiled
+ *    function runs against a per-session SANDBOX (a `with`-scope backed by a
+ *    Proxy) so an undeclared loop var (`for (i=0;…)`) stays local to that one
+ *    invocation instead of leaking to a shared `window.i` two concurrent
+ *    sessions would stomp.
+ *
+ * 2. COMPARISON UI (ADR-0018). The console *is* the tape — buttons inject
+ *    their command rather than calling a function, so the tape is a complete,
+ *    replayable record. Focus is a pure view property: the header scoreboard
+ *    doubles as the focus switcher, and the die / tape / telemetry / legend
+ *    all follow whichever session is focused. The workload engine (Run/Stop/
+ *    Step, Race/Pace, SPEED, BG GC) stays a separate, visually distinct
+ *    register from manual pokes, per ADR-0018.
+ *
+ * session.js / lockstep.js (ADR-0015/0016/0019) are the backend this file
+ * consumes — not owned here. They're loaded dynamically (see loadBackend
+ * below) so a test harness can swap in a stub that matches the documented
+ * contract without touching the real modules or requiring real WASM.
  */
-import { createSession } from './session.js';
 import { createChurnModel, CHURN_CLASS } from './churn.js';
-import { createLockstep } from './lockstep.js';
 import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 
-// FS registry (ADR-0015): fsId → display name. Adding a driver is: a new entry
-// here, a matching picker button + compare row in index.html (ids
-// "fsPick-<fsId>" / "cmpRow-<fsId>"), and dist/<fsId>.mjs built (ADR-0011) —
-// the manager, the session, and the coordinator need nothing else.
+// FS registry (ADR-0015): fsId → display name. Both are live from page load
+// (ADR-0017 — "every active filesystem runs the same workload at once").
 const FS_REGISTRY = { fastffs: 'FASTFFS', littlefs: 'LittleFS' };
 const DEFAULT_FS = 'fastffs';
 
 // Auto-workload churn config, scaled to the 256 KiB (4096×64) device. The model
-// drives the FS toward a steady-state live size instead of overfilling it. Sizes
-// are kept well under capacity (no 350 KiB class, forced-large disabled) so a
-// single write never runs the chip out of space; deletes keep live ≤ target+slack.
+// drives the FS toward a steady-state live size instead of overfilling it.
 const CHURN_SEED = 0x00c0ffee;
-const DEVICE_BYTES = 4096 * 64;                    // 256 KiB
 const CHURN_TARGET_LIVE = 96 * 1024;               // ~37.5% of the chip — leaves GC headroom
 const CHURN_TARGET_SLACK = 16 * 1024;              // tolerance above target before forced deletes
 const CHURN_TARGET_WRITTEN = 0xffffffff;           // effectively never "DONE" — run forever
@@ -51,38 +54,126 @@ const churnProfile = () => ({
 
 const $ = (id) => document.getElementById(id);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const enc = new TextEncoder();
 const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)} ms` : `${(ms / 1000).toFixed(2)} s`; };
-
-// A large, varied name pool so the workload mostly creates new files rather than
-// overwriting a handful — with enough collisions to still exercise replacement.
-const NAMES = (() => {
-  const ri = (n) => Math.floor(Math.random() * n);
-  const words = ['config', 'boot', 'fw', 'keys', 'cal', 'wifi', 'state', 'ota', 'certs',
-    'index', 'event', 'fs', 'sensor', 'audio', 'image', 'model', 'graph', 'net', 'tls',
-    'user', 'device', 'part', 'bank', 'trace', 'crash', 'meter', 'sched', 'queue', 'cache',
-    'blob', 'map', 'font', 'theme', 'lang', 'geo', 'rtc', 'adc', 'gpio', 'uart', 'spi',
-    'i2c', 'can', 'usb', 'ble', 'mqtt', 'motor', 'servo', 'battery', 'calib', 'report'];
-  const exts = ['bin', 'log', 'dat', 'cfg', 'img', 'der', 'pem', 'db', 'tmp', 'map', 'json', 'raw', 'tbl', 'idx', 'nvs'];
-  const set = new Set();
-  while (set.size < 140) set.add(words[ri(words.length)] + (Math.random() < 0.55 ? '_' + ri(100) : '') + '.' + exts[ri(exts.length)]);
-  return [...set];
-})();
-
 function randomBytes(n) {
   const a = new Uint8Array(n);
   for (let i = 0; i < n; i += 65536) crypto.getRandomValues(a.subarray(i, Math.min(n, i + 65536)));
   return a;
 }
-const rnd = (n) => Math.floor(Math.random() * n);
-const enc = new TextEncoder();
-const sizeOf = (d) => (typeof d === 'string' ? enc.encode(d).length : d.length);
 
-boot().catch((e) => log(String(e && e.stack || e), 'err'));
+/* ------------------------------------------------------------------------ *
+ * COMMAND COMPILER + SANDBOX (ADR-0019)
+ *
+ * makeSandbox(api) builds the `with`-scope: a Proxy whose `has` trap returns
+ * TRUE for every name (so nothing ever falls through to the real global —
+ * plain `with(api)` only traps names `api` already HAS, which is why an
+ * undeclared `for (i=0;…)` leaks to `window.i` under a naive implementation).
+ * `get` resolves api → per-invocation bag → globalThis, in that order — the
+ * globalThis forward is mandatory, or Math/JSON/… would read as undefined.
+ * `set` always writes an undeclared assignment into the bag, never `api`.
+ *
+ * `let`/`const`/`var` declared IN the compiled source stay real per-invocation
+ * locals — that's native `with` behavior (an inner block-scoped declaration
+ * shadows the with-object), not something this Proxy needs to implement.
+ * ------------------------------------------------------------------------ */
+export function makeSandbox(api) {
+  const bag = Object.create(null);
+  return new Proxy(Object.create(null), {
+    has() { return true; },
+    get(_t, key) {
+      if (api && key in api) return api[key];
+      if (key in bag) return bag[key];
+      return Reflect.get(globalThis, key, globalThis);
+    },
+    set(_t, key, value) { bag[key] = value; return true; },
+  });
+}
+
+/**
+ * Compile one console line (or an injected button command) into
+ * `commandFn = async (api) => result`. Two forms are tried at COMPILE time
+ * (a synchronous `new AsyncFunction(...)` call, so a syntax failure never
+ * touches the sandbox): first as a single expression (`return (<src>)`, so a
+ * bare query like `2+2` or `writeFile()` yields its value), falling back to
+ * a plain statement block for multi-statement scripts (`let x = …; for (…) …`)
+ * where wrapping in `return (…)` would be a syntax error. Both compile
+ * `with(scope){ … }` — sloppy mode is required for `with` to be legal, which
+ * is why this uses `new AsyncFunction`, never a strict/module compile.
+ *
+ * `augment(api)` optionally layers extra convenience bindings (console-only
+ * helpers, not part of the backend's per-session api) over the real api
+ * before it reaches the sandbox — see buildConsoleApi below. It defaults to
+ * the identity so this function is directly testable against a bare stub api,
+ * exactly per the ADR-0019 contract.
+ */
+export function compileCommand(src, augment = (api) => api) {
+  let fn;
+  try { fn = new AsyncFunction('scope', 'with(scope){ return (\n' + src + '\n); }'); }
+  catch { fn = new AsyncFunction('scope', 'with(scope){\n' + src + '\n}'); }
+  return async (api) => fn(makeSandbox(augment(api)));
+}
+
+// Console-only convenience layered OVER the backend-provided local api (never
+// replacing anything the api already defines — `??` only fills gaps). These
+// aren't part of the ADR-0019 contract; they're this file's UX surface, kept
+// out of the pure compiler above so compileCommand alone stays testable
+// against a bare stub.
+function buildConsoleApi(api) {
+  return {
+    ...api,
+    text: (s) => enc.encode(s),
+    randomBytes,
+    help: api.help ?? (() => HELP_TEXT),
+    print: api.print ?? (() => {}),
+    format: api.format ?? (async () => { await api.fs?.format?.(); await api.fs?.mount?.(); }),
+    gc: api.gc ?? (async (n = 1) => { let r; for (let i = 0; i < Math.max(1, n | 0); i++) r = await api.fs?.gcStep?.(); return r; }),
+    prep: api.prep ?? (() => {}),
+  };
+}
+
+const HELP_TEXT = [
+  'POKES  (friendly, optional args, all paced — prefix with await):',
+  '  writeFile(name?, size?) → {name,size}    random bytes; random name / random size when omitted',
+  '  readFile(name?) → {name,size}   ·   deleteFile(name?) → {name,size}   (no-arg lands on a tracked file;',
+  '    deleteFile also accepts the descriptor a prior call returned, e.g. deleteFile(last))',
+  '  mkdir(path)  mkdir -p (no-op on flat FASTFFS)   ·   getFiles(prefix?) → [{name,size}]   ·   ls(prefix?)',
+  'FILES  (raw fs. layer — await to pace to simulated flash time):',
+  '  fs.write(name, data)  ·  fs.read(name)  ·  fs.remove(name)  ·  fs.stat(name) → {name,size}|null',
+  '  fs.mkdir(name)  ·  fs.gcStep()  ·  fs.format() / fs.mount() / fs.unmount()',
+  'HANDLES  (partial / positioned I/O — every op paced):',
+  "  const f = await fs.open(name, 'r'|'w')   → f.read(n), f.write(bytes), f.seek(off, 'set'|'cur'|'end'), f.stat(), f.close()",
+  '  const d = await fs.openDir(prefix?)      → d.read() → {name,size}|null, d.close()',
+  'ONE LINE = ONE ATOMIC COMMAND: the whole line runs, per filesystem, as a single tape entry',
+  '  (queued → live → done); an undeclared loop var (for (i=0;…)) stays local to this line.',
+  'HELPERS:  randomBytes(n) → bytes   ·   text(s) → bytes   ·   gc(n=1)   ·   help()',
+  "example:  let f = await writeFile(); for (i=0;i<5;i++) await writeFile('n'+i, 64); await deleteFile(f)",
+].join('\n');
+
+/* ------------------------------------------------------------------------ *
+ * BACKEND SEAM — real session.js/lockstep.js by default; a test harness can
+ * install globalThis.__flashvisBackend = { createSession, createLockstep }
+ * BEFORE this module is imported to run the UI against a stub that matches
+ * the ADR-0019 contract, without touching the (parallel-built) real backend
+ * or requiring real WASM. Dynamic import keeps production loading identical
+ * to a static import — this only adds the override hook.
+ * ------------------------------------------------------------------------ */
+async function loadBackend() {
+  if (globalThis.__flashvisBackend) return globalThis.__flashvisBackend;
+  const [sessionMod, lockstepMod] = await Promise.all([import('./session.js'), import('./lockstep.js')]);
+  return { createSession: sessionMod.createSession, createLockstep: lockstepMod.createLockstep };
+}
+
+boot().catch((e) => {
+  console.error(e);
+  const el = $('specLive');
+  if (el) el.textContent = 'boot failed — ' + (e && e.message || e);
+});
 
 async function boot() {
+  const { createSession, createLockstep } = await loadBackend();
+
   const geometry = { sectorSize: 4096, sectorCount: 64, pageSize: 256, granule: 1 };
-  let granule = geometry.granule;
-  let prepMode = false;
 
   const churn = createChurnModel({
     seed: CHURN_SEED,
@@ -93,130 +184,228 @@ async function boot() {
     profile: churnProfile(),
     slotCount: 256,
   });
-  // The coordinator (ADR-0016) owns the ONE canonical step sequence generated
-  // from this churn model + its own seeded gc-vs-event coin — sessions never
-  // decide what runs next, they only execute what they're handed.
+  // The coordinator (ADR-0016/0019) owns the ONE canonical command sequence —
+  // sessions never decide what runs next, they only execute what they're handed.
   const coordinator = createLockstep({ churn });
 
-  // Participating sessions (fsId → session) and which one is DISPLAYED. Every
-  // control below that used to read a single `activeSession` still does —
-  // it's just reassigned by setDisplayed() instead of by an exclusive switch.
+  // Participating sessions (fsId → session) and which one is FOCUSED. Focus is
+  // a pure view property (ADR-0017/0019): it changes nothing about state and
+  // is never itself logged.
   const sessions = new Map();
-  let displayedFsId = DEFAULT_FS;
+  const journalUnsub = new Map();
+  let focusedFsId = DEFAULT_FS;
   let activeSession = null;
+  let tapeNodes = new Map();   // journal entry id → tape DOM node, for the FOCUSED session only
 
   async function mkSession(fsId) {
-    return createSession(fsId, {
-      geometry: { ...geometry, granule },
-      container: $('dieStack'),
-      // Route this session's op-log only while it's the displayed one — a
-      // session's onLog is fixed at creation (session.js has no setter), so
-      // the check happens live against the outer `displayedFsId` on every
-      // call instead of needing to rebind anything.
-      onLog: (msg, cls) => { if (fsId === displayedFsId) log(msg, cls); },
-      name: FS_REGISTRY[fsId],
+    const s = await createSession(fsId, {
+      geometry, container: $('dieStack'), name: FS_REGISTRY[fsId],
     });
+    journalUnsub.set(s, s.onJournal((change) => onSessionJournal(s, change)));
+    return s;
   }
 
-  log(`loading ${FS_REGISTRY[DEFAULT_FS]} (WASM)…`, 'sys');
-  const first = await mkSession(DEFAULT_FS);
-  sessions.set(DEFAULT_FS, first);
+  $('specLive').textContent = `loading ${Object.values(FS_REGISTRY).join(' + ')} (WASM)…`;
+  for (const fsId of Object.keys(FS_REGISTRY)) sessions.set(fsId, await mkSession(fsId));
   coordinator.setSessions([...sessions.values()]);
+  coordinator.reset();   // fresh, empty, mounted — silent internal setup, not a tape entry
 
-  // ---- display switch: show one session's die/HUD/log/console, hide the rest ----
-  function setDisplayed(fsId) {
-    // Detach the outgoing session's inspector so its still-running rAF loop
-    // (sessions keep animating while hidden — Race/Pace both need that) stops
-    // writing into the shared #insp panel the moment it's no longer shown.
+  // ---- command compiler → broadcast: the ONE path console input, boot
+  // logging, and every poke button all go through (ADR-0018/0019). ----
+  function injectCommand(src) {
+    const commandFn = compileCommand(src, buildConsoleApi);
+    return coordinator.broadcast(commandFn, src);
+  }
+
+  // ---- focus switch: die/tape/telemetry/legend follow one session; a pure
+  // view op, never logged, never touches state (ADR-0017/0018). ----
+  function setFocus(fsId) {
     if (activeSession) activeSession.attachInspector(null);
-    displayedFsId = fsId;
+    focusedFsId = fsId;
     activeSession = sessions.get(fsId);
     for (const [id, s] of sessions) s.setActive(id === fsId);
     activeSession.attachInspector($('insp'));
-    activeSession.setPrep(prepMode);
     $('insp').innerHTML = '<span class="hint">Click a sector to inspect it.</span>';
     applyCapsGating(activeSession.caps);
-    $('tagFsName').textContent = activeSession.name;
-    for (const id of Object.keys(FS_REGISTRY)) {
-      $('fsPick-' + id)?.classList.toggle('on', sessions.has(id));
-      $('cmpRow-' + id)?.classList.toggle('sel', id === fsId);
+    renderLegend(activeSession);
+    renderTapeFull();
+    renderGap();
+    renderScoreboard();
+  }
+
+  // ---- tape (ADR-0018): the focused session's journal, queued/live/done. ----
+  function tapeText(e) {
+    const icon = e.state === 'queued' ? '⧗ ' : e.state === 'live' ? '▸ ' : '';
+    const echo = e.cls === 'in' ? '› ' : '';
+    return icon + echo + e.text;
+  }
+  function tapeLine(e) {
+    const el = document.createElement('div');
+    el.className = 'line ' + (e.cls || 'out');
+    el.dataset.state = e.state || 'done';
+    el.textContent = tapeText(e);
+    tapeNodes.set(e.id, el);
+    return el;
+  }
+  function renderTapeFull() {
+    const out = $('tape');
+    out.innerHTML = '';
+    tapeNodes = new Map();
+    const entries = (activeSession.journal || []).slice(-400);
+    for (const e of entries) out.appendChild(tapeLine(e));
+    out.scrollTop = out.scrollHeight;
+  }
+  function onSessionJournal(session, change) {
+    if (session !== activeSession) return;
+    const out = $('tape');
+    if (change.type === 'append') {
+      out.appendChild(tapeLine(change.entry));
+      while (out.children.length > 400) out.removeChild(out.firstChild);
+      out.scrollTop = out.scrollHeight;
+    } else {
+      const el = tapeNodes.get(change.entry.id);
+      if (el) { el.dataset.state = change.entry.state; el.textContent = tapeText(change.entry); }
+      else renderTapeFull();   // entry predates this focus session — fall back to a full repaint
     }
   }
-  setDisplayed(DEFAULT_FS);
 
-  $('specGeo').textContent =
-    `${(activeSession.device.size / 1024) | 0} KB · ${geometry.sectorCount}×${geometry.sectorSize / 1024} KB · ESP32-S3 timing`;
+  // ---- present-gap header + Catch-up (ADR-0018/0017): driven off `behind`
+  // (genuine Race divergence / Race→Pace catch-up) — NEVER off gap>0 alone,
+  // so ordinary Pace lockstep (gap normally 0, and even a transient non-zero
+  // gap that isn't real lag) never shows it (fix: was showing on gap>0). ----
+  function renderGap() {
+    const gapEl = $('tapeGap');
+    const p = coordinator.pendingFor(activeSession);
+    if (!p || !p.behind) { gapEl.classList.add('hidden'); return; }
+    const snaps = coordinator.snapshots();
+    let leader = null;
+    for (const s of snaps) if (!leader || s.stepCursor > leader.stepCursor) leader = s;
+    const leadTxt = leader && leader.fsId !== activeSession.fsId ? ` · ${leader.name} leads` : '';
+    $('tapeGapText').textContent = `${p.gap} behind present${leadTxt}`;
+    gapEl.classList.remove('hidden');
+  }
+  $('btnCatchup').addEventListener('click', () => { coordinator.setMode('pace'); markMode('pace'); });
 
-  coordinator.reset();   // empty + paused — nothing is written until Run or a console op
-  log('formatted + mounted — empty and paused. Press Run, or drive it from the console.', 'sys');
+  // ---- scoreboard-switcher header (ADR-0018): per-FS standings, click to
+  // focus. One `.lane` per participating FS (visual language ported from the
+  // tuned design reference), built into #scoreboard (the .lanes container). ----
+  function scoreboardSeg(fsId) {
+    const btn = document.createElement('button');
+    btn.className = 'lane'; btn.id = 'sbSeg-' + fsId; btn.dataset.fs = fsId;
+    btn.setAttribute('aria-pressed', String(fsId === focusedFsId));
+    btn.innerHTML =
+      `<span class="lane-name">${FS_REGISTRY[fsId]}</span>` +
+      `<span class="lane-m"><span class="m-v" id="sbStep-${fsId}">0</span><span class="m-l">step</span></span>` +
+      `<span class="lane-m"><span class="m-v" id="sbTime-${fsId}">0 ms</span><span class="m-l">active</span></span>` +
+      `<span class="lane-m"><span class="m-v" id="sbWa-${fsId}">1.0×</span><span class="m-l">write&nbsp;amp</span></span>` +
+      `<span class="lane-lead"></span>`;
+    btn.addEventListener('click', () => { if (sessions.has(fsId) && fsId !== focusedFsId) setFocus(fsId); });
+    return btn;
+  }
+  // Tracked explicitly (not inferred from a getElementById probe) — a lane is
+  // built once per participating fsId and reused on every subsequent render.
+  const scoreboardBuilt = new Set();
+  function renderScoreboard() {
+    const board = $('scoreboard');
+    const snaps = coordinator.snapshots();
+    // The `--lead` bar marks the front-runner ONLY when there's genuine step
+    // divergence (a Race split) — in steady Pace lockstep every cursor is equal
+    // and nobody "leads", so no lane lights up (same philosophy as fix #4).
+    let maxStep = -Infinity, minStep = Infinity;
+    for (const s of snaps) { maxStep = Math.max(maxStep, s.stepCursor); minStep = Math.min(minStep, s.stepCursor); }
+    const diverged = maxStep > minStep;
+    for (const snap of snaps) {
+      if (!scoreboardBuilt.has(snap.fsId)) { board.appendChild(scoreboardSeg(snap.fsId)); scoreboardBuilt.add(snap.fsId); }
+      const seg = $('sbSeg-' + snap.fsId);
+      seg.classList.toggle('on', snap.fsId === focusedFsId);
+      seg.classList.toggle('lead', diverged && snap.stepCursor === maxStep);
+      seg.setAttribute('aria-pressed', String(snap.fsId === focusedFsId));
+      $('sbStep-' + snap.fsId).textContent = String(snap.stepCursor);
+      $('sbTime-' + snap.fsId).textContent = fmtTime(snap.simNs);
+      $('sbWa-' + snap.fsId).textContent = snap.wa.toFixed(1) + '×';
+    }
+    for (const fsId of [...scoreboardBuilt]) {
+      if (sessions.has(fsId)) continue;
+      scoreboardBuilt.delete(fsId);
+      const el = $('sbSeg-' + fsId);
+      board.removeChild(el);
+    }
+  }
+
+  // ---- die-adjacent legend chip-row (ADR-0018): per-FS class descriptor —
+  // same baseline for both drivers today, a hook for future per-driver classes
+  // (LittleFS metadata-pair / CTZ) without reworking the row's structure. ----
+  function legendFor(_session) {
+    return [
+      { cls: 'erased', word: 'Erased', title: '0xFF — nothing written' },
+      { cls: 'prog', word: 'Live', title: 'fill = bytes programmed' },
+      { cls: 'obsolete', word: 'Obsolete', title: 'reclaimable garbage' },
+      { cls: 'index', word: 'Metadata', title: 'index + records' },
+      { cls: 'program', word: 'Programming', title: '1→0, in progress' },
+      { cls: 'erase', word: 'Erasing', title: 'sector → 0xFF' },
+      { cls: 'read', word: 'Reading', title: 'XIP, no wear' },
+    ];
+  }
+  function renderLegend(session) {
+    const row = $('legendChips');
+    row.innerHTML = '';
+    for (const c of legendFor(session)) {
+      const chip = document.createElement('div');
+      chip.className = 'chip'; chip.tabIndex = 0; chip.setAttribute('role', 'listitem');
+      chip.innerHTML = `<span class="sw ${c.cls}"></span>${c.word}<span class="chip-hint">${c.title}</span>`;
+      row.appendChild(chip);
+    }
+  }
+
+  setFocus(DEFAULT_FS);
+  $('specGeo').textContent = `${(activeSession.device.size / 1024) | 0} KB · ${geometry.sectorCount}×${geometry.sectorSize / 1024} KB · ESP32-S3 timing`;
+  $('specLive').textContent = 'formatted + mounted — empty and paused';
+
+  // ---- FIX: boot logs (ADR-0018) — run help() then format() as BROADCAST
+  // commands (not a one-off print to a single shared log) so every
+  // participating session's OWN tape shows both, not just the focused one. ----
+  injectCommand('help()');
+  injectCommand('format()');
 
   setInterval(() => activeSession.refreshHUD($), 160);
-  // The liveness walk re-scans the on-flash index (mount-like); refreshLiveness
-  // itself no-ops unless the DISPLAYED session's flash changed since the last call.
   setInterval(() => activeSession.refreshLiveness($), 250);
-  // Compare strip: every participant, not just the displayed one (ADR-0016) —
-  // this is the only place that reads every session's numbers at once.
-  setInterval(() => renderCompareRows(), 250);
-  function renderCompareRows() {
-    const snaps = coordinator.snapshots();
-    for (const snap of snaps) {
-      const row = $('cmpRow-' + snap.fsId);
-      if (!row) continue;
-      row.classList.remove('hidden');
-      const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
-      set('cmpStep-' + snap.fsId, String(snap.stepCursor));
-      set('cmpSim-' + snap.fsId, fmtTime(snap.simNs));
-      set('cmpWa-' + snap.fsId, snap.wa.toFixed(1) + '×');
-      set('cmpFiles-' + snap.fsId, String(snap.files));
-      set('cmpGarbage-' + snap.fsId, Math.round(100 * snap.garbagePct) + '%');
-    }
-    for (const id of Object.keys(FS_REGISTRY)) {
-      if (!sessions.has(id)) $('cmpRow-' + id)?.classList.add('hidden');
-    }
-  }
-  renderCompareRows();
+  setInterval(() => { renderScoreboard(); renderGap(); }, 250);
 
-  // ---- Run/Pause, Step: act on the WHOLE participating set via the coordinator ----
+  // ---- Run/Pause, Step: act on the WHOLE participating set via the coordinator. ----
   const setRunning = (v) => {
     if (v) coordinator.start(); else coordinator.stop();
     $('runLabel').textContent = v ? 'Pause' : 'Run';
     $('btnRun').querySelector('.dot').style.background = v ? 'currentColor' : '#241a06';
   };
-  setRunning(false);   // start paused — the initial seed animates in, then it idles
+  setRunning(false);
 
-  // ---- participants (ROADMAP: lockstep multiple filesystems) ----
-  // Clicking a picker button TOGGLES that FS's participation (multi-select) —
-  // at least one must always stay selected. Any change resets every
-  // participant to a fresh chip (ADR-0015's "no carryover" rule, extended).
+  // ---- participants: toggling FS participation is a workload-engine action,
+  // not a console command (ADR-0018 keeps the two registers visually and
+  // mechanically distinct) — direct coordinator calls, fresh chips on change. ----
   for (const fsId of Object.keys(FS_REGISTRY)) {
     $('fsPick-' + fsId)?.addEventListener('click', () => toggleParticipant(fsId));
   }
   async function toggleParticipant(fsId) {
     const willJoin = !sessions.has(fsId);
-    if (!willJoin && sessions.size === 1) {
-      log('at least one filesystem must stay selected', 'sys');
-      return;
-    }
+    if (!willJoin && sessions.size === 1) return;
     if (willJoin) {
-      log(`loading ${FS_REGISTRY[fsId]} (WASM)…`, 'sys');
       let s;
-      try { s = await mkSession(fsId); }
-      catch (e) { log(`failed to add ${FS_REGISTRY[fsId]}: ${(e && e.message) || e}`, 'err'); return; }
+      try { s = await mkSession(fsId); } catch (e) { console.error(e); return; }
       sessions.set(fsId, s);
       s.setHeatmap($('heat').checked);
-      s.setPrep(prepMode);
     } else {
-      sessions.get(fsId).teardown();
+      const s = sessions.get(fsId);
+      journalUnsub.get(s)?.(); journalUnsub.delete(s);
+      s.teardown();
       sessions.delete(fsId);
-      if (displayedFsId === fsId) displayedFsId = sessions.keys().next().value;
+      if (focusedFsId === fsId) focusedFsId = sessions.keys().next().value;
     }
     coordinator.setSessions([...sessions.values()]);
     coordinator.reset();
-    applySpeed(+$('speed').value);   // re-fan the current scale to the new set
-    setDisplayed(displayedFsId);
-    renderCompareRows();
-    const names = [...sessions.values()].map((s) => s.name).join(', ');
-    log(`participants: ${names} — fresh, empty chip${sessions.size > 1 ? 's' : ''}.`, 'sys');
+    applySpeed(+$('speed').value);
+    for (const id of Object.keys(FS_REGISTRY)) $('fsPick-' + id)?.classList.toggle('on', sessions.has(id));
+    setFocus(focusedFsId);
+    for (const s of sessions.values()) s.appendJournal('participants changed — fresh, empty chip', 'sys', 'done');
   }
 
   // ---- Race / Pace mode ----
@@ -224,40 +413,31 @@ async function boot() {
     $('modePick-race')?.classList.toggle('on', m === 'race');
     $('modePick-pace')?.classList.toggle('on', m === 'pace');
   };
-  markMode(coordinator.mode);   // reflect the coordinator's default ('race') at boot
+  markMode(coordinator.mode);
   for (const m of ['race', 'pace']) {
-    $('modePick-' + m)?.addEventListener('click', () => {
-      coordinator.setMode(m);
-      markMode(m);
-      log(`lockstep mode → ${m}`, 'sys');
-    });
+    $('modePick-' + m)?.addEventListener('click', () => { coordinator.setMode(m); markMode(m); renderGap(); });
   }
 
-  // ---- controls ----
+  // ---- controls: Run/Step direct; every poke button INJECTS a console
+  // command (ADR-0018 — "a button that can't be expressed as a console
+  // command has no home"), through the exact same compile+broadcast path
+  // typing at the prompt uses. ----
   $('btnRun').addEventListener('click', () => setRunning(!coordinator.running));
   $('btnStep').addEventListener('click', () => coordinator.step());
-  $('btnWrite').addEventListener('click', () => activeSession.fs.write(NAMES[rnd(NAMES.length)], randomBytes(300 + rnd(4000))));
-  $('btnLs').addEventListener('click', () => activeSession.lsStream(true));
-  $('btnDelete').addEventListener('click', () => {
-    const known = activeSession.names();
-    if (known.length) activeSession.fs.remove(known[rnd(known.length)]);
-    else log('  (nothing to delete)', 'sys');
-  });
-  $('btnGC').addEventListener('click', () => activeSession.fs.gcStep());
-  $('btnFormat').addEventListener('click', () => {
-    coordinator.reset();
-    log(`re-formatted + mounted (empty chip${sessions.size > 1 ? 's' : ''})`, 'sys');
-  });
+  $('btnWrite').addEventListener('click', () => injectCommand('writeFile()'));
+  $('btnLs').addEventListener('click', () => injectCommand('ls()'));
+  $('btnDelete').addEventListener('click', () => injectCommand('deleteFile()'));
+  $('btnGC').addEventListener('click', () => injectCommand('gc()'));
+  $('btnFormat').addEventListener('click', () => injectCommand('format()'));
 
   // slider 0..100 → sim-ns per real-ms on a log scale. Real flash time = 1e6.
-  // Low = slow-mo, mid ≈ real-time, high = faster than real-time, 100 = no delay.
   function applySpeed(v) {
     let scale, label;
     if (v >= 100) { scale = Infinity; label = 'max · no delay'; }
     else {
       const lo = Math.log10(3000), hi = Math.log10(1e8);
       scale = Math.pow(10, lo + (hi - lo) * (v / 99));
-      const x = scale / 1e6; // >1 faster than real flash, <1 slower
+      const x = scale / 1e6;
       label = (x >= 0.9 && x <= 1.15) ? '≈ real-time'
         : x < 1 ? `${(1 / x < 10 ? (1 / x).toFixed(1) : Math.round(1 / x))}× slow-mo`
         : `${x < 10 ? x.toFixed(1) : Math.round(x)}× real-time`;
@@ -272,118 +452,35 @@ async function boot() {
   applyGc(+$('gc').value);
   $('gc').addEventListener('input', (e) => applyGc(+e.target.value));
 
-  $('gran').addEventListener('click', (e) => {
-    const b = e.target.closest('button'); if (!b) return;
-    [...$('gran').children].forEach((x) => x.classList.toggle('on', x === b));
-    granule = +b.dataset.g;
-    for (const s of sessions.values()) s.runner.config({ granule });
-    coordinator.reset();
-    log(`program granule → ${granule} B (re-formatted)`, 'sys');
-  });
   $('heat').addEventListener('change', (e) => { for (const s of sessions.values()) s.setHeatmap(e.target.checked); });
 
-  // ---- JS console ----
-  // Paced console facade: `await fs.write(...)` waits for the op to play out (its
-  // simulated flash time), so an awaited loop steps through one op at a time.
-  // The coordinator's auto-workload keeps using each session's synchronous
-  // runChurnEvent/runGcStep. Every helper below reads `activeSession` live, so
-  // the display switch rebinds the whole console surface for free.
-  // Raw handle proxy (ADR-0014 Tier 2): each op is logged by timed() and paced by
-  // pace(), so `await f.read(n)` blocks for the partial read's simulated flash time.
-  const pacedFile = (h) => ({
-    read: (n) => activeSession.pace(() => activeSession.timed(`file.read(${n} B)`, () => h.read(n))),
-    write: (d) => activeSession.pace(() => activeSession.timed(`file.write(${sizeOf(d)} B)`, () => h.write(d))),
-    seek: (o, w = 'set') => activeSession.pace(() => activeSession.timed(`file.seek(${o}, ${w})`, () => h.seek(o, w))),
-    stat: () => activeSession.pace(() => activeSession.timed('file.stat()', () => h.stat())),
-    close: () => activeSession.pace(() => activeSession.timed('file.close()', () => h.close())),
-  });
-  const pacedDir = (d) => ({
-    read: () => activeSession.pace(() => d.read()),
-    close: () => activeSession.pace(() => d.close()),
-  });
-  const pfs = {
-    write: (n, d) => activeSession.pace(() => activeSession.fs.write(n, d)),
-    read: (n) => activeSession.pace(() => activeSession.fs.read(n)),
-    cat: (n) => activeSession.pace(() => activeSession.fs.cat(n)),
-    remove: (n) => activeSession.pace(() => activeSession.fs.remove(n)),
-    stat: (n) => activeSession.pace(() => activeSession.fs.stat(n)),
-    mkdir: (n) => activeSession.pace(() => activeSession.fs.mkdir(n)),
-    gcStep: () => activeSession.pace(() => activeSession.fs.gcStep()),
-    list: (prefix) => activeSession.lsStream(false, prefix),
-    exists: (n) => activeSession.fs.exists(n),
-    open: async (name, mode = 'r') => pacedFile(await activeSession.pace(() => activeSession.timed(`open(${name}, ${mode})`, () => activeSession.runner.open(name, mode)))),
-    openDir: async (prefix = '') => pacedDir(await activeSession.pace(() => activeSession.runner.openDir(prefix))),
-    format: () => activeSession.runner.format(),
-    mount: () => activeSession.runner.mount(),
-    unmount: () => activeSession.runner.unmount(),
-    sectorClasses: () => activeSession.runner.sectorClasses(),
-    liveMap: () => activeSession.runner.liveMap(),
-    fsinfo: () => activeSession.fs.fsinfo(),
-    get device() { return activeSession.device; },
-    get geometry() { return activeSession.geometry; },
-    get hostBytes() { return activeSession.fs.hostBytes; },
-  };
-
-  // Tier-1 friendly pokes (ADR-0014): optional args, data-agnostic, all paced, each
-  // returning a descriptor so a console script self-tracks its file set with no
-  // runner.names() backdoor. A no-arg read/delete lands on a tracked file and reports it.
-  let fileSeq = 0;
-  const STOCK_SIZE = 1024;
-  const autoName = () => `f${(fileSeq++).toString(36).padStart(3, '0')}.dat`;
-  const pickKnown = () => { const k = activeSession.names(); if (!k.length) throw new Error('no files yet — write one first'); return k[rnd(k.length)]; };
-  const writeFile = async (name, size = STOCK_SIZE) => { const n = name ?? autoName(); await pfs.write(n, randomBytes(size)); return { name: n, size }; };
-  const readFile = async (name) => { const n = name ?? pickKnown(); const bytes = await pfs.read(n); return { name: n, size: bytes.length }; };
-  const deleteFile = async (name) => { const n = name ?? pickKnown(); const st = await pfs.stat(n); await pfs.remove(n); return { name: n, size: st ? st.size : 0 }; };
-  // mkdir -p: create each missing parent by looping the single-level shim primitive
-  // (a no-op success on flat FASTFFS; real on LittleFS later). See ADR-0014 Namespace.
-  const mkdirP = async (path) => { let cur = ''; for (const p of String(path).split('/').filter(Boolean)) { cur += (cur ? '/' : '') + p; await pfs.mkdir(cur); } return 'ok'; };
-  const getFiles = (prefix) => activeSession.lsStream(false, prefix);
-
-  const scope = {
-    fs: pfs, get device() { return activeSession.device; }, get viz() { return activeSession.viz; }, randomBytes, help,
-    writeFile, readFile, deleteFile, mkdir: mkdirP, getFiles,
-    ls: (prefix) => activeSession.lsStream(true, prefix),
-    cat: (n) => activeSession.pace(() => activeSession.fs.cat(n)),
-    gc: async (n = 1) => { let a; for (let i = 0; i < Math.max(1, n | 0); i++) a = await activeSession.pace(() => activeSession.fs.gcStep()); return a; },
-    // Setup mode: full speed, no animation, still logs — for bulk seed/framework code.
-    // Applies to every participant (not just the displayed one) so a bulk script
-    // seeds the whole lockstep set uniformly.
-    prep: (enable = true) => {
-      prepMode = !!enable;
-      for (const s of sessions.values()) s.setPrep(prepMode);
-      log(`prep ${prepMode ? 'on — full speed, no animation (still logging)' : 'off — paced + animated'}`, 'sys');
-    },
-    print: (...a) => log(a.map(formatVal).join(' '), 'out'),
-    text: (s) => new TextEncoder().encode(s),
-  };
-  // ---- command history: up/down cycles, persisted to localStorage (last 20) ----
+  // ---- console input: one shared prompt; Enter compiles + broadcasts the
+  // whole line as ONE atomic command (ADR-0019). History persisted like before. ----
   const HKEY = 'flashvis.console.history', HMAX = 20;
-  // Only a real browser gets persistence: the headless fake-DOM never defines `window`
-  // (emscripten sniffs it), so gating on it skips localStorage — and its stubs/warnings — there.
   const store = typeof window !== 'undefined' ? window.localStorage : null;
   const loadHist = () => { try { const h = JSON.parse(store.getItem(HKEY)); return Array.isArray(h) ? h : []; } catch { return []; } };
   const saveHist = () => { try { store.setItem(HKEY, JSON.stringify(cmdHist)); } catch { /* no storage / private mode */ } };
-  let cmdHist = loadHist();
-  let hidx = cmdHist.length;   // == length means the live draft line (past the newest entry)
-  let draft = '';              // the in-progress line, stashed while browsing up
+  let cmdHist = store ? loadHist() : [];
+  let hidx = cmdHist.length;
+  let draft = '';
   const input = $('terminput');
-  const setInput = (v) => { input.value = v; input.setSelectionRange(v.length, v.length); };
+  const setInput = (v) => { input.value = v; input.setSelectionRange?.(v.length, v.length); };
 
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       const src = input.value.trim(); if (!src) return;
       input.value = '';
-      if (cmdHist[cmdHist.length - 1] !== src) {   // skip consecutive duplicates
+      if (cmdHist[cmdHist.length - 1] !== src) {
         cmdHist.push(src);
         if (cmdHist.length > HMAX) cmdHist = cmdHist.slice(-HMAX);
         saveHist();
       }
       hidx = cmdHist.length; draft = '';
-      runConsole(src, scope);
+      injectCommand(src);
     } else if (e.key === 'ArrowUp') {
       if (!cmdHist.length) return;
       e.preventDefault();
-      if (hidx === cmdHist.length) draft = input.value;   // stash the draft before leaving it
+      if (hidx === cmdHist.length) draft = input.value;
       hidx = Math.max(0, hidx - 1);
       setInput(cmdHist[hidx]);
     } else if (e.key === 'ArrowDown') {
@@ -393,85 +490,15 @@ async function boot() {
       setInput(hidx === cmdHist.length ? draft : cmdHist[hidx]);
     }
   });
-  log('console ready — await fs.write(...) paces to simulated time.', 'sys');
-  help();
 
-  // ---- display switch: clicking a compare row shows that participant ----
-  for (const fsId of Object.keys(FS_REGISTRY)) {
-    $('cmpRow-' + fsId)?.addEventListener('click', () => {
-      if (!sessions.has(fsId) || fsId === displayedFsId) return;
-      setDisplayed(fsId);
-      renderCompareRows();
-      log(`${activeSession.name} displayed.`, 'sys');
-    });
-  }
+  $('bootStatus').textContent = 'ready';
 }
 
-// Caps-gating (ADR-0011/0015): hide controls the DISPLAYED FS disclaims instead
-// of showing a dead/no-op control. Driven off the runtime `caps` bitmask, never
-// assumed from the fsId — a driver's advertised capabilities are the contract.
+// Caps-gating (ADR-0011/0015): hide controls the FOCUSED FS disclaims instead
+// of showing a dead/no-op control.
 function applyCapsGating(caps) {
   const toggle = (id, hide) => { const e = $(id); if (e) e.classList.toggle('hidden', hide); };
   toggle('ctlGc', !(caps & FF_CAP_GC));
   toggle('statGarbage', !(caps & FF_CAP_LIVE_MAP));
   toggle('utilBar', !(caps & FF_CAP_LIVE_MAP));
-}
-
-function runConsole(src, scope) {
-  log('› ' + src, 'in');
-  const names = Object.keys(scope), vals = Object.values(scope);
-  let fn;
-  try { fn = new AsyncFunction(...names, 'return (' + src + ')'); }
-  catch { try { fn = new AsyncFunction(...names, src); } catch (e) { log(String(e), 'err'); return; } }
-  Promise.resolve().then(() => fn(...vals))
-    .then((r) => { if (r !== undefined) log(formatVal(r), 'out'); })
-    .catch((e) => log(String(e && e.message || e), 'err'));
-}
-
-function formatVal(v) {
-  if (v instanceof Uint8Array) {
-    const head = [...v.slice(0, 24)].map((b) => b.toString(16).padStart(2, '0')).join(' ');
-    return `Uint8Array(${v.length}) ${head}${v.length > 24 ? ' …' : ''}`;
-  }
-  try { return typeof v === 'string' ? v : JSON.stringify(v); } catch { return String(v); }
-}
-
-function help() {
-  [
-    'POKES  (friendly, optional args, all paced — prefix with await):',
-    '  writeFile(name?, size?) → {name,size}    random bytes; random name / stock size when omitted',
-    '  readFile(name?) → {name,size}   ·   deleteFile(name?) → {name,size}   (no-arg lands on a tracked file)',
-    '  mkdir(path)  mkdir -p (no-op on flat FASTFFS)   ·   getFiles(prefix?) → [{name,size}]   ·   ls(prefix?)',
-    'FILES  (raw fs. layer — await to pace to simulated flash time):',
-    '  fs.write(name, data)    create/replace — data = string | Uint8Array',
-    '  fs.read(name) → bytes   ·  cat(name) → text   ·  fs.remove(name)   ·  fs.stat(name) → {name,size}|null',
-    '  fs.list(prefix?) → [{name,size}]   ·  fs.exists(name) → bool   ·  fs.mkdir(name)',
-    '  gc(n=1) / fs.gcStep()   run n background GC steps   ·   fs.fsinfo() → { files, bytes }',
-    'HANDLES  (partial / positioned I/O — every op paced):',
-    "  const f = await fs.open(name, 'r'|'w')   → f.read(n), f.write(bytes), f.seek(off, 'set'|'cur'|'end'), f.stat(), f.close()",
-    '  const d = await fs.openDir(prefix?)      → d.read() → {name,size}|null, d.close()',
-    'MODES:  fs.format() / fs.mount() / fs.unmount()   ·   fs.sectorClasses() / fs.liveMap()',
-    '  prep(true)   full-speed setup: no animation, no await-pacing, still logs; prep(false) resumes',
-    'FS:  the FS row (top of the transport bar) toggles which filesystems PARTICIPATE — 2+ selected runs',
-    '  them lockstep (RACE/PACE); click a Compare row to pick which one is DISPLAYED. Fresh, empty chips,',
-    '  no carryover, on every participant change. A control disappears when the displayed FS disclaims',
-    '  that capability (ADR-0011).',
-    'DEVICE / VIEW:',
-    '  device   flash, wear[], stats{reads,programs,erases,simNs,programBytes}',
-    '  fs.geometry   { sectorSize, sectorCount, pageSize, granule }',
-    '  viz   pending(), setScale(nsPerMs), liveCounts()',
-    'HELPERS:  randomBytes(n) → bytes   ·   text(s) → bytes   ·   print(x)   ·   help()',
-    'example:  for (let i=0;i<10;i++) print(await writeFile())      // self-tracking set',
-    "example:  const f = await fs.open('log.dat','w'); await f.write(text('hi')); await f.close()",
-  ].forEach((l) => log(l, 'sys'));
-}
-
-function log(msg, cls = 'out') {
-  const out = $('termout');
-  const line = document.createElement('div');
-  line.className = 'line ' + cls;
-  line.textContent = msg;
-  out.appendChild(line);
-  while (out.children.length > 300) out.removeChild(out.firstChild);
-  out.scrollTop = out.scrollHeight;
 }

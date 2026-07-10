@@ -14,6 +14,7 @@
   --stale:#4c4636; --stale-edge:#5f5741; --index:#63a6c9;
   --program:#a9f1ff; --erase:#b978ff; --read:#63e6ff;
   --accent:#6fd6c2; --accent-dim:#2f5d57; --err:#e5686d;
+  --queued:#7d8fa6; --lead:#8fe6a0;
   --sector-gap:6px; --cell-gap:2px; --radius:3px;
 }
 *{box-sizing:border-box}
@@ -28,19 +29,54 @@ body{
 }
 h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 ::selection{background:var(--accent-dim);color:#eafffb}
+.hidden{display:none!important}
 
-.header{flex:none;display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;padding:15px 22px 13px;border-bottom:1px solid var(--line-soft)}
-.brand{display:flex;align-items:baseline;gap:12px}
-.logo{font-family:"Space Grotesk";font-weight:700;font-size:22px;letter-spacing:.14em}
+/* ============================ scoreboard-switcher header (signature) =======
+   Fix #3: the FS scoreboard stays on the RIGHT of the header band. Styling
+   (board / lane treatment, --lead) is ported from the tuned reference. */
+.board{flex:none;display:flex;align-items:stretch;gap:22px;flex-wrap:wrap;
+  padding:12px 22px;border-bottom:1px solid var(--line-soft);
+  background:linear-gradient(180deg,#0d151dcc,#0b0f14)}
+.board-id{display:flex;flex-direction:column;justify-content:center;gap:3px;min-width:220px}
+.brand{display:flex;align-items:baseline;gap:11px}
+.logo{font-family:"Space Grotesk";font-weight:700;font-size:21px;letter-spacing:.14em}
 .logo b{color:var(--prog)}
-.tagline{color:var(--txt-dim);font-size:12.5px}
+.tagline{color:var(--txt-dim);font-size:11.5px;letter-spacing:.01em}
 .tagline .k{color:var(--accent)}
-.spec{margin-left:auto;color:var(--txt-faint);font-size:11.5px;letter-spacing:.05em;text-align:right}
-.spec b{color:var(--txt-dim);font-weight:500}
+.board-status{color:var(--txt-faint);font-size:10.5px;letter-spacing:.04em}
+.board-status b{color:var(--txt-dim);font-weight:500}
 
-.main{flex:1 1 auto;min-height:0;overflow:hidden;display:grid;grid-template-columns:minmax(0,1fr) 288px 336px;gap:22px;padding:20px 22px 14px;max-width:1360px;width:100%;margin:0 auto;align-items:stretch}
-.stage{display:flex;flex-direction:column;align-items:center;gap:11px;min-width:0;min-height:0;overflow:hidden}
-.diewrap{position:relative;width:100%;max-width:620px;max-height:calc(100% - 40px);aspect-ratio:1;padding:14px;border-radius:8px;
+/* the standings lanes — one per filesystem, click to focus. Built dynamically
+   by playground.js into #scoreboard (the .lanes container); one .lane per
+   participating FS. */
+.lanes{margin-left:auto;display:flex;gap:10px;align-items:stretch;flex-wrap:wrap}
+.lane{font-family:inherit;text-align:left;cursor:pointer;
+  display:grid;grid-template-columns:auto auto auto auto;align-items:center;gap:0 18px;
+  padding:9px 15px;border-radius:8px;border:1px solid var(--line);
+  background:linear-gradient(180deg,#0e1720,#0b1218);color:var(--txt-dim);transition:.14s}
+.lane:hover{border-color:var(--accent-dim);color:var(--txt)}
+.lane:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.lane .lane-name{grid-row:1 / span 2;font-family:"Space Grotesk";font-weight:600;font-size:14.5px;
+  letter-spacing:.03em;color:var(--txt-dim);padding-right:6px;border-right:1px solid var(--line-soft);margin-right:2px;transition:.14s}
+.lane .m-v{font-size:15px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--txt);line-height:1.15}
+.lane .m-l{font-size:9px;letter-spacing:.09em;text-transform:uppercase;color:var(--txt-faint);line-height:1}
+.lane.on{border-color:var(--accent);color:var(--txt);
+  background:linear-gradient(180deg,#0f2029,#0c1a1f);box-shadow:0 0 0 1px var(--accent),0 0 22px -8px var(--accent)}
+.lane.on .lane-name{color:var(--accent)}
+.lane .lane-lead{grid-column:1 / -1;grid-row:3;height:2px;margin-top:6px;border-radius:2px;background:#ffffff08}
+.lane.lead .lane-lead{background:var(--lead);box-shadow:0 0 10px -2px var(--lead)}
+
+/* ============================ main split: stage | side panel | console ====
+   Fix #2: the sector inspector + telemetry live in their OWN column beside the
+   die (readable while clicking die sectors), NOT stacked under it. This is my
+   fixed layout — the reference's under-die stacking is one of the regressions
+   the fixes correct, so it does NOT win here; only its *styling* is ported. */
+.main{flex:1 1 auto;min-height:0;overflow:hidden;display:grid;
+  grid-template-columns:minmax(0,1fr) 292px minmax(348px,432px);gap:22px;
+  padding:18px 22px 16px;max-width:1440px;width:100%;margin:0 auto;align-items:stretch}
+
+.stage{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0;overflow:auto}
+.diewrap{position:relative;width:100%;max-width:560px;align-self:center;aspect-ratio:1;padding:14px;border-radius:8px;
   background:linear-gradient(180deg,#0e161d,#0b1117);border:1px solid var(--line);box-shadow:inset 0 0 0 1px #ffffff06,0 24px 60px -30px #000}
 .diewrap::before{content:"";position:absolute;top:8px;left:8px;width:9px;height:9px;border-top:2px solid var(--accent-dim);border-left:2px solid var(--accent-dim)}
 .die-stack{width:100%;height:100%}
@@ -59,102 +95,142 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .die.heat .sector{background:var(--wc,#0c141b);border-color:#0006}
 .die.heat .cell{opacity:.13}
 .die.heat .sector.sel{box-shadow:0 0 0 1px var(--accent)}
+
 .stagefoot{display:flex;gap:16px;color:var(--txt-faint);font-size:11px;letter-spacing:.04em;flex-wrap:wrap;justify-content:center}
 .stagefoot b{color:var(--txt-dim);font-weight:500}
 
+/* die-adjacent legend chip-row + heatmap toggle (per-FS class descriptor).
+   Chips are built dynamically into #legendChips (the .legend list). */
+.diebar{display:flex;align-items:center;gap:10px 12px;flex-wrap:wrap;justify-content:center}
+.legend{display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+.chip{position:relative;display:inline-flex;align-items:center;gap:6px;cursor:default;
+  font-size:11px;color:var(--txt-dim);padding:4px 8px;border-radius:5px;border:1px solid var(--line-soft);background:#0c131a}
+.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.chip .sw{width:11px;height:11px;border-radius:2px;flex:none;box-shadow:inset 0 0 0 1px #fff2}
+.chip .chip-hint{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);
+  width:max-content;max-width:230px;padding:6px 9px;border-radius:6px;font-size:10.5px;line-height:1.4;color:var(--txt);
+  background:#0a1219;border:1px solid var(--line);box-shadow:0 12px 30px -14px #000;
+  opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:5}
+.chip:hover .chip-hint,.chip:focus-visible .chip-hint,.chip:focus .chip-hint{opacity:1;visibility:visible}
+.sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
+.sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
+.sw.program{background:var(--program)} .sw.erase{background:var(--erase)} .sw.read{background:var(--read)}
+
+/* side panel — telemetry + sector inspector, its own column (fix #2) */
 .panel{display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
 .card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line-soft);border-radius:8px;padding:13px 14px}
-.card h3{margin:0 0 10px;font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim)}
-.legend{display:flex;flex-direction:column;gap:7px}
-.lrow{display:flex;align-items:center;gap:10px;font-size:12px}
-.sw{width:14px;height:14px;border-radius:2px;flex:none;box-shadow:inset 0 0 0 1px #fff2}
-.lrow small{margin-left:auto;color:var(--txt-faint);font-size:10.5px}
-.sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
-.sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)} .sw.program{background:var(--program)} .sw.erase{background:var(--erase)} .sw.read{background:var(--read)}
-.legend .note{margin-top:3px;font-size:10.5px;color:var(--txt-faint);line-height:1.45}
-.legend .note b{color:var(--txt-dim);font-weight:500}
+.card h3{margin:0 0 10px;font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim);display:flex;justify-content:space-between}
 .util{height:9px;border-radius:5px;overflow:hidden;display:flex;background:#0a1016;border:1px solid var(--line-soft);margin-bottom:11px}
 .util i{display:block;height:100%;width:0;transition:width .25s ease}
 .util .u-live{background:var(--prog)} .util .u-obs{background:var(--stale)}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:9px 14px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
 .stat{display:flex;flex-direction:column;gap:1px}
-.stat .n{font-size:17px;font-weight:500;font-variant-numeric:tabular-nums}
+.stat .n{font-size:16px;font-weight:500;font-variant-numeric:tabular-nums}
 .stat .n.amp{color:var(--prog)} .stat .n.ok{color:var(--accent)} .stat .n.bad{color:var(--err)}
-.stat .l{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--txt-faint)}
-.insp{font-size:12px;color:var(--txt-dim);min-height:56px}
+.stat .l{font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--txt-faint)}
+.insp{font-size:12px;color:var(--txt-dim);min-height:48px}
 .insp .addr{font-size:15px;color:var(--txt)}
 .insp .row{display:flex;justify-content:space-between;margin-top:6px}
 .insp .row span:last-child{color:var(--txt)}
 .insp .hint{color:var(--txt-faint);font-style:italic}
 
-.console{align-self:stretch;display:flex;min-width:0;min-height:0}
-.term{flex:1;display:flex;flex-direction:column;min-height:0;background:#0a0f15;border:1px solid var(--line-soft);border-radius:8px;overflow:hidden}
-.termout{flex:1;min-height:0;overflow:auto;padding:10px 13px;font-size:12px;line-height:1.55}
-.termout .line{white-space:pre-wrap;word-break:break-word}
-.termout .in{color:var(--accent)} .termout .out{color:var(--txt)} .termout .err{color:var(--err)} .termout .sys{color:var(--txt-faint)}
-.terminput{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line-soft);padding:8px 13px}
-.terminput .p{color:var(--accent);font-weight:700}
-.terminput input{flex:1;background:none;border:none;outline:none;color:var(--txt);font-family:inherit;font-size:12.5px}
-.terminput .hintk{color:var(--txt-faint);font-size:10.5px}
+/* ============================ the console tape (signature) ================= */
+.pane{display:flex;flex-direction:column;min-height:0;gap:11px}
 
-.transport{flex:none;border-top:1px solid var(--line-soft);background:linear-gradient(180deg,#0c131aee,#0a0f15);backdrop-filter:blur(4px);padding:12px 22px;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-.tgroup{display:flex;align-items:center;gap:8px}
-.sep{width:1px;height:24px;background:var(--line);margin:0 3px}
-.btn{font-family:inherit;font-size:12px;color:var(--txt);background:#16212b;border:1px solid var(--line);border-radius:6px;padding:7px 12px;cursor:pointer;transition:.13s;display:inline-flex;align-items:center;gap:7px}
+/* register A — the workload engine (drives auto-churn on every FS) */
+.engine{flex:none;display:flex;align-items:center;gap:9px 12px;flex-wrap:wrap;
+  padding:9px 11px;border:1px solid var(--line-soft);border-radius:8px;background:linear-gradient(180deg,#0e1720,#0b1117)}
+.engine::before{content:"ENGINE";font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint);align-self:center;writing-mode:vertical-rl;transform:rotate(180deg);margin-right:2px}
+.egrp{display:flex;align-items:center;gap:7px}
+.sep{width:1px;height:22px;background:var(--line)}
+.ctl{display:flex;align-items:center;gap:7px;color:var(--txt-dim);font-size:10.5px;letter-spacing:.05em}
+.hintk{color:var(--txt-faint);font-size:10px}
+input[type=range]{-webkit-appearance:none;appearance:none;width:74px;height:3px;border-radius:2px;background:var(--line);outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px -1px var(--accent);cursor:pointer}
+input[type=range]::-moz-range-thumb{width:13px;height:13px;border:none;border-radius:50%;background:var(--accent);cursor:pointer}
+input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+
+.btn{font-family:inherit;font-size:12px;color:var(--txt);background:#16212b;border:1px solid var(--line);border-radius:6px;padding:6px 11px;cursor:pointer;transition:.13s;display:inline-flex;align-items:center;gap:7px}
 .btn:hover{border-color:var(--accent-dim);background:#1a2833}
 .btn:active{transform:translateY(1px)}
 .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .btn.primary{background:var(--prog);color:#241a06;border-color:var(--prog);font-weight:600}
 .btn.primary:hover{background:var(--prog-edge)}
-.btn.warn:hover{border-color:#5a2a2c;color:#f2b0b2}
 .btn .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
-label.ctl{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:11px;letter-spacing:.05em}
-input[type=range]{-webkit-appearance:none;appearance:none;width:100px;height:3px;border-radius:2px;background:var(--line);outline:none;cursor:pointer}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px -1px var(--accent);cursor:pointer}
-input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-radius:50%;background:var(--accent);cursor:pointer}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
-.seg button{font-family:inherit;font-size:11px;color:var(--txt-dim);background:#121b23;border:none;border-right:1px solid var(--line);padding:7px 9px;cursor:pointer}
+.seg button{font-family:inherit;font-size:11px;color:var(--txt-dim);background:#121b23;border:none;border-right:1px solid var(--line);padding:6px 10px;cursor:pointer}
 .seg button:last-child{border-right:none}
 .seg button:hover{color:var(--txt);background:#18242e}
 .seg button.on{background:var(--accent-dim);color:#eafffb}
-.toggle{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:11px;letter-spacing:.05em;cursor:pointer;user-select:none}
+.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.toggle{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:10.5px;letter-spacing:.05em;cursor:pointer;user-select:none}
 .toggle input{position:absolute;opacity:0;pointer-events:none}
-.tswitch{width:34px;height:18px;border-radius:10px;background:#16212b;border:1px solid var(--line);position:relative;transition:.15s}
-.tswitch::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--txt-faint);transition:.15s}
+.tswitch{width:32px;height:17px;border-radius:10px;background:#16212b;border:1px solid var(--line);position:relative;transition:.15s}
+.tswitch::after{content:"";position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:var(--txt-faint);transition:.15s}
 .toggle input:checked + .tswitch{background:var(--accent-dim);border-color:var(--accent)}
-.toggle input:checked + .tswitch::after{transform:translateX(16px);background:var(--accent)}
+.toggle input:checked + .tswitch::after{transform:translateX(15px);background:var(--accent)}
+.toggle input:focus-visible + .tswitch{outline:2px solid var(--accent);outline-offset:2px}
 
-.cmptable{display:flex;flex-direction:column;gap:5px}
-.cmprow{display:grid;grid-template-columns:1.3fr .7fr 1fr .7fr .6fr .8fr;gap:8px;align-items:center;
-  font-size:11px;color:var(--txt-dim);padding:5px 7px;border-radius:5px;border:1px solid transparent;cursor:pointer}
-.cmprow:hover{background:#101a22}
-.cmprow.sel{border-color:var(--accent-dim);background:#0f1922;color:var(--txt)}
-.cmprow.head{cursor:default;color:var(--txt-faint);font-size:9.5px;text-transform:uppercase;letter-spacing:.06em;padding-bottom:0}
-.cmprow.head:hover{background:none}
-.cmprow .cmpname{font-weight:600;color:var(--txt)}
-.cmprow span:not(.cmpname){text-align:right;font-variant-numeric:tabular-nums}
-.cardhint{font-weight:400;letter-spacing:0;text-transform:none;color:var(--txt-faint)}
+/* the tape itself: journal of truth. #tape is the scrollable log (.tape-scroll);
+   playground.js appends per-entry .line rows into it directly. */
+.tape{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
+  background:#0a0f15;border:1px solid var(--line-soft);border-radius:8px;overflow:hidden}
+.tape-gap{flex:none;display:flex;align-items:center;gap:10px;padding:8px 13px;
+  border-bottom:1px solid #3a2f1c;background:linear-gradient(180deg,#1c160b,#140f08);color:var(--prog-edge);font-size:11px}
+.tape-gap b{font-variant-numeric:tabular-nums}
+.tape-gap .catchup{margin-left:auto;font-size:10.5px;padding:4px 9px}
+.tape-scroll{flex:1;min-height:0;overflow:auto;padding:9px 13px;font-size:12px;line-height:1.55}
+.line{white-space:pre-wrap;word-break:break-word;padding-left:12px;text-indent:-12px}
+.line.in{color:var(--accent)}            /* injected command echo — "what I did" */
+.line.out{color:var(--txt)}              /* op result with simulated cost */
+.line.churn{color:var(--txt-dim)}        /* auto-workload op — "what the workload did" */
+.line.err{color:var(--err)}
+.line.sys{color:var(--txt-faint)}
+/* lifecycle (ADR-0018): queued dimmed to --queued; live lit to accent — applied
+   in place as the coordinator advances an entry queued → live → done. */
+.line[data-state="queued"]{color:var(--queued)}
+.line[data-state="live"]{color:var(--accent);font-weight:500}
 
-@media (max-width:1080px){
+/* register B — manual pokes (inject discrete operations) + free-form input */
+.pokes{flex:none;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.pokes .reg{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint);margin-right:2px}
+.prompt{flex:none;display:flex;align-items:center;gap:8px;
+  border:1px solid var(--line-soft);border-radius:8px;background:#0a0f15;padding:8px 12px}
+.prompt .p{color:var(--accent);font-weight:700}
+.prompt input{flex:1;background:none;border:none;outline:none;color:var(--txt);font-family:inherit;font-size:12.5px;min-width:0}
+.prompt input::placeholder{color:var(--txt-faint)}
+.prompt .hintk{white-space:nowrap}
+
+@media (max-width:1040px){
   html,body{height:auto}
   body{overflow:auto;min-height:100%}
   .main{grid-template-columns:1fr;overflow:visible;min-height:auto}
-  .stage,.panel{overflow:visible;min-height:auto}
-  .diewrap{max-height:none}
-  .console{min-height:280px}
+  .stage,.panel,.pane{overflow:visible;min-height:auto}
+  /* FIX #5: the log keeps a bounded height + internal scroll so engine + log +
+     pokes stay ~one viewport and the tape never grows the page unbounded (the
+     reference's min-height:300 would; a max-height cap does not). */
+  .tape{min-height:220px;max-height:52vh}
+  .lanes{margin-left:0;width:100%}
+  .lane{flex:1 1 220px}
 }
-@media (max-width:900px){.spec{display:none}}
-@media (prefers-reduced-motion:reduce){.cell,.sector,.cell .fill{transition:none!important;animation:none!important}}
-.hidden{display:none!important}
+@media (max-width:640px){.board-status{display:none}.lane{grid-template-columns:auto auto auto}.lane .lane-name{grid-row:1 / span 2}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 
-<div class="header">
-  <div class="brand">
-    <span class="logo">FLASH<b>VIS</b></span>
-    <span class="tagline">real <span class="k" id="tagFsName">FASTFFS</span>, compiled to WASM, running live on an emulated NOR chip.</span>
+<header class="board">
+  <div class="board-id">
+    <div class="brand">
+      <span class="logo">FLASH<b>VIS</b></span>
+    </div>
+    <div class="tagline">real <span class="k">flash filesystems</span>, compiled to WASM, live on an emulated NOR chip</div>
+    <div class="board-status"><b id="specGeo">booting…</b> · <span id="specLive">loading</span></div>
   </div>
-  <div class="spec"><b id="specGeo">256 KB · 64×4 KB</b><br><span id="specLive">booting…</span></div>
-</div>
+  <!-- Scoreboard-switcher (ADR-0018, fix #3): per-FS standings AND the focus
+       control, on the RIGHT. Lanes are built dynamically by playground.js (one
+       .lane per participating FS, id sbSeg-<fsId>); the focused one is lit, the
+       leader (in Race divergence) gets the --lead bar. Click a lane to focus. -->
+  <div class="lanes" id="scoreboard" role="group" aria-label="filesystem standings — select one to focus"></div>
+</header>
 
 <div class="main">
   <div class="stage">
@@ -166,25 +242,15 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-ra
       <span><b id="fErase">0</b> erases</span>
       <span>flash time <b id="fSim">0 ms</b></span>
     </div>
+    <div class="diebar">
+      <div class="legend" id="legendChips" role="list" aria-label="cell states"></div>
+      <label class="toggle"><input type="checkbox" id="heat"><span class="tswitch"></span>WEAR HEATMAP</label>
+    </div>
   </div>
 
   <div class="panel">
     <div class="card">
-      <h3>Cell states</h3>
-      <div class="legend">
-        <div class="lrow"><span class="sw erased"></span>Erased <small>0xFF</small></div>
-        <div class="lrow"><span class="sw prog"></span>Live data <small>fill = bytes</small></div>
-        <div class="lrow"><span class="sw obsolete"></span>Obsolete <small>reclaimable</small></div>
-        <div class="lrow"><span class="sw index"></span>Metadata <small>index + records</small></div>
-        <div class="lrow"><span class="sw program"></span>Programming <small>1→0</small></div>
-        <div class="lrow"><span class="sw erase"></span>Erasing <small>sector → 0xFF</small></div>
-        <div class="lrow"><span class="sw read"></span>Reading <small>XIP, no wear</small></div>
-        <div class="note">Every animation is a real device op FASTFFS issued, paced by its
-          <b>ESP32-S3 flash timing</b>. Fill height is the <b>bytes programmed</b> in a page.</div>
-      </div>
-    </div>
-    <div class="card">
-      <h3>Telemetry</h3>
+      <h3>Telemetry <span class="hintk" id="telName" style="letter-spacing:0;text-transform:none"></span></h3>
       <div class="util" id="utilBar" title="live · garbage · free"><i class="u-live" id="uProg"></i><i class="u-obs" id="uObs"></i></div>
       <div class="grid2">
         <div class="stat"><span class="n amp" id="sAmp">1.0×</span><span class="l">Write amp</span></div>
@@ -198,72 +264,57 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-ra
       </div>
     </div>
     <div class="card">
-      <h3>Compare <small class="cardhint">— click a row to display it</small></h3>
-      <div class="cmptable" id="cmpTable">
-        <div class="cmprow head">
-          <span class="cmpname">FS</span><span>Step</span><span>Active time</span><span>WA</span><span>Files</span><span>Garbage</span>
-        </div>
-        <div class="cmprow" id="cmpRow-fastffs" data-fs="fastffs">
-          <span class="cmpname">FASTFFS</span><span id="cmpStep-fastffs">0</span><span id="cmpSim-fastffs">0 ms</span>
-          <span id="cmpWa-fastffs">1.0×</span><span id="cmpFiles-fastffs">0</span><span id="cmpGarbage-fastffs">0%</span>
-        </div>
-        <div class="cmprow" id="cmpRow-littlefs" data-fs="littlefs">
-          <span class="cmpname">LittleFS</span><span id="cmpStep-littlefs">0</span><span id="cmpSim-littlefs">0 ms</span>
-          <span id="cmpWa-littlefs">1.0×</span><span id="cmpFiles-littlefs">0</span><span id="cmpGarbage-littlefs">0%</span>
-        </div>
-      </div>
-    </div>
-    <div class="card">
       <h3>Sector inspector</h3>
       <div class="insp" id="insp"><span class="hint">Click a sector to inspect it.</span></div>
     </div>
   </div>
-    <div class="console">
-      <div class="term">
-        <div class="termout" id="termout"></div>
-        <div class="terminput">
-          <span class="p">›</span>
-          <input id="terminput" spellcheck="false" autocomplete="off"
-                 placeholder="fs.write('log.dat', randomBytes(900))  ·  cat('log.dat')  ·  ls()  ·  help()">
-          <span class="hintk">↑ history · enter</span>
-        </div>
+
+  <section class="pane" aria-label="console tape">
+    <div class="engine" role="group" aria-label="workload engine">
+      <div class="egrp">
+        <button class="btn primary" id="btnRun"><span class="dot"></span><span id="runLabel">Run</span></button>
+        <button class="btn" id="btnStep">Step</button>
       </div>
+      <div class="sep"></div>
+      <span class="seg" id="modeSeg" role="group" aria-label="lockstep mode">
+        <button id="modePick-pace" data-mode="pace" class="on">PACE</button><button id="modePick-race" data-mode="race">RACE</button>
+      </span>
+      <div class="sep"></div>
+      <label class="ctl">SPEED <input type="range" id="speed" min="0" max="100" value="40" aria-label="speed"> <span id="speedRead" class="hintk"></span></label>
+      <label class="ctl" id="ctlGc">BG&nbsp;GC <input type="range" id="gc" min="0" max="100" value="50" aria-label="background gc share"> <span id="gcRead" class="hintk"></span></label>
+      <div class="sep"></div>
+      <label class="ctl" title="click to toggle participation — 2+ selected runs lockstep">FS
+        <span class="seg" id="fsPick" role="group" aria-label="participating filesystems">
+          <button id="fsPick-fastffs" data-fs="fastffs" class="on">FASTFFS</button><button id="fsPick-littlefs" data-fs="littlefs" class="on">LittleFS</button>
+        </span>
+      </label>
     </div>
+
+    <div class="tape">
+      <div class="tape-gap hidden" id="tapeGap">
+        <span id="tapeGapText"></span>
+        <button class="btn catchup" id="btnCatchup">Catch up · Pace</button>
+      </div>
+      <div class="tape-scroll" id="tape"></div>
+    </div>
+
+    <div class="pokes" role="group" aria-label="manual pokes">
+      <span class="reg">POKE</span>
+      <button class="btn" id="btnWrite">write</button>
+      <button class="btn" id="btnLs">ls</button>
+      <button class="btn" id="btnDelete">delete</button>
+      <button class="btn" id="btnGC">gc</button>
+      <button class="btn" id="btnFormat">format</button>
+    </div>
+    <div class="prompt">
+      <span class="p">›</span>
+      <input id="terminput" spellcheck="false" autocomplete="off"
+             placeholder="writeFile('cfg.bin')  ·  ls()  ·  gc(3)  ·  help()">
+      <span class="hintk">↑ history · enter</span>
+    </div>
+  </section>
 </div>
 
-<div class="transport">
-  <label class="ctl" title="click to toggle participation — 2+ selected runs lockstep">FS
-    <span class="seg" id="fsPick">
-      <button id="fsPick-fastffs" data-fs="fastffs" class="on">FASTFFS</button><button id="fsPick-littlefs" data-fs="littlefs">LittleFS</button>
-    </span>
-  </label>
-  <label class="ctl" id="ctlMode">MODE
-    <span class="seg" id="lsMode">
-      <button id="modePick-race" data-mode="race" class="on">RACE</button><button id="modePick-pace" data-mode="pace">PACE</button>
-    </span>
-  </label>
-  <div class="sep"></div>
-  <div class="tgroup">
-    <button class="btn primary" id="btnRun"><span class="dot"></span><span id="runLabel">Pause</span></button>
-    <button class="btn" id="btnStep">Step</button>
-  </div>
-  <div class="sep"></div>
-  <div class="tgroup">
-    <button class="btn" id="btnWrite">Write file</button>
-    <button class="btn" id="btnLs">ls</button>
-    <button class="btn" id="btnDelete">Delete</button>
-    <button class="btn" id="btnGC">GC</button>
-    <button class="btn" id="btnFormat">Format</button>
-  </div>
-  <div class="sep"></div>
-  <label class="ctl">SPEED <input type="range" id="speed" min="0" max="100" value="40"> <span id="speedRead" class="hintk"></span></label>
-  <label class="ctl" id="ctlGc">BG&nbsp;GC <input type="range" id="gc" min="0" max="100" value="50"> <span id="gcRead" class="hintk"></span></label>
-  <label class="ctl">GRANULE
-    <span class="seg" id="gran">
-      <button data-g="1" class="on">1B</button><button data-g="4">4B</button><button data-g="16">16B</button><button data-g="64">64B</button><button data-g="256">256B</button>
-    </span>
-  </label>
-  <label class="toggle"><input type="checkbox" id="heat"><span class="tswitch"></span>WEAR HEATMAP</label>
-</div>
+<span id="bootStatus" class="hidden"></span>
 
 <script type="module" src="./src/playground.js"></script>
