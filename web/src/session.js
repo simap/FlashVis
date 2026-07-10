@@ -2,13 +2,24 @@
  * Session: one filesystem instance, fully self-contained — its own runner,
  * viz, die DOM, op-log capture (timed()), and liveness tracking (ADR-0015).
  *
- * A session is a pure EXECUTOR: it runs whatever op it's handed (a churn
- * event, a broadcast poke, a GC step, a console call) and paces/logs/animates
- * it, but never decides what to run next. The churn *generator*, the
- * gc-vs-churn ratio, and the one canonical broadcast sequence (ADR-0017) all
- * live one layer up, in the coordinator, so it can drive N sessions off one
- * shared timeline without touching session internals — see runChurnEvent() /
- * runPoke() / runGcStep() below, the seam that coordinator calls through.
+ * A session is a pure EXECUTOR: it runs whatever it's handed (a churn event,
+ * a GC step, or a whole atomic COMMAND) and paces/logs/animates it, but never
+ * decides what runs next. The churn *generator*, the gc-vs-churn ratio, and
+ * the one canonical broadcast sequence (ADR-0016/0019) all live one layer up,
+ * in the coordinator, so it can drive N sessions off one shared timeline
+ * without touching session internals — see runChurnEvent()/runGcStep()/
+ * runCommand() below, the seam the coordinator calls through.
+ *
+ * ADR-0019 moved the broadcast unit from the op to the whole atomic COMMAND:
+ * runCommand(fn, seed, pace) runs an async command function against a fresh,
+ * LOCAL inner API (writeFile/readFile/.../fs.open/openDir/...) built by
+ * buildLocalApi() below. Every call the command makes through that API is
+ * real: it executes for real (simNs jumps synchronously), animates through
+ * this session's own viz queue, and returns this session's real data. Pacing
+ * (Race's shared-clock gate, Pace's cross-session phaser+drain) is supplied
+ * by the coordinator as a small `{ before(), after() }` hook pair — session.js
+ * itself stays mode-agnostic, just awaiting whatever the coordinator hands it
+ * around each op.
  *
  * Each session owns its own tape too: a per-FS journal buffer (ADR-0018), since
  * every filesystem has its own timing, results, and pending state.
@@ -38,6 +49,36 @@ function deterministicBytes(seed, n) {
   }
   return out;
 }
+
+// mulberry32 — same generator idiom as lockstep.js's, but here it draws ONE
+// scalar per call (a name / a size / a "which file" pick), not a byte fill.
+// Each command invocation gets its own instance seeded from the coordinator's
+// per-command seed (ADR-0019), so a no-arg draw is identical call-for-call
+// across every session running the same command.
+function mulberry32(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Write content is a PURE function of (name, size) — ADR-0019's determinism-
+// by-construction refinement over ADR-0015's writeSeed-per-event: a console
+// writeFile('a', 100) is byte-identical on every FS regardless of history, so
+// a state-dependent script that issues a different NUMBER of writes per
+// filesystem can't desync a shared draw-stream and corrupt later writes. A
+// small FNV-1a over the name, folded with the size, feeds deterministicBytes.
+function hashNameSize(name, size) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < name.length; i++) { h ^= name.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  h ^= size; h = Math.imul(h, 0x01000193);
+  return h >>> 0;
+}
+
+const NOOP_PACE = { before: () => Promise.resolve(), after: () => Promise.resolve() };
 
 /**
  * @param {string} fsId               registry key — picks dist/<fsId>.mjs (ADR-0011)
@@ -92,13 +133,13 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     cachedCounts = { live, obsolete, metadata };
   }
 
-  // Per-session journal / tape (ADR-0017/0018): this session owns its own op-log
-  // scrollback — each FS has its own timing, results, and pending state, so the
-  // tape is per-FS and follows focus. Entries carry a lifecycle `state` the
-  // coordinator advances ('queued' → 'live' → 'done'); a result line emitted by
-  // an already-executed op defaults to 'done'. The legacy onLog sink still fires
-  // for every line, so existing callers (the shared termout) are unaffected —
-  // the journal is purely additive.
+  // Per-session journal / tape (ADR-0017/0018/0019): this session owns its own
+  // op-log scrollback — each FS has its own timing, results, and pending state,
+  // so the tape is per-FS and follows focus. Entries carry a lifecycle `state`
+  // the coordinator advances ('queued' → 'live' → 'done'); a result line
+  // emitted by an already-executed op defaults to 'done'. The legacy onLog sink
+  // still fires for every line, so existing callers (the shared termout) are
+  // unaffected — the journal is purely additive.
   const journal = [];
   const journalSubs = [];
   let journalSeq = 0;
@@ -133,56 +174,157 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     appendJournal(`${label} → ${fmtTime(ns)}${parts.length ? ' · ' + parts.join(' ') : ''}`, 'out');
   }
 
-  // Logs each op's simulated flash cost. Swallows a thrown error (logs it
-  // instead) rather than rethrowing — callers that care check the return.
+  // Logs each op's simulated flash cost, then rethrows a thrown error (after
+  // logging it) so the local api's ops reject like a real async call would —
+  // a script can `try/catch` a failed readFile/deleteFile/etc. runEntry()
+  // (lockstep.js, the churn/gc synchronous path) wraps its own call in a
+  // try/catch, so this rethrow doesn't change churn/GC step behavior.
   function timed(label, fn) {
     currentBatch = [];
     let res, err = null;
     try { res = fn(); } catch (e) { err = e; }
     const batch = currentBatch; currentBatch = null;
     logOp(label, batch, err);
+    if (err) throw err;
     return res;
   }
 
-  const fs = {
-    write: (n, d) => timed(`write(${n}, ${sizeOf(d)} B)`, () => runner.write(n, d)),
-    read: (n) => timed(`read(${n})`, () => runner.read(n)),
-    cat: (n) => timed(`cat(${n})`, () => runner.cat(n)),
-    remove: (n) => timed(`delete(${n})`, () => runner.remove(n)),
-    stat: (n) => timed(`stat(${n})`, () => runner.stat(n)),
-    mkdir: (n) => timed(`mkdir(${n})`, () => runner.mkdir(n)),
-    list: () => timed('ls()', () => runner.list()),
-    gcStep: () => timed('gc()', () => runner.gcStep()),
-    exists: (n) => runner.exists(n),
-    fsinfo: () => runner.fsinfo(),
-    device, geometry: runner.geometry, get hostBytes() { return runner.hostBytes; },
-  };
-
-  // Run an op, then resolve after the player finishes playing it (await =
-  // pace to sim time). In prep/setup mode (ADR-0014) skip the barrier and
-  // flush the die synchronously — full speed, no animation, still logged.
   let prepMode = false;
-  const pace = (fn) => {
-    const res = fn();
-    if (prepMode) { viz.flush(); return Promise.resolve(res); }
-    return viz.barrier().then(() => res);
-  };
 
-  // Streaming ls: open a pooled dir handle, then await each fffs_dir_read and
-  // print the entry as it arrives. `prefix` scopes the scan (empty ⇒ whole FS).
-  const lsStream = async (printEach, prefix = '') => {
-    const files = [];
-    const dir = await pace(() => runner.openDir(prefix));
-    for (;;) {
-      const e = await pace(() => dir.read());
-      if (!e) break;
-      if (printEach) appendJournal(`  ${e.name}  ${e.size} B`, 'out');
-      files.push(e);
+  // ---- the LOCAL inner API (ADR-0014 refined by ADR-0019) ----
+  // Built fresh per command invocation (runCommand, below) around a per-command
+  // seeded RNG and the coordinator's pace hooks. Every op funnels through
+  // runOp(): issue (in-flight++), pace.before() (Race's shared-clock gate — a
+  // no-op in Pace), execute for real (timed(), simNs jumps synchronously,
+  // animation enqueues into viz), pace.after() (Pace's drain+cross-session
+  // join — a no-op in Race), in-flight-- on settle. In prep mode (ADR-0014)
+  // both hooks are bypassed entirely and the die is flushed synchronously —
+  // bulk setup shouldn't lockstep with anything.
+  function buildLocalApi(rng, pace, onIssue, onSettle) {
+    function runOp(label, work) {
+      onIssue();
+      const p = (async () => {
+        if (prepMode) {
+          const res = timed(label, work);
+          viz.flush();
+          return res;
+        }
+        await pace.before();
+        const res = timed(label, work);
+        await pace.after();
+        return res;
+      })();
+      p.finally(onSettle);
+      return p;
     }
-    await pace(() => dir.close());
-    if (printEach && !files.length) appendJournal('  (empty)', 'out');
-    return files;
-  };
+
+    let nameSeq = 0;
+    const randomName = () => `f${(nameSeq++).toString(36).padStart(3, '0')}-${((rng() * 0x100000000) >>> 0).toString(16).padStart(8, '0')}.bin`;
+    const randomSize = () => 1024 + Math.floor(rng() * (32 * 1024 - 1024));
+    // No-arg reads/deletes need a target; pick deterministically (same rng
+    // stream ⇒ same call-order draw across sessions) from this session's own
+    // tracked set — a free, no-device-cost JS-side lookup (runner.names()),
+    // mirroring the old console's pickKnown().
+    function pickExisting() {
+      const names = runner.names().sort();
+      if (!names.length) throw new Error('no files yet — write one first');
+      return names[Math.floor(rng() * names.length)];
+    }
+    // Friendly mutators accept a descriptor OR a bare name (ADR-0019 refinement
+    // 3): deleteFile(last) and deleteFile(last.name) both work.
+    const resolveName = (arg) => (arg && typeof arg === 'object' ? arg.name : (arg ?? undefined)) ?? pickExisting();
+
+    function writeFile(name, size) {
+      const n = name ?? randomName();
+      const sz = size ?? randomSize();
+      return runOp(`write(${n}, ${sz} B)`, () => {
+        runner.write(n, deterministicBytes(hashNameSize(n, sz), sz));
+        return { name: n, size: sz };
+      });
+    }
+    function readFile(arg) {
+      const n = resolveName(arg);
+      return runOp(`read(${n})`, () => ({ name: n, size: runner.read(n).length }));
+    }
+    function deleteFile(arg) {
+      const n = resolveName(arg);
+      return runOp(`delete(${n})`, () => {
+        const st = runner.stat(n);
+        runner.remove(n);
+        return { name: n, size: st ? st.size : 0 };
+      });
+    }
+    async function mkdir(path) {
+      // mkdir -p: each path component is its own paced op (ADR-0014), real on
+      // hierarchical FSs, a no-op success on flat ones.
+      let cur = '';
+      for (const part of String(path).split('/').filter(Boolean)) {
+        cur += (cur ? '/' : '') + part;
+        await runOp(`mkdir(${cur})`, () => runner.mkdir(cur));
+      }
+      return 'ok';
+    }
+    // Shared dir-scan primitive for ls()/getFiles(): opens a pooled dir handle
+    // and paces each fffs_dir_read individually — real device traffic, driver
+    // order. `sorted` (getFiles) sorts the RETURNED array at the JS boundary
+    // only, after the scan; the animated/streamed scan itself always plays in
+    // driver order (ADR-0019 — sorting is a scripting-input concern, not a
+    // property of the physical scan).
+    async function scanDir(prefix, { printEach = false, sorted = false } = {}) {
+      const dir = await runOp(`openDir(${prefix || ''})`, () => runner.openDir(prefix || ''));
+      const files = [];
+      for (;;) {
+        const e = await runOp('dir.read()', () => dir.read());
+        if (!e) break;
+        if (printEach) appendJournal(`  ${e.name}  ${e.size} B`, 'out');
+        files.push(e);
+      }
+      await runOp('dir.close()', () => dir.close());
+      if (printEach && !files.length) appendJournal('  (empty)', 'out');
+      if (sorted) files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      return files;
+    }
+    const ls = (prefix) => scanDir(prefix, { printEach: true, sorted: false });
+    const getFiles = (prefix) => scanDir(prefix, { printEach: false, sorted: true });
+    const stat = (name) => runOp(`stat(${name})`, () => runner.stat(name));
+
+    // ---- Tier 2 — raw fs.* handles (ADR-0014), paced locally the same way. ----
+    function wrapHandle(h, label) {
+      return {
+        read: (n) => runOp(`read ${label}`, () => h.read(n)),
+        write: (data) => runOp(`write ${label}`, () => h.write(data)),
+        seek: (off, whence) => runOp(`seek ${label}`, () => h.seek(off, whence)),
+        stat: () => runOp(`stat ${label}`, () => h.stat()),
+        close: () => runOp(`close ${label}`, () => h.close()),
+      };
+    }
+    function wrapDir(d, label) {
+      return {
+        read: () => runOp(`dir.read ${label}`, () => d.read()),
+        close: () => runOp(`dir.close ${label}`, () => d.close()),
+      };
+    }
+    const fs = {
+      stat: (n) => runOp(`stat(${n})`, () => runner.stat(n)),
+      list: () => runOp('list()', () => runner.list()),
+      mkdir: (n) => runOp(`mkdir(${n})`, () => runner.mkdir(n)),
+      format: () => runOp('format()', () => runner.format()),
+      mount: () => runOp('mount()', () => runner.mount()),
+      unmount: () => runOp('unmount()', () => runner.unmount()),
+      sectorClasses: () => runOp('sectorClasses()', () => runner.sectorClasses()),
+      liveMap: () => runOp('liveMap()', () => runner.liveMap()),
+      write: (n, d) => runOp(`write(${n}, ${sizeOf(d)} B)`, () => runner.write(n, d)),
+      read: (n) => runOp(`read(${n})`, () => runner.read(n)),
+      cat: (n) => runOp(`cat(${n})`, () => runner.cat(n)),
+      remove: (n) => runOp(`delete(${n})`, () => runner.remove(n)),
+      exists: (n) => runOp(`exists(${n})`, () => runner.exists(n)),
+      fsinfo: () => runOp('fsinfo()', () => runner.fsinfo()),
+      open: async (n, mode) => wrapHandle(await runOp(`open(${n})`, () => runner.open(n, mode)), n),
+      openDir: async (prefix) => wrapDir(await runOp(`openDir(${prefix || ''})`, () => runner.openDir(prefix || '')), prefix || ''),
+    };
+
+    return { writeFile, readFile, deleteFile, mkdir, ls, getFiles, stat, fs };
+  }
 
   let active = true;
 
@@ -190,7 +332,9 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     fsId, name: name || fsId, caps: runner.caps, runner, device, viz, geometry: runner.geometry,
 
     /** Execute one churn event (WRITE/DELETE); DONE/NO_SLOT are no-ops. Content is
-     *  deterministic from ev.writeSeed, so the same event is byte-identical on any FS. */
+     *  deterministic from ev.writeSeed, so the same event is byte-identical on any FS.
+     *  Churn steps are simple, synchronous, single-op sequence entries — they don't
+     *  need the async command machinery below (ADR-0019). */
     runChurnEvent(ev) {
       if (ev.type === CHURN_EVENT.WRITE) {
         return timed(`write(${ev.name}, ${ev.size} B)`, () => runner.write(ev.name, deterministicBytes(ev.writeSeed, ev.size)));
@@ -200,44 +344,46 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
       }
       return undefined; // DONE / NO_SLOT: nothing to issue this step
     },
-    /** One opportunistic GC step, timed + logged; null no-op when unsupported. */
-    runGcStep() { return fs.gcStep(); },
+    /** One opportunistic GC step, timed + logged; null no-op when unsupported
+     *  (runner.gcStep() itself gates on FF_CAP_GC). */
+    runGcStep() { return timed('gc()', () => runner.gcStep()); },
 
-    /** Execute ONE broadcast filesystem operation on this session (ADR-0017):
-     *  timed + logged + animated exactly like runChurnEvent, landing in this
-     *  session's journal and costing simulated flash time. `op` and its `args`:
-     *    write  { name, size, seed }  content = deterministicBytes(seed, size),
-     *                                 so the same poke is byte-identical on every FS
-     *    read   { name }
-     *    ls     { }                   whole-FS listing (its dir scan is the traffic)
-     *    delete { name }
-     *    stat   { name }
-     *    mkdir  { name }
-     *    gc     { }                   one GC step (null no-op when unsupported)
-     *    format { }                   re-format + mount (fresh, empty chip)
-     *  Returns whatever the underlying op yields. Throws on an unknown op. */
-    runPoke(op, args = {}) {
-      switch (op) {
-        case 'write': {
-          const size = args.size >>> 0;
-          return timed(`write(${args.name}, ${size} B)`, () => runner.write(args.name, deterministicBytes(args.seed >>> 0, size)));
-        }
-        case 'read':   return fs.read(args.name);
-        case 'ls':     return fs.list();
-        case 'delete': return fs.remove(args.name);
-        case 'stat':   return fs.stat(args.name);
-        case 'mkdir':  return fs.mkdir(args.name);
-        case 'gc':     return fs.gcStep();
-        case 'format': return timed('format()', () => { runner.format(); runner.mount(); });
-        default: throw new Error(`runPoke: unknown op '${op}'`);
-      }
+    /** Run one atomic COMMAND (ADR-0019) — `fn` is `async (api) => any`, `seed` is
+     *  the per-command draw seed baked at broadcast(), `pace` is the coordinator's
+     *  `{ before(), after() }` hook pair for the current mode (Race gate / Pace
+     *  phaser+drain — see buildLocalApi). Resolves on QUIESCENCE: fn has settled
+     *  AND no op it issued is still in flight (a counter, ++ on issue, -- on
+     *  settle), re-checked at a macrotask boundary (setTimeout, never a microtask
+     *  or a synchronous re-check at the decrement) so a contiguous chain's
+     *  momentary counter-zero between two back-to-back ops can't misfire — the
+     *  microtask cascade a chain like `await Promise.resolve()` rides fully
+     *  drains before this fires. Never rejects: a thrown/rejected command is
+     *  logged and still counted quiescent once settled + drained, so a runaway
+     *  script can't wedge the coordinator's Promise.all. */
+    runCommand(fn, seed, pace) {
+      pace = pace || NOOP_PACE;
+      return new Promise((resolveQuiescent) => {
+        let inFlight = 0, fnDone = false, settled = false;
+        const rng = mulberry32(seed >>> 0);
+        const check = () => {
+          setTimeout(() => {
+            if (!settled && fnDone && inFlight === 0) { settled = true; resolveQuiescent(); }
+          }, 0);
+        };
+        const api = buildLocalApi(rng, pace, () => { inFlight++; }, () => { inFlight--; check(); });
+        Promise.resolve().then(() => fn(api)).then(
+          () => { fnDone = true; check(); },
+          (err) => { appendJournal(`command error: ${err?.message || err}`, 'err'); fnDone = true; check(); },
+        );
+      });
     },
+
     /** Fresh, empty chip. Churn-model reset is the manager's job, not the session's. */
     freshFormat() { runner.format(); runner.mount(); },
 
-    pace, barrier: () => viz.barrier(), pending: () => viz.pending(),
-    /** Log + pace primitive, exposed so the manager can build the console's
-     *  paced handle/dir proxies (fs.open/openDir) on top of this session. */
+    barrier: () => viz.barrier(), pending: () => viz.pending(),
+    /** Log + pace primitive, exposed so the coordinator's pace hooks (and any
+     *  direct, non-command execution) can time an op the same way commands do. */
     timed,
 
     /** Cheap, frequent: device counters + display fractions (no flash re-scan). */
@@ -296,11 +442,7 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     setHeatmap(on) { viz.setHeatmap(on, dieEl); },
     attachInspector(el) { viz.attachInspector(el); },
 
-    names: () => runner.names(),
-    lsStream,
-    fs,
-
-    // ---- per-session journal / tape (ADR-0017/0018) ----
+    // ---- per-session journal / tape (ADR-0017/0018/0019) ----
     /** This session's op-log scrollback: [{ id, text, cls, state }], newest last.
      *  `state` ∈ 'queued' | 'live' | 'done'. Read-only for the UI; mutate state
      *  through setJournalState so subscribers are notified. */
