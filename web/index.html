@@ -525,8 +525,6 @@ dialog.about[open]{animation:aboutIn .18s ease}
 .about-body .k{color:var(--accent);font-weight:500}
 .about-body code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:11.5px;
   color:var(--txt);background:var(--chrome);border:1px solid var(--line-soft);border-radius:4px;padding:.5px 5px}
-.about-note{margin-top:16px;padding:10px 12px;border:1px solid var(--line-soft);border-radius:8px;
-  background:var(--panel-2);color:var(--txt-faint);font-size:11.5px;line-height:1.55}
 
 @media (max-width:1040px){
   html,body{height:auto}
@@ -697,13 +695,13 @@ dialog.about[open]{animation:aboutIn .18s ease}
       grows it into that last page's slack in place, with no erase.</p>
       <p>Updates never overwrite in place. A filesystem writes a fresh copy and marks the old one
       <b>obsolete</b>. When free pages run low, garbage collection reclaims a sector: it relocates
-      the live data out, erases the sector, and adds one to that sector's erase count.</p>
+      the live data out, erases the sector, and adds one to that sector's erase count. Turn on the
+      wear heatmap to tint each sector by that erase count, and hotspots pool wherever garbage
+      collection keeps landing.</p>
       <p>The timing preset is an <b>ESP32-S3</b>: a 256 byte read takes about <b>0.1 ms</b>,
       programming a page about <b>1.5 ms</b>, and erasing a sector about <b>21 ms</b>. Erase is by
       far the most expensive operation, which is why filesystems work so hard to avoid it. The speed
       control in the header scales this simulated flash time up or down.</p>
-      <p class="about-note">Turn on the wear heatmap to tint each sector by how many times it has
-      been erased. Hotspots pool wherever garbage collection keeps landing.</p>
     </section>
 
     <section class="about-sec">
