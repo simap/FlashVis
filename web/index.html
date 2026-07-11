@@ -34,36 +34,47 @@
      saturation where the families are close (read-over-live, program-over-live).
      See the per-theme overlay notes. viz.js re-sources --read/--program/--erase/
      --prog-edge/--sector-bg for the live glow. Aurora is the :root default so the
-     page renders fully themed before JS runs. */
+     page renders fully themed before JS runs.
+
+     DISTINCTIVENESS: the four state fills are meant to be unmistakably their OWN
+     color at a glance, so coherence is carried by the ambient/substrate + one
+     consistent LOGIC, not by muting the functional colors. That logic: erased is
+     the darkest substrate tint; live + metadata are the two SATURATED heroes on
+     far-apart hues; obsolete is a mid-lightness NEUTRAL ASH (spent data reads as
+     colorless AMONG the saturated colors, and a neutral also makes every op-glow
+     overlay trivially legible). Op hues are pushed saturated too. */
 
   /* 1 · AURORA SIGNAL — instrument-on-dark-glass (default). */
   --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a; --chrome:#16212b;
   --glow-a:#12202b; --glow-b:#131a26;
-  --erased:#132029; --erased-edge:#233b44;
-  --prog:#eab54a; --prog-edge:#f4cf7e;
-  --stale:#4c4636; --stale-edge:#5f5741; --index:#63a6c9;
-  --read:#63e6ff; --program:#ff6a1a; --erase:#b978ff;
-  --accent:#6fd6c2; --accent-dim:#2f5d57; --hold:#eab54a;
+  --erased:#132029; --erased-edge:#2b4a57;
+  --prog:#f2b23a; --prog-edge:#ffd472;
+  --stale:#5c646d; --stale-edge:#7c848d; --index:#3fa0e0;
+  --read:#4de3ff; --program:#ff6a1a; --erase:#b06bff;
+  --accent:#45d6c0; --accent-dim:#2f5d57; --hold:#f2b23a;
   --sector-bg:#0c1013;
-  /* overlay: read-cyan(L85) over metadata steel-blue(L66) → lightness+sat;
-     program red-orange(h18) over amber live(h41) → hue23+sat; erase violet
-     over brown obsolete → near-complementary. */
+  /* cells at a glance: dark slate / saturated gold / ash blue-grey / vivid sky-blue.
+     overlay: read cyan(h191,L88) over metadata sky-blue(h204,L64) → lightness+hue;
+     program red-orange(h18) over gold live(h44) → hue26+sat; every op over the
+     neutral ash obsolete → trivially high-contrast. */
 }
-/* 2 · EMBER FOUNDRY — a forge: cold iron erased, white-hot forging write,
-   cast-brass live data, a cool inspection arc for reads, a magnesium burn to
-   erase. Read teal / program red-orange / erase magenta span all three axes. */
-:root[data-theme="ember"]{
-  --bg:#0d0e10; --panel:#16181c; --panel-2:#101113; --chrome:#1e2126;
-  --glow-a:#201a16; --glow-b:#1a1513;
-  --erased:#16181b; --erased-edge:#2a2f33;
-  --prog:#d4972f; --prog-edge:#f0c368;
-  --stale:#46403a; --stale-edge:#5c554b; --index:#5aa0d6;
-  --read:#57e0d8; --program:#ff5a12; --erase:#ff4fd8;
-  --accent:#57e0d8; --accent-dim:#2b5f5c; --hold:#d4972f;
-  --sector-bg:#0d0e10;
-  /* overlay: read teal(h175) over metadata blue(h205) → hue30+brightness;
-     program(h15) over brass(h36) → hue21+brightness; magenta erase over
-     taupe obsolete → far. */
+/* 2 · MAGMA — a volcanic core, deliberately the warm counterweight to Aurora's
+   cool glass: warm obsidian substrate + ember accent, cooled basalt erased,
+   sulfur-gold molten live, a cobalt mineral vein for metadata, a red-hot write,
+   and a magenta plasma discharge to erase. Cyan read is the one cold probe. */
+:root[data-theme="magma"]{
+  --bg:#100b0a; --panel:#1c1512; --panel-2:#130d0b; --chrome:#241a15;
+  --glow-a:#341811; --glow-b:#26120e;
+  --erased:#1c1a1e; --erased-edge:#3a342e;
+  --prog:#ffc21f; --prog-edge:#ffe07a;
+  --stale:#625049; --stale-edge:#83695f; --index:#3a6bff;
+  --read:#2fd6ff; --program:#ff3b1e; --erase:#ff3d7a;
+  --accent:#ff7a4d; --accent-dim:#7a3316; --hold:#ffc21f;
+  --sector-bg:#14100e;
+  /* cells at a glance: basalt grey / sulfur gold / warm ash-brown / cobalt blue.
+     overlay: read cyan(h192) over metadata cobalt(h222) → hue30+brightness;
+     program red(h8) over sulfur live(h45) → hue37+redder; magenta erase(h340)
+     over gold/cobalt/ash → far; every op over ash obsolete → high-contrast. */
 }
 /* 3 · ULTRAVIOLET LAB — an indigo cleanroom under UV. Ice-blue read, hot-
    magenta write, a UV-reactive lime erase (blue/magenta/green is the most
@@ -71,50 +82,53 @@
 :root[data-theme="uv"]{
   --bg:#0b0d16; --panel:#14162a; --panel-2:#0e1020; --chrome:#1c1e34;
   --glow-a:#1c1a3a; --glow-b:#181534;
-  --erased:#111427; --erased-edge:#25294a;
-  --prog:#b072e0; --prog-edge:#d0a6f0;
-  --stale:#3f3a52; --stale-edge:#544d68; --index:#3fc9c9;
-  --read:#6db8ff; --program:#ff4d9e; --erase:#9ee85a;
-  --accent:#6db8ff; --accent-dim:#2f4d78; --hold:#b072e0;
+  --erased:#111427; --erased-edge:#2b3160;
+  --prog:#b25cf0; --prog-edge:#d69cff;
+  --stale:#55506a; --stale-edge:#726c88; --index:#2fd6cf;
+  --read:#5aa6ff; --program:#ff3d9e; --erase:#a6ff45;
+  --accent:#5aa6ff; --accent-dim:#2f4d78; --hold:#b25cf0;
   --sector-bg:#0b0d18;
-  /* overlay: read blue(h210) over metadata teal(h180) → hue30 (metadata pulled
-     teal so read stays the only blue); program hot-magenta(h330) over live
-     blue-violet(h278) → hue52 + big sat/brightness gap; lime erase over
-     slate-violet obsolete → far. */
+  /* cells at a glance: dark indigo / vivid orchid / violet-grey ash / vivid teal.
+     overlay: read blue(h215) over metadata teal(h175) → hue40; program magenta
+     (h328) over orchid live(h278) → hue50 + big sat/brightness gap; lime erase
+     over teal/orchid/ash → far; blue/magenta/lime is the colorblind-robust trio. */
 }
-/* 4 · TERMINAL PHOSPHOR — the storage-tool vernacular: green/amber/red CRT
-   phosphors on a green-black tube. Read cyan-green vs live yellow-green split by
-   ~50deg + lightness; op TYPE also reads through MOTION (read bloom / program
-   fill-rise / erase sweep) for the green-vs-red colorblind pair. */
+/* 4 · TERMINAL PHOSPHOR — the storage-tool vernacular on a green-black tube, but
+   a MULTI-phosphor set so the states stay distinct: vivid green live, cyan
+   metadata, a dim grey-green burn for obsolete, with amber write + red erase.
+   Op TYPE also reads through MOTION (read bloom / program fill-rise / erase
+   sweep) for the green-vs-red colorblind pair. */
 :root[data-theme="phosphor"]{
   --bg:#0a0f0a; --panel:#10160f; --panel-2:#0c110b; --chrome:#182016;
   --glow-a:#12220f; --glow-b:#101a0d;
-  --erased:#0e150e; --erased-edge:#1f331f;
-  --prog:#7fbf55; --prog-edge:#a8e07f;
-  --stale:#4a4a30; --stale-edge:#5f5f42; --index:#5ad2b0;
-  --read:#4dff88; --program:#ffb52e; --erase:#ff5140;
+  --erased:#0e150e; --erased-edge:#244020;
+  --prog:#6ce02f; --prog-edge:#a6ff6b;
+  --stale:#4a5540; --stale-edge:#626e54; --index:#2fd6d0;
+  --read:#4dff88; --program:#ffb52e; --erase:#ff4130;
   --accent:#4dff88; --accent-dim:#2a6b45; --hold:#ffb52e;
   --sector-bg:#0a0f0a;
-  /* overlay: read cyan-green(h145,L86) over live yellow-green(h95,L72) →
-     hue50+lightness14; program amber over green live → warm/cool; erase red
-     over olive obsolete → brighter+saturated; note green-family leans on
-     lightness + the phosphor motion cue. */
+  /* multi-phosphor, not one green: vivid green live / cyan metadata / dim grey-green
+     ash obsolete, plus amber write + red erase. overlay: read(h145,L86) over live
+     yellow-green(h100,L72) → hue45+lightness; read over cyan metadata(h178) → hue33;
+     amber/red ops over any green state → warm/cool; green-vs-red also carries on the
+     phosphor MOTION cue (read bloom / program fill-rise / erase sweep). */
 }
 /* 5 · DEEP SEA — an abyssal dive: bioluminescent sea-green scan, an
-   anglerfish amber lure for writes, a jellyfish-violet erase. Live is a warm
-   salmon-coral (pulled red so it can't collide with the amber write). */
+   anglerfish amber lure for writes, a jellyfish rose-magenta erase. Live is a
+   vivid coral against the cold trench; metadata a bright water-blue. */
 :root[data-theme="deepsea"]{
   --bg:#0a1218; --panel:#101d24; --panel-2:#0b151b; --chrome:#16262e;
   --glow-a:#0e2a30; --glow-b:#102028;
-  --erased:#0d1a20; --erased-edge:#1e3640;
-  --prog:#e07a5e; --prog-edge:#f0a888;
-  --stale:#3f4642; --stale-edge:#545c56; --index:#4b93c9;
-  --read:#35e6c8; --program:#ff9a2e; --erase:#c65cff;
-  --accent:#35e6c8; --accent-dim:#245f56; --hold:#e07a5e;
+  --erased:#0d1a20; --erased-edge:#21455a;
+  --prog:#ff7a52; --prog-edge:#ffa583;
+  --stale:#47565a; --stale-edge:#63757a; --index:#2f9fe0;
+  --read:#2ff0c8; --program:#ff9a2e; --erase:#ff4db0;
+  --accent:#2ff0c8; --accent-dim:#245f56; --hold:#ff7a52;
   --sector-bg:#0a141a;
-  /* overlay: read sea-green(h168) over metadata blue(h205) → hue37+brightness;
-     program amber(h33) over salmon live(h15) → hue18 + yellower/brighter;
-     violet erase over grey-green obsolete → far. */
+  /* cells at a glance: deep trench-blue / vivid coral / slate-teal ash / water-blue.
+     overlay: read sea-green(h168) over metadata water-blue(h202) → hue34+brightness;
+     program amber(h33) over coral live(h13) → hue20+yellower; rose-magenta erase
+     (h330) over coral/water-blue/ash → far. */
 }
 /* 6 · CYANOTYPE BLUEPRINT — a drafting print: paper-white-blue read over a
    blueprint-cyan field, orange annotation for writes, a crimson correction to
@@ -122,16 +136,17 @@
 :root[data-theme="blueprint"]{
   --bg:#091320; --panel:#0f1d2c; --panel-2:#0a1420; --chrome:#16293a;
   --glow-a:#123049; --glow-b:#0f2036;
-  --erased:#0e1a2a; --erased-edge:#20364d;
-  --prog:#4aa8dc; --prog-edge:#7cc4ea;
-  --stale:#3c4a57; --stale-edge:#51616f; --index:#e0a94b;
-  --read:#cfe8ff; --program:#ff7a33; --erase:#ff4d5e;
-  --accent:#57b6e6; --accent-dim:#2c5f7e; --hold:#ff7a33;
+  --erased:#0e1a2a; --erased-edge:#24466b;
+  --prog:#2f9fe0; --prog-edge:#6cc4f0;
+  --stale:#46565f; --stale-edge:#61737d; --index:#f5b135;
+  --read:#d6ecff; --program:#ff7a33; --erase:#ff3b52;
+  --accent:#2f9fe0; --accent-dim:#2c5f7e; --hold:#ff7a33;
   --sector-bg:#09131f;
-  /* overlay: read paper-white(L92,sat~15%) over live saturated cyan(L64,sat~65%)
-     → chalk-over-line, a deliberate lightness+saturation split (the theme's one
-     cool-on-cool pair); program orange & erase crimson over cyan/amber states →
-     warm/cool, all high-contrast. */
+  /* cells at a glance: dark ink-blue / vivid blueprint-cyan / slate ash / vivid amber.
+     overlay: read paper-white(L93,sat~15%) over saturated cyan live(h202,L60,sat65%)
+     → chalk-over-line, a deliberate lightness+saturation split (the one cool-on-cool
+     pair); program orange & crimson erase over cyan/amber/ash states → warm/cool,
+     all high-contrast. */
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -502,7 +517,7 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
         <span class="tp-dots" aria-hidden="true"><i class="d-read"></i><i class="d-prog-op"></i><i class="d-erase"></i><i class="d-live"></i></span>
         <select id="theme" aria-label="color palette theme">
           <option value="aurora">Aurora Signal</option>
-          <option value="ember">Ember Foundry</option>
+          <option value="magma">Magma</option>
           <option value="uv">Ultraviolet Lab</option>
           <option value="phosphor">Terminal Phosphor</option>
           <option value="deepsea">Deep Sea</option>

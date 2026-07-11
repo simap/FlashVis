@@ -506,7 +506,7 @@ async function boot() {
   // preview dots read the theme vars directly, so they re-skin for free. The
   // choice is persisted, so a reload keeps the chosen palette. ----
   const THEME_KEY = 'flashvis.theme';
-  const THEMES = ['aurora', 'ember', 'uv', 'phosphor', 'deepsea', 'blueprint'];
+  const THEMES = ['aurora', 'magma', 'uv', 'phosphor', 'deepsea', 'blueprint'];
   const themeSel = $('theme');
   const applyTheme = (t) => {
     if (!THEMES.includes(t)) t = 'aurora';
