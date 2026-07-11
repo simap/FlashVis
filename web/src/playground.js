@@ -365,30 +365,43 @@ async function boot() {
   // ---- die-adjacent legend chip-row (ADR-0018): per-FS class descriptor —
   // same baseline for both drivers today, a hook for future per-driver classes
   // (LittleFS metadata-pair / CTZ) without reworking the row's structure. ----
-  // Every color the die can display: the four matte STATE fills, then the op
-  // GLOWS (marked `glow` so the swatch renders as a glowing dot, not a fill),
-  // including the read+program MIX (--mix, the overlap color the dual-channel
-  // heat renders when a cell is read and programmed at once).
+  // Every color the die can display, in TWO groups. STATES are matte FILLS (a
+  // cell's stored condition). OPS are GLOWS (marked `glow`) the die rides over a
+  // cell, so their swatch renders as a hollow ring + halo, no fill; the group
+  // includes the read+program MIX (--mix, the overlap color the dual-channel heat
+  // renders when a cell is read and programmed at once).
   function legendFor(_session) {
     return [
-      { cls: 'erased', word: 'Erased', title: '0xFF — nothing written' },
-      { cls: 'prog', word: 'Live', title: 'fill = bytes programmed' },
-      { cls: 'obsolete', word: 'Obsolete', title: 'reclaimable garbage' },
-      { cls: 'index', word: 'Metadata', title: 'index + records' },
-      { cls: 'read', word: 'Reading', title: 'XIP, no wear', glow: true },
-      { cls: 'program', word: 'Programming', title: '1→0, in progress', glow: true },
-      { cls: 'mix', word: 'Read + write', title: 'one cell read and programmed at once', glow: true },
-      { cls: 'erase', word: 'Erasing', title: 'sector → 0xFF', glow: true },
+      { label: 'States', items: [
+        { cls: 'erased', word: 'Erased', title: '0xFF, nothing written' },
+        { cls: 'prog', word: 'Live', title: 'fill = bytes programmed' },
+        { cls: 'obsolete', word: 'Obsolete', title: 'reclaimable garbage' },
+        { cls: 'index', word: 'Metadata', title: 'index + records' },
+      ] },
+      { label: 'Ops', items: [
+        { cls: 'read', word: 'Reading', title: 'XIP, no wear', glow: true },
+        { cls: 'program', word: 'Programming', title: '1 to 0, in progress', glow: true },
+        { cls: 'mix', word: 'Read + write', title: 'one cell read and programmed at once', glow: true },
+        { cls: 'erase', word: 'Erasing', title: 'sector to 0xFF', glow: true },
+      ] },
     ];
   }
   function renderLegend(session) {
-    const row = $('legendChips');
-    row.innerHTML = '';
-    for (const c of legendFor(session)) {
-      const chip = document.createElement('div');
-      chip.className = 'chip'; chip.tabIndex = 0; chip.setAttribute('role', 'listitem');
-      chip.innerHTML = `<span class="sw ${c.cls}${c.glow ? ' glow' : ''}"></span>${c.word}<span class="chip-hint">${c.title}</span>`;
-      row.appendChild(chip);
+    const host = $('legendChips');
+    host.innerHTML = '';
+    for (const group of legendFor(session)) {
+      const row = document.createElement('div');
+      row.className = 'legend-row'; row.setAttribute('role', 'list'); row.setAttribute('aria-label', group.label);
+      const lbl = document.createElement('span');
+      lbl.className = 'legrow-label'; lbl.setAttribute('aria-hidden', 'true'); lbl.textContent = group.label;
+      row.appendChild(lbl);
+      for (const c of group.items) {
+        const chip = document.createElement('div');
+        chip.className = 'chip'; chip.tabIndex = 0; chip.setAttribute('role', 'listitem');
+        chip.innerHTML = `<span class="sw ${c.cls}${c.glow ? ' glow' : ''}"></span>${c.word}<span class="chip-hint">${c.title}</span>`;
+        row.appendChild(chip);
+      }
+      host.appendChild(row);
     }
   }
 

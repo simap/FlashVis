@@ -343,10 +343,15 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .geo{display:flex;gap:16px;color:var(--txt-faint);font-size:11px;letter-spacing:.04em;flex-wrap:wrap;justify-content:center}
 .geo b{color:var(--txt-dim);font-weight:500}
 
-/* die-adjacent legend chip-row + heatmap toggle (per-FS class descriptor).
-   Chips are built dynamically into #legendChips (the .legend list). */
+/* die-adjacent legend + heatmap toggle. Built dynamically into #legendChips as
+   TWO grouped rows (renderLegend): row 1 = cell STATES, row 2 = OPS. They are
+   two different kinds of thing, so each row carries its own micro-label and the
+   rows stack; state chips align under op chips via a shared label column. */
 .diebar{display:flex;align-items:center;gap:10px 12px;flex-wrap:wrap;justify-content:center}
-.legend{display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
+.legend{display:flex;flex-direction:column;gap:5px}
+.legend-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.legrow-label{flex:none;width:3.4em;font-size:8px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--txt-faint);text-align:right}
 .chip{position:relative;display:inline-flex;align-items:center;gap:6px;cursor:default;
   font-size:11px;color:var(--txt-dim);padding:4px 8px;border-radius:5px;border:1px solid var(--line-soft);background:var(--panel-2)}
 .chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -356,16 +361,16 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
   background:var(--panel-2);border:1px solid var(--line);box-shadow:0 12px 30px -14px #000;
   opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:5}
 .chip:hover .chip-hint,.chip:focus-visible .chip-hint,.chip:focus .chip-hint{opacity:1;visibility:visible}
-/* STATE fills are flat squares; OP GLOWS (reading/programming/erasing and the
-   read+program mix) are round dots with a colored halo, so the legend swatch
-   reads the same way the cell does — a fill vs a glow. */
+/* STATES are flat FILLS (a state IS a fill). OPS are GLOWS over a cell, so their
+   swatch is a hollow ring + halo in the op's theme color with NO opaque center
+   (the chip background shows through, mirroring a glow riding over a cell). */
 .sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
-.sw.glow{width:10px;height:10px;border-radius:50%}
-.sw.read.glow{background:var(--read);box-shadow:0 0 6px 0 var(--read),0 0 2px 0 var(--read)}
-.sw.program.glow{background:var(--program);box-shadow:0 0 6px 0 var(--program),0 0 2px 0 var(--program)}
-.sw.erase.glow{background:var(--erase);box-shadow:0 0 6px 0 var(--erase),0 0 2px 0 var(--erase)}
-.sw.mix.glow{background:var(--mix);box-shadow:0 0 6px 0 var(--mix),0 0 2px 0 var(--mix)}
+.sw.glow{width:11px;height:11px;border-radius:50%;background:transparent}
+.sw.read.glow{box-shadow:inset 0 0 0 1.5px var(--read),0 0 6px 0 var(--read)}
+.sw.program.glow{box-shadow:inset 0 0 0 1.5px var(--program),0 0 6px 0 var(--program)}
+.sw.erase.glow{box-shadow:inset 0 0 0 1.5px var(--erase),0 0 6px 0 var(--erase)}
+.sw.mix.glow{box-shadow:inset 0 0 0 1.5px var(--mix),0 0 6px 0 var(--mix)}
 
 /* palette switcher — sits with the legend because it governs what the legend
    MEANS: pick a palette and the whole die + live glow re-skins. It's a radiogroup
@@ -535,7 +540,7 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
     </div>
     <div class="geo" id="geoLine"></div>
     <div class="diebar">
-      <div class="legend" id="legendChips" role="list" aria-label="cell states"></div>
+      <div class="legend" id="legendChips" role="group" aria-label="cell states and operations"></div>
       <label class="toggle"><input type="checkbox" id="heat"><span class="tswitch"></span>WEAR HEATMAP</label>
       <!-- Palette switcher: one chip per theme, each previewing its own colors.
            Chips + the name readout are built by playground.js into #themeChips /
