@@ -56,6 +56,10 @@ const $ = (id) => document.getElementById(id);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const enc = new TextEncoder();
 const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)} ms` : `${(ms / 1000).toFixed(2)} s`; };
+// Pace efficiency: flash time per WORKLOAD op (sequence step), adaptive unit.
+const fmtPerOp = (ns, ops) => { if (!(ops > 0)) return '—'; const us = ns / 1000 / ops; return us < 1000 ? `${Math.round(us)} µs/op` : `${(us / 1000).toFixed(2)} ms/op`; };
+// Compact workload ops/sec for the Race throughput tag.
+const fmtRate = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 function randomBytes(n) {
   const a = new Uint8Array(n);
   for (let i = 0; i < n; i += 65536) crypto.getRandomValues(a.subarray(i, Math.min(n, i + 65536)));
@@ -230,7 +234,8 @@ async function boot() {
     renderLegend(activeSession);
     renderTapeFull();
     renderGap();
-    renderScoreboard();
+    renderFsSet();
+    $('telName').textContent = FS_REGISTRY[fsId];
   }
 
   // ---- tape (ADR-0018): the focused session's journal, queued/live/done. ----
@@ -293,49 +298,62 @@ async function boot() {
   }
   $('btnCatchup').addEventListener('click', () => { coordinator.setMode('pace'); markMode('pace'); });
 
-  // ---- scoreboard-switcher header (ADR-0018): per-FS standings, click to
-  // focus. One `.lane` per participating FS (visual language ported from the
-  // tuned design reference), built into #scoreboard (the .lanes container). ----
-  function scoreboardSeg(fsId) {
+  // ---- the set-notation header (A1/ADR-0018): per-FS standings AND the
+  // focus control, collapsed into the `{ [FASTFFS], [LittleFS] }` sentence.
+  // One `.fs` card per participating FS (both, always — A2), built into
+  // #fsSet with a `.setsep` comma between cards; click a card to focus it.
+  function fsCard(fsId) {
     const btn = document.createElement('button');
-    btn.className = 'lane'; btn.id = 'sbSeg-' + fsId; btn.dataset.fs = fsId;
+    btn.className = 'fs'; btn.id = 'fsCard-' + fsId; btn.dataset.fs = fsId;
     btn.setAttribute('aria-pressed', String(fsId === focusedFsId));
     btn.innerHTML =
-      `<span class="lane-name">${FS_REGISTRY[fsId]}</span>` +
-      `<span class="lane-m"><span class="m-v" id="sbStep-${fsId}">0</span><span class="m-l">step</span></span>` +
-      `<span class="lane-m"><span class="m-v" id="sbTime-${fsId}">0 ms</span><span class="m-l">active</span></span>` +
-      `<span class="lane-m"><span class="m-v" id="sbWa-${fsId}">1.0×</span><span class="m-l">write&nbsp;amp</span></span>` +
-      `<span class="lane-lead"></span>`;
+      `<span class="fs-top"><span class="fs-name">${FS_REGISTRY[fsId]}</span><span class="fs-run" title="running"></span></span>` +
+      `<span class="fs-vital"><b class="fs-v" id="fsV-${fsId}">—</b><i class="fs-l" id="fsL-${fsId}">—</i><span class="fs-hold" id="fsHold-${fsId}">◷ holding</span></span>` +
+      `<span class="fs-bar"><span class="track"><i id="fsBar-${fsId}"></i></span><span class="tag" id="fsTag-${fsId}">ops/s</span></span>`;
     btn.addEventListener('click', () => { if (sessions.has(fsId) && fsId !== focusedFsId) setFocus(fsId); });
     return btn;
   }
-  // Tracked explicitly (not inferred from a getElementById probe) — a lane is
+  // Tracked explicitly (not inferred from a getElementById probe) — a card is
   // built once per participating fsId and reused on every subsequent render.
-  const scoreboardBuilt = new Set();
-  function renderScoreboard() {
-    const board = $('scoreboard');
+  const fsSetBuilt = new Set();
+  function renderFsSet() {
+    const wrap = $('fsSet');
     const snaps = coordinator.snapshots();
-    // The `--lead` bar marks the front-runner ONLY when there's genuine step
-    // divergence (a Race split) — in steady Pace lockstep every cursor is equal
-    // and nobody "leads", so no lane lights up (same philosophy as fix #4).
-    let maxStep = -Infinity, minStep = Infinity;
-    for (const s of snaps) { maxStep = Math.max(maxStep, s.stepCursor); minStep = Math.min(minStep, s.stepCursor); }
-    const diverged = maxStep > minStep;
+    const mode = coordinator.mode;
+    // Per-FS "goodness": higher = better = fuller bar = leader color, in BOTH
+    // modes — only the underlying quantity flips. Race = workload throughput
+    // (ops/sec). Pace = efficiency (workload ops per unit flash-time, the inverse
+    // of ms/op): in lockstep Pace every FS shares the same ops/sec, so only the
+    // per-op flash cost separates them, and less time per op reads as the
+    // fuller/leading bar.
+    const goodOf = (s) => (mode === 'race' ? (s.opsPerSec || 0) : (s.simNs > 0 ? s.stepCursor / s.simNs : 0));
+    const leaderGood = snaps.reduce((m, s) => Math.max(m, goodOf(s)), 0);
     for (const snap of snaps) {
-      if (!scoreboardBuilt.has(snap.fsId)) { board.appendChild(scoreboardSeg(snap.fsId)); scoreboardBuilt.add(snap.fsId); }
-      const seg = $('sbSeg-' + snap.fsId);
-      seg.classList.toggle('on', snap.fsId === focusedFsId);
-      seg.classList.toggle('lead', diverged && snap.stepCursor === maxStep);
-      seg.setAttribute('aria-pressed', String(snap.fsId === focusedFsId));
-      $('sbStep-' + snap.fsId).textContent = String(snap.stepCursor);
-      $('sbTime-' + snap.fsId).textContent = fmtTime(snap.simNs);
-      $('sbWa-' + snap.fsId).textContent = snap.wa.toFixed(1) + '×';
-    }
-    for (const fsId of [...scoreboardBuilt]) {
-      if (sessions.has(fsId)) continue;
-      scoreboardBuilt.delete(fsId);
-      const el = $('sbSeg-' + fsId);
-      board.removeChild(el);
+      if (!fsSetBuilt.has(snap.fsId)) {
+        if (fsSetBuilt.size) wrap.appendChild(Object.assign(document.createElement('span'), { className: 'setsep', textContent: ',' }));
+        wrap.appendChild(fsCard(snap.fsId));
+        fsSetBuilt.add(snap.fsId);
+      }
+      const card = $('fsCard-' + snap.fsId);
+      card.classList.toggle('on', snap.fsId === focusedFsId);
+      card.setAttribute('aria-pressed', String(snap.fsId === focusedFsId));
+      const good = goodOf(snap);
+      card.classList.toggle('leader', leaderGood > 0 && good >= leaderGood);
+      // Parked-waiting indicator: pace "holding" (waiting on the laggard) OR race
+      // "waiting" (ahead of the shared clock, stalled until it climbs up). Same
+      // visual, mode-aware label.
+      card.classList.toggle('waiting', !!snap.holding || !!snap.stalled);
+      $('fsHold-' + snap.fsId).textContent = mode === 'race' ? '◷ waiting' : '◷ holding';
+      // Mode-aware vital: RACE = workload ops done (more wins) = stepCursor, the
+      // sequence steps this FS got through in the shared flash-time budget; PACE =
+      // flash time (less wins). The bar rates goodness (throughput / efficiency);
+      // the tag carries the live number — ops/sec in Race, ms/op in Pace. Flash
+      // ops (reads/programs/erases) are the COST view (the die + Flash Stats),
+      // deliberately not the "ops" the compare modes measure.
+      $('fsV-' + snap.fsId).textContent = mode === 'race' ? String(snap.stepCursor) : fmtTime(snap.simNs);
+      $('fsL-' + snap.fsId).textContent = mode === 'race' ? 'ops done' : 'flash time';
+      $('fsBar-' + snap.fsId).style.width = (leaderGood > 0 ? Math.round((good / leaderGood) * 100) : 0) + '%';
+      $('fsTag-' + snap.fsId).textContent = mode === 'race' ? `${fmtRate(snap.opsPerSec || 0)} ops/s` : fmtPerOp(snap.simNs, snap.stepCursor);
     }
   }
 
@@ -364,9 +382,23 @@ async function boot() {
     }
   }
 
+  // ---- static device geometry line (A5): replaces the old dynamic
+  // .stagefoot; built once from the same geometry #specGeo is sourced from
+  // (the dynamic stats that lived here moved into Flash Stats — A6). ----
+  function renderGeo() {
+    const kb = (activeSession.device.size / 1024) | 0;
+    const pagesPerSector = geometry.sectorSize / geometry.pageSize;
+    $('geoLine').innerHTML =
+      `<span><b>${kb} KB</b> NOR</span>` +
+      `<span><b>${geometry.sectorCount} × ${pagesPerSector}</b> pages</span>` +
+      `<span><b>${geometry.sectorSize / 1024} KB</b> sectors</span>` +
+      `<span><b>${geometry.pageSize} B</b> program page</span>`;
+  }
+
   setFocus(DEFAULT_FS);
   $('specGeo').textContent = `${(activeSession.device.size / 1024) | 0} KB · ${geometry.sectorCount}×${geometry.sectorSize / 1024} KB · ESP32-S3 timing`;
   $('specLive').textContent = 'formatted + mounted — empty and paused';
+  renderGeo();
 
   // ---- FIX: boot logs (ADR-0018) — run help() then format() as BROADCAST
   // commands (not a one-off print to a single shared log) so every
@@ -376,7 +408,26 @@ async function boot() {
 
   setInterval(() => activeSession.refreshHUD($), 160);
   setInterval(() => activeSession.refreshLiveness($), 250);
-  setInterval(() => { renderScoreboard(); renderGap(); }, 250);
+  setInterval(() => { renderFsSet(); renderGap(); }, 250);
+
+  // ---- CS (pin 1) activity indicator: the fast, twitchy per-frame twin of
+  // the card's holding/stalled readout (ADR-0020's waitStates(), read fresh
+  // every frame — never cached). Cheap (no WASM/liveness walk), so a plain
+  // rAF loop is fine; not folded into the 250ms renderFsSet interval because
+  // that cadence would flatten the RACE burst-flicker this pin exists to
+  // show. Reflects whichever fs is FOCUSED, re-read every frame since focus
+  // can change under it. Guarded so a headless/test DOM without rAF (or
+  // before `coordinator` exists) never throws. ----
+  const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+  const pinCS = $('pinCS');
+  if (pinCS) {
+    (function csTick() {
+      const waiting = !!coordinator.waitStates()[focusedFsId];
+      pinCS.classList.toggle('cs-active', !waiting);
+      pinCS.classList.toggle('cs-paused', waiting);
+      raf(csTick);
+    })();
+  }
 
   // ---- Run/Pause, Step: act on the WHOLE participating set via the coordinator. ----
   const setRunning = (v) => {
@@ -386,44 +437,27 @@ async function boot() {
   };
   setRunning(false);
 
-  // ---- participants: toggling FS participation is a workload-engine action,
-  // not a console command (ADR-0018 keeps the two registers visually and
-  // mechanically distinct) — direct coordinator calls, fresh chips on change. ----
-  for (const fsId of Object.keys(FS_REGISTRY)) {
-    $('fsPick-' + fsId)?.addEventListener('click', () => toggleParticipant(fsId));
-  }
-  async function toggleParticipant(fsId) {
-    const willJoin = !sessions.has(fsId);
-    if (!willJoin && sessions.size === 1) return;
-    if (willJoin) {
-      let s;
-      try { s = await mkSession(fsId); } catch (e) { console.error(e); return; }
-      sessions.set(fsId, s);
-      s.setHeatmap($('heat').checked);
-    } else {
-      const s = sessions.get(fsId);
-      journalUnsub.get(s)?.(); journalUnsub.delete(s);
-      s.teardown();
-      sessions.delete(fsId);
-      if (focusedFsId === fsId) focusedFsId = sessions.keys().next().value;
-    }
-    coordinator.setSessions([...sessions.values()]);
-    coordinator.reset();
-    applySpeed(+$('speed').value);
-    for (const id of Object.keys(FS_REGISTRY)) $('fsPick-' + id)?.classList.toggle('on', sessions.has(id));
-    setFocus(focusedFsId);
-    for (const s of sessions.values()) s.appendJournal('participants changed — fresh, empty chip', 'sys', 'done');
-  }
-
-  // ---- Race / Pace mode ----
+  // ---- Race / Pace mode: an inline WHEEL (A1a), not a segmented control —
+  // the active phrase sits on the sentence baseline, the other mode peeks
+  // below (faded, tilted back); click rotates the peek up. Canonical
+  // pace/race stay under the hood; wired straight to coordinator.setMode. ----
+  const modeWheel = $('modeWheel');
+  const modeOpts = { pace: $('modeOpt-pace'), race: $('modeOpt-race') };
   const markMode = (m) => {
-    $('modePick-race')?.classList.toggle('on', m === 'race');
-    $('modePick-pace')?.classList.toggle('on', m === 'pace');
+    for (const [k, el] of Object.entries(modeOpts)) {
+      el.classList.toggle('active', k === m);
+      el.classList.toggle('peek', k !== m);
+    }
+    modeWheel.dataset.mode = m;
+    modeWheel.setAttribute('aria-checked', String(m === 'race'));
+    modeWheel.setAttribute('aria-label', `comparing ${m === 'race' ? 'most ops in equal time' : 'least time for equal ops'}; click to switch`);
+    renderFsSet();
   };
   markMode(coordinator.mode);
-  for (const m of ['race', 'pace']) {
-    $('modePick-' + m)?.addEventListener('click', () => { coordinator.setMode(m); markMode(m); renderGap(); });
-  }
+  modeWheel.addEventListener('click', () => {
+    const m = coordinator.mode === 'race' ? 'pace' : 'race';
+    coordinator.setMode(m); markMode(m); renderGap();
+  });
 
   // ---- controls: Run/Step direct; every poke button INJECTS a console
   // command (ADR-0018 — "a button that can't be expressed as a console
