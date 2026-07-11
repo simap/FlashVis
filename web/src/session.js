@@ -302,6 +302,17 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     const ls = (prefix) => scanDir(prefix, { printEach: true, sorted: false });
     const getFiles = (prefix) => scanDir(prefix, { printEach: false, sorted: true });
     const stat = (name) => runOp(`stat(${name})`, () => runner.stat(name));
+    // Console/button gc(n=1): routes through the SAME runOp (paced, timed,
+    // journal-logged, die-animated) path every other console helper uses —
+    // previously this fell through to the undefined api.fs.gcStep (fs has no
+    // gcStep member), so a typed gc() silently did nothing while churn's
+    // direct session.runGcStep() call printed timing + op stats and glowed
+    // the die. `n` steps collapse into ONE atomic op/journal line, matching
+    // how every other multi-step console helper (e.g. mkdir -p) reports.
+    function gc(n = 1) {
+      const steps = Math.max(1, n | 0);
+      return runOp('gc()', () => { let r; for (let i = 0; i < steps; i++) r = runner.gcStep(); return r; });
+    }
 
     // ---- Tier 2 — raw fs.* handles (ADR-0014), paced locally the same way. ----
     function wrapHandle(h, label) {
@@ -338,7 +349,7 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
       openDir: async (prefix) => wrapDir(await runOp(`openDir(${prefix || ''})`, () => runner.openDir(prefix || '')), prefix || ''),
     };
 
-    return { writeFile, readFile, deleteFile, mkdir, ls, getFiles, stat, fs };
+    return { writeFile, readFile, deleteFile, mkdir, ls, getFiles, stat, gc, fs };
   }
 
   let active = true;

@@ -131,6 +131,9 @@ function buildConsoleApi(api) {
     help: api.help ?? (() => HELP_TEXT),
     print: api.print ?? (() => {}),
     format: api.format ?? (async () => { await api.fs?.format?.(); await api.fs?.mount?.(); }),
+    // The real per-session api (session.js buildLocalApi) provides gc(n) directly,
+    // paced/timed/journal-logged exactly like writeFile/readFile/etc — this
+    // fallback exists only so a bare test-stub api without gc still works.
     gc: api.gc ?? (async (n = 1) => { let r; for (let i = 0; i < Math.max(1, n | 0); i++) r = await api.fs?.gcStep?.(); return r; }),
     prep: api.prep ?? (() => {}),
   };
