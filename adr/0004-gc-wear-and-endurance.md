@@ -4,24 +4,23 @@
 - **Date:** 2026-07-07
 - **Deciders:** —
 
-> Superseded: garbage collection is now the real filesystem's job. The device-side wear concepts
-> carry forward to the JS device emulator; wear leveling, if any, lives in the filesystem under test.
+> Superseded: garbage collection is now the real filesystem's job. Per-sector wear counting and
+> the wear heatmap carry forward to the JS device emulator (`device.js`); wear leveling, if any,
+> lives in the filesystem under test.
 
-## Carried forward (still live in `device.js`)
+## Context (still relevant)
 
-- **Per-sector wear counting**, incremented on erase. **Wear is measured at the device**, so every
-  filesystem gets a wear map for free regardless of its own introspection ([ADR-0011](0011-uniform-fs-driver-abi.md)).
-- A wear **heatmap** and peak-vs-average readout: greedy GC plus a circular frontier produces
-  uneven wear (hot sectors erased far more than cold ones), surfaced honestly rather than hidden.
-  No wear leveling.
+Given the log-structured model ([ADR-0002](0002-log-structured-nor-model.md)), the device
+needs to reclaim space, and sectors wear out with erase cycles. How we choose GC victims and
+how we scale endurance directly shapes what the demo teaches.
 
-## Prototype-only (not in the build)
+## Decision (prototype era)
 
-- **Greedy-by-stale-count GC** with a free-page reserve, relocating surviving `valid` pages to the
-  frontier before erasing, modeled the fake FS's reclamation. GC is now the real driver's.
-- **Scaled endurance `ENDURANCE = 200` erase cycles/sector** (real NOR survives ~100k) was a
-  prototype dramatization to make wear-out reachable in a session. It is **not in the build**.
-- Page-aligned records (GC relocated/invalidated at page granularity) were the fake FS's layout.
+Still live in `device.js`: **per-sector wear counting** (incremented on each erase, measured at
+the device) and, from it, the **wear heatmap** with a peak-vs-average readout that surfaces
+*uneven* wear — hot sectors erased far more than cold ones holding static data. **No wear
+leveling (yet)**; if any, it lives in the filesystem under test.
 
-*Cost-benefit GC and static/dynamic wear leveling were deferred so the naive-GC hotspot "before" is
-visible first.*
+- ~~**Garbage collection is greedy by stale count.** When free pages fall below a reserve (~1.6 sectors), GC picks the eligible sector with the most `stale` pages, **relocates any surviving `valid` pages** to the frontier, then erases the sector back to `0xFF` and increments its wear.~~
+- ~~**Records are page-aligned per file.**~~
+- ~~**Endurance is scaled down to `ENDURANCE = 200` erase cycles per sector** so wear-out is reachable within a viewing session. Real NOR sectors survive ~100k cycles.~~
