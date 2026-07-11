@@ -521,6 +521,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
 .about-body{padding:16px 20px 22px;font-size:12.5px;line-height:1.62;color:var(--txt-dim)}
 .about-sec{margin-top:20px}.about-sec:first-child{margin-top:2px}
 .about-sec h3{margin:0 0 8px;font-family:"Space Grotesk",system-ui,sans-serif;font-weight:600;font-size:14.5px;color:var(--txt)}
+.about-sec h4{margin:16px 0 6px;font-family:"Space Grotesk",system-ui,sans-serif;font-weight:600;font-size:12px;letter-spacing:.05em;color:var(--accent)}
 .about-body p{margin:0 0 10px}
 .about-body p:last-child{margin-bottom:0}
 .about-body ul{margin:0 0 10px;padding-left:18px}
@@ -736,17 +737,53 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <h3>How FASTFFS and LittleFS cope</h3>
       <p><span class="wordmark">FLASH<b>VIS</b></span> compares two filesystems today, <b>FASTFFS</b>
       and <b>LittleFS</b>, with more planned.</p>
-      <p><b>FASTFFS</b> commits each change with an append-only index record. New data is written first,
-        then committed to the index with a small record (4 bytes). Its garbage collector is
-      incremental, reclaiming in small cheap background steps that keep garbage low for a small, steady
-      cost. The background GC control sets how often this runs during the automatic workload, but 
-      typically this would happen in the background while the application using FASTFFS is idle.
-      It will still reclaim inline when free (erased, usable) space runs tight. It has dynamic 
-      wear-leveling through two round-robin cursors: one for GC and one for alloc.</p>
-      <p><b>LittleFS</b> is copy-on-write with dynamic wear-leveling, and reclaims space as part of
-      its writes rather than in a background operation. It has no incremental GC step to drive, so the
-      background GC control does not appear when LittleFS is focused. It does have a GC function, but 
-      it does not reclaim space and is very expensive, so it is not used here out of fairness.</p>
+
+      <h4>What they share</h4>
+      <ul>
+        <li><b>Power-loss resilience.</b> Both filesystems are designed to handle random power
+        failures. All file operations have strong copy-on-write guarantees and if power is lost the
+        filesystem will fall back to the last known good state.</li>
+        <li><b>Dynamic wear leveling.</b> Both filesystems are designed with flash in mind, and
+        provide wear leveling over dynamic blocks.</li>
+        <li><b>Bounded RAM/ROM.</b> Both filesystems are designed to work with a small amount of
+        memory. RAM usage is strictly bounded, which means RAM consumption does not change as the
+        filesystem grows. The filesystem contains no unbounded recursion and dynamic memory is
+        limited to configurable buffers that can be provided statically.</li>
+      </ul>
+
+      <h4>FASTFFS</h4>
+      <p>The core idea is simple: file data is written copy-on-write into flash sectors, then a
+      compact append-only index record commits the namespace update. On remount, the index is
+      replayed to recover the current set of names and where they start. Old file versions and
+      interrupted writes are left as obsolete or orphaned data for later cleanup.</p>
+      <p>Within a sector, file metadata is appended to the tail, growing backwards, while file data
+      (including the name) grows from the start of the sector down. This allows many smaller files to
+      share a sector efficiently. When a file is deleted/overwritten it is marked obsolete, leaving
+      any other live files in place and intact.</p>
+      <p>Its garbage collector is incremental, reclaiming in small cheap background steps that keep
+      garbage low for a small, steady cost. The background GC control sets how often this runs during
+      the automatic workload, but typically this would happen in the background while the application
+      using FASTFFS is idle. It has dynamic wear-leveling through two round-robin cursors: one for GC
+      and one for alloc.</p>
+      <p>Compaction triggers on write allocation pressure when there is nowhere free/erased to write
+      to, and no sector can be erased because they still have live data. It copies out live files (or
+      parts of them) that are trapping the most obsolete/reclaimable space, so that sectors can be
+      erased and reused. This is only done when necessary, since it is expensive and causes write
+      amplification.</p>
+
+      <h4>LittleFS</h4>
+      <p>At a high level, LittleFS is a block based filesystem that uses small logs to store metadata
+      and larger copy-on-write (COW) structures to store file data.</p>
+      <p>In LittleFS, these ingredients form a sort of two-layered cake, with the small logs (called
+      metadata pairs) providing fast updates to metadata anywhere on storage, while the COW structures
+      store file data compactly.</p>
+      <p>Small files (under 1/4th of a sector, or 1KB) are stored directly in the metadata pairs.
+      Files over that threshold are stored in one or more whole sectors.</p>
+      <p>It reclaims space as part of its writes rather than in a background operation. It has no
+      incremental GC step to drive, so the background GC control does not appear when LittleFS is
+      focused. It does have a GC function, but it does not reclaim space and is very expensive, so it
+      is not used here out of fairness.</p>
+
       <p>The two filesystem cards in the header switch the view: click one to focus its die and
       compare the same workload on each.</p>
     </section>
