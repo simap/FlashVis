@@ -55,3 +55,15 @@ model resets on every format/granule change so it restarts from its seed against
 - **Compile `churn_model.c` to WASM and drive it from JS.** Rejected: adds a build step and
   pointer marshalling for a tiny deterministic generator, and makes the workload opaque to the
   console. A byte-exact JS port gets parity without either cost.
+
+## Update — 2026-07-11: open-loop executor over the lockstep seam
+
+Application moved from `workloadStep` in `playground.js` to the coordinator
+([ADR-0016](0016-lockstep-coordinator.md)) plus `runChurnEvent` in `session.js`; the byte-exact
+model is unchanged. That seam makes one constraint load-bearing: **the executor is open-loop** — it
+issues exactly the oracle's events, with no FS-state-dependent branch (e.g. an `exists()` guard) or
+added op, since either diverges one filesystem's issued stream from another's. Consequence: the
+intentional over-capacity write (350 KiB class on a 256 KiB chip) can leave the oracle marking a
+file live that a filesystem never stored, so a later delete logs "not found" — faithful, not a bug,
+and fixed only *outside* the op-sequence (quiet the log, or correct the oracle's bookkeeping). An
+`exists()`-guarded delete was tried and reverted.
