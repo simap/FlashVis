@@ -48,7 +48,7 @@ resets on every format/granule change (restart from seed against an empty chip).
 ## Update — 2026-07-11: open-loop executor over the lockstep seam
 
 Application moved from `workloadStep` in `playground.js` to the coordinator
-([ADR-0016](0016-lockstep-coordinator.md)) plus `runChurnEvent` in `session.js`; the byte-exact
+(ADR-0016) plus `runChurnEvent` in `session.js`; the byte-exact
 model is unchanged. That seam makes one constraint load-bearing: **the executor is open-loop** — it
 issues exactly the oracle's events, with no FS-state-dependent branch (e.g. an `exists()` guard) or
 added op, since either diverges one filesystem's issued stream from another's. Consequence: the

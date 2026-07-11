@@ -9,7 +9,7 @@
 The console is the main way to poke the FS by hand and script tests, but its facade is **whole-file
 only** — no partial/positioned I/O, prefix-filtered listing, per-file stat, or multiple handles, even
 though FASTFFS supports all of them. This matters *now*, before LittleFS: the shim ABI
-([ADR-0011](0011-uniform-fs-driver-abi.md)) should reach its final shape first so the second driver
+(ADR-0011) should reach its final shape first so the second driver
 is built against it, not retrofitted. Scripting also needs the internal `runner.names()` backdoor to
 pick a delete victim; the public API should return enough for a script to track its own set.
 

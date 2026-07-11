@@ -6,7 +6,7 @@
 
 ## Context
 
-The [pivot](0005-real-fs-to-wasm.md) needs a C→WASM toolchain (Apple clang can't target wasm). Real
+The pivot (ADR-0005) needs a C→WASM toolchain (Apple clang can't target wasm). Real
 FS sources use libc (`memcpy`, `memset`, sometimes `malloc`), marshal strings/buffers across the
 boundary, and need the flash HAL to resolve to JS. Choice delegated with a lean-toward-velocity steer.
 

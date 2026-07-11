@@ -1,6 +1,6 @@
 # ADR 0003: Byte-level programming with a configurable granule
 
-- **Status:** Superseded by [ADR-0005](0005-real-fs-to-wasm.md)
+- **Status:** Superseded by ADR-0005
 - **Date:** 2026-07-07
 - **Deciders:** —
 

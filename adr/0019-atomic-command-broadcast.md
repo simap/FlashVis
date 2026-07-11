@@ -4,12 +4,12 @@
 - **Date:** 2026-07-09
 - **Deciders:** —
 
-Supersedes [ADR-0017](0017-broadcast-operations-focus-the-view.md): keeps its one-timeline-broadcast +
+Supersedes ADR-0017: keeps its one-timeline-broadcast +
 focus-is-view stance, replaces the op-level granularity and completion model.
 
 ## Context
 
-Op-level broadcast ([ADR-0017](0017-broadcast-operations-focus-the-view.md)) was too small a unit and equated completion
+Op-level broadcast (ADR-0017) was too small a unit and equated completion
 with "the JS returned": a read's bytes had nowhere to go (killing the raw handle layer), multi-call
 console lines multiplied or didn't broadcast, and ops from different lines interleaved.
 
@@ -17,8 +17,8 @@ console lines multiplied or didn't broadcast, and ops from different lines inter
 
 - **Broadcast unit = one atomic COMMAND** (console input / button / churn step), not an op. A command is
   composite (`writeFile`=open+write+close) and **no command's ops interleave with another's.** Two queues:
-  **command queue** = shared `sequence[]`+per-session cursor ([ADR-0016](0016-lockstep-coordinator.md));
-  **resolve queue** = each session's own player ([ADR-0009](0009-timed-playback-and-pacing.md)).
+  **command queue** = shared `sequence[]`+per-session cursor (ADR-0016);
+  **resolve queue** = each session's own player (ADR-0009).
 - **Completion = execution QUIESCENCE = function settled AND in-flight-op counter (++issue/--resolve)
   at zero** — not "function returned" (misses ops issued by chains the wrapper doesn't `await`), not
   "resolve queue empty."
@@ -29,7 +29,7 @@ console lines multiplied or didn't broadcast, and ops from different lines inter
 - **A command runs per-session against a LOCAL inner API returning THAT session's real data**, queued
   into its own resolve queue (animates, costs sim time). **Broadcast happens once, at the command
   boundary**; nothing inside re-broadcasts. Hence **no cross-FS handle proxy, no result-routing bridge** —
-  the raw handle layer ([ADR-0014](0014-console-fs-api.md)) is reused locally.
+  the raw handle layer (ADR-0014) is reused locally.
 - **Reads/`ls`/queries broadcast, animate, cost sim time, return real bytes.** "No free inspection" =
   timing only.
 - **Pace** = two-level cross-session join: op-level **dynamic-membership phaser** (each awaited op a phase
@@ -50,10 +50,10 @@ console lines multiplied or didn't broadcast, and ops from different lines inter
 - **Per-session sandbox scope** so undeclared vars stay session-local (not leaked to a shared global):
   a Proxy whose **`has` trap returns true for every name**, `set`→per-session bag, `get`→api→bag→
   `globalThis`; forces a **sloppy** compile (`with` legal), while `let`/`const`/`var` stay proper locals.
-- **Friendly-API deltas vs [ADR-0014](0014-console-fs-api.md):** omitted `size` now random; content is `deterministicBytes(hash)`;
+- **Friendly-API deltas vs ADR-0014:** omitted `size` now random; content is `deterministicBytes(hash)`;
   mutators accept a descriptor OR a name.
-- **Tape `queued → live → done`** ([ADR-0018](0018-console-tape-and-scoreboard.md)) falls out of the seam. **Focus stays a view property**
-  (from [ADR-0017](0017-broadcast-operations-focus-the-view.md)): switching focus changes no state, isn't logged.
+- **Tape `queued → live → done`** (ADR-0018) falls out of the seam. **Focus stays a view property**
+  (from ADR-0017): switching focus changes no state, isn't logged.
 
 ## Consequences
 

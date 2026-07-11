@@ -8,7 +8,7 @@
 
 The filesystem runs in WASM and returns synchronously; results and every op's simulated cost are
 known the instant a call returns. But we want to *watch* it at a controllable speed and make op cost
-legible (an erase is ~200× a read, [ADR-0007](0007-timing-and-inspect.md)). Animating inline would
+legible (an erase is ~200× a read, ADR-0007). Animating inline would
 tie filesystem speed to render speed; a fixed animation rate would flatten the cost differences.
 
 ## Decision

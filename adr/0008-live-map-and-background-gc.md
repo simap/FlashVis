@@ -6,7 +6,7 @@
 
 ## Context
 
-Sector-level classification ([ADR-0007](0007-timing-and-inspect.md)) under-showed obsolete data:
+Sector-level classification (ADR-0007) under-showed obsolete data:
 FASTFFS packs new file versions alongside old ones and marks individual *records* obsolete, leaving
 old versions valid-but-orphaned; only the index reachability walk knows they're dead. Separately,
 FASTFFS runs GC as small background steps; starved of those it degrades into inline (foreground) GC
@@ -32,7 +32,7 @@ tradeoff demonstrable.
 
 - The die shows obsolete data truthfully at page granularity, straight from FASTFFS.
 - We carry a FASTFFS change (additive, no change to existing inspect behavior); later upstreamed to
-  FASTFFS `main` ([ADR-0012](0012-per-fs-liveness-inspect.md)).
+  FASTFFS `main` (ADR-0012).
 - `fffs_inspect_live_map` runs the full reachability walk (heap `calloc`, many silent reads) a few
   times per second; real work, revisit cadence if it bites.
 

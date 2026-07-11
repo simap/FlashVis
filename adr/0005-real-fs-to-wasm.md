@@ -7,7 +7,7 @@
 ## Context
 
 The goal is to run *real* flash filesystems (FASTFFS first, then LittleFS / SPIFFS) in the browser
-and visualize the actual device traffic each issues. ADRs [0001](0001-single-static-page.md)–[0004](0004-gc-wear-and-endurance.md)
+and visualize the actual device traffic each issues. ADRs 0001–0004
 built a hand-rolled JS *simulation* of a log-structured filesystem: right for discovering the visual
 language, but it models a fake filesystem and can't show how a specific real driver behaves, which
 is the whole point.
@@ -19,7 +19,7 @@ Restructure into four components with a clear boundary at the WASM edge (superse
 1. **Filesystem-under-test → WASM.** Each FS compiles to a module that *exports* a uniform C API
    (`ff_format`, `ff_mount`, `ff_write`, `ff_read`, `ff_remove`, `ff_ls`, …) and *imports* a flash
    HAL (`flash_read`, `flash_prog`, `flash_erase`, `flash_sync`). A thin per-FS C **shim** maps the
-   filesystem's native block-device callbacks onto the HAL ([ADR-0006](0006-emscripten-toolchain.md)).
+   filesystem's native block-device callbacks onto the HAL (ADR-0006).
 2. **JS owns the emulated NOR chip** (`device.js`). Flash is a `Uint8Array`; HAL imports mutate it
    under NOR rules (`program` may only clear bits `byte &= in`, `erase` sets a whole sector to
    `0xFF`), maintain per-sector wear counts, and **emit an event per operation**. This keeps

@@ -11,7 +11,7 @@ us twice: browser `TextDecoder` (and emscripten's `UTF8ToString`) refuses to dec
 resizable buffer — breaking `ls()` in Chrome while passing every headless guard (Node's `TextDecoder`
 is lax) — and a cached `HEAPU8` view silently *detaches* after any grow. The domain doesn't need
 growth: microcontroller filesystems are RAM-bounded, and the flash chip is emulated in JS
-([ADR-0005](0005-real-fs-to-wasm.md)), not in WASM memory. The heap holds only the emscripten
+(ADR-0005), not in WASM memory. The heap holds only the emscripten
 runtime, the FS's static state, and short-lived buffers.
 
 ## Decision

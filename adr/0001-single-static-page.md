@@ -1,6 +1,6 @@
 # ADR 0001: Ship as a single dependency-free static page
 
-- **Status:** Superseded by [ADR-0005](0005-real-fs-to-wasm.md)
+- **Status:** Superseded by ADR-0005
 - **Date:** 2026-07-07
 - **Deciders:** —
 

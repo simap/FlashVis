@@ -8,8 +8,8 @@
 
 FASTFFS colors the die per page (erased / metadata / obsolete / live-data) via
 `fffs_inspect_live_map`, reusing its index reachability walk (upstreamed to FASTFFS `main`,
-[ADR-0008](0008-live-map-and-background-gc.md)). LittleFS and every later filesystem has no
-equivalent. Under the OPTIONAL-capability contract of [ADR-0011](0011-uniform-fs-driver-abi.md) we
+ADR-0008). LittleFS and every later filesystem has no
+equivalent. Under the OPTIONAL-capability contract of ADR-0011 we
 must decide *how* a new filesystem earns per-page coloring. A spike was run first, since "native
 hook if feasible" is only a decision once feasibility is known.
 
@@ -19,7 +19,7 @@ Each filesystem earns per-page coloring the way FASTFFS did: by **extending the 
 expose its internals** — a native inspect hook exporting `ff_live_map` (and/or `ff_sector_classes`).
 **Coupling that hook to FS internals is not a risk to minimize — it is the whole point of the
 project, which exists to visualize those internals.** A filesystem whose hook isn't built advertises
-the capability *off* and the viz degrades ([ADR-0011](0011-uniform-fs-driver-abi.md)); **it is never
+the capability *off* and the viz degrades (ADR-0011); **it is never
 faked.** Every hook provides the shared baseline (erased / metadata / obsolete / live) and each FS
 may classify *beyond* it in its own terms, so the map is a **per-FS taxonomy, not one fixed enum**.
 

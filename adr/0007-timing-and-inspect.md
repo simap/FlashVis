@@ -39,4 +39,4 @@ grow under churn and drop after GC, not a precise per-record measure).
   rate either blurs reads or makes erases imperceptible; time-scaled playback is the point.
 - **Per-record obsolete coloring** (tint exact dead byte-ranges). Deferred: a substantial
   reimplementation of `fffs_inspect.c`'s walk; the natural next step (superseded by the per-page
-  live map in [ADR-0008](0008-live-map-and-background-gc.md)).
+  live map in ADR-0008).

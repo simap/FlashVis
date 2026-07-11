@@ -1,6 +1,6 @@
 # ADR 0002: Model the device as a log-structured filesystem on NOR
 
-- **Status:** Superseded by [ADR-0005](0005-real-fs-to-wasm.md)
+- **Status:** Superseded by ADR-0005
 - **Date:** 2026-07-07
 - **Deciders:** —
 
@@ -12,7 +12,7 @@
 
 NOR flash has one asymmetry that governs everything above it:
 
-- **Program** clears bits `1 → 0` at fine (byte) granularity — see [ADR-0003](0003-byte-programming-granularity.md).
+- **Program** clears bits `1 → 0` at fine (byte) granularity — see ADR-0003.
 - **Erase** sets bits back to `1` (`0xFF`) only over a whole **sector** (4 KB here), and is the
   slow, wearing operation.
 
@@ -32,4 +32,4 @@ loop legible.
   `stale`. Deleting marks pages `stale`.~~
 - ~~A page is in exactly one of: `erased` (`0xFF`), `valid`, `stale`, or `worn`.~~
 - ~~Reclamation is garbage collection at sector granularity — see
-  [ADR-0004](0004-gc-wear-and-endurance.md).~~
+  ADR-0004.~~

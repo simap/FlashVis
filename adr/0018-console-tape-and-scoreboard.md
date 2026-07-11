@@ -6,13 +6,13 @@
 
 ## Context
 
-With every operation broadcast through one shared timeline ([ADR-0017](0017-broadcast-operations-focus-the-view.md)),
+With every operation broadcast through one shared timeline (ADR-0017),
 the interface has three new jobs: make the timeline and its *pending* state legible; give one
 authoritative record of what was done; and present N filesystems' standings with a focus control. The
 current layout fights all three — poke buttons call functions while the console logs separately (two
 sources of truth), a standalone CELL STATES card and a separate compare strip each eat a panel, and
 switching filesystem writes a log line. This is the UI decision following 0017, building on the
-console surface of [ADR-0014](0014-console-fs-api.md).
+console surface of ADR-0014.
 
 ## Decision
 
@@ -39,7 +39,7 @@ focuses it.
 **Die-adjacent view controls.** The CELL STATES card becomes a compact legend chip-row under the die
 (`swatch: word`, explainer on hover/focus), driven by a **per-FS class descriptor** so it is
 filesystem-specific by construction (LittleFS can grow metadata-pair / CTZ classes later without
-rework, per [ADR-0011](0011-uniform-fs-driver-abi.md)/[ADR-0012](0012-per-fs-liveness-inspect.md)).
+rework, per ADR-0011/ADR-0012).
 The wear-heatmap toggle sits beside it; telemetry under the die stays the focused FS's deep stats.
 
 **Dropped:** the program-granule control (a niche re-format knob), the standalone CELL STATES card,

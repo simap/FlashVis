@@ -33,7 +33,7 @@ and re-reads) still implements it; native-vs-emulated is a quality detail, not a
 **Per-FS inspect taxonomy.** The inspect exports return a *per-FS* classification over a shared
 live/obsolete baseline; every filesystem lays out storage differently, so the class set is **not a
 fixed universal enum**, and its granularity (one class per page today) is expected to get finer as
-sub-page-structured filesystems land ([ADR-0012](0012-per-fs-liveness-inspect.md)). Deliberately
+sub-page-structured filesystems land (ADR-0012). Deliberately
 left open.
 
 **Two-layer capability discovery:** structural symbol-presence (`typeof M['_'+name] === 'function'`)
@@ -49,7 +49,7 @@ gets a wear map for free regardless of introspection support.
 
 **Liveness/obsolete introspection is not an FS freebie and not FASTFFS-privileged** — it is *added*
 to each filesystem by extending it, as FASTFFS got `fffs_inspect_live_map`
-([ADR-0012](0012-per-fs-liveness-inspect.md)). `live_map` is OPTIONAL only because a driver's hook
+(ADR-0012). `live_map` is OPTIONAL only because a driver's hook
 may not be built yet, never because the FS can't give it.
 
 ## Consequences

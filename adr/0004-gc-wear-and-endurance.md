@@ -1,6 +1,6 @@
 # ADR 0004: Greedy GC, page-aligned records, and scaled endurance
 
-- **Status:** Superseded by [ADR-0005](0005-real-fs-to-wasm.md)
+- **Status:** Superseded by ADR-0005
 - **Date:** 2026-07-07
 - **Deciders:** —
 
@@ -10,7 +10,7 @@
 
 ## Context (still relevant)
 
-Given the log-structured model ([ADR-0002](0002-log-structured-nor-model.md)), the device
+Given the log-structured model (ADR-0002), the device
 needs to reclaim space, and sectors wear out with erase cycles. How we choose GC victims and
 how we scale endurance directly shapes what the demo teaches.
 
