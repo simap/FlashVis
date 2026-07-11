@@ -20,18 +20,71 @@
 // MAX is just a sanity ceiling above the slowest single op (a ~7 s erase).
 const MIN_ANIM = 110, MAX_ANIM = 9000;
 
+// ---- per-frame drain cap (drain-pacing knob) ----
+// Max low-level device steps (per-page runStep calls) the player simulates in ONE
+// animation frame. A huge burst — e.g. a no-delay compaction of ~30k tiny reads —
+// otherwise drains its entire queue in a single frame; this spreads it across
+// frames instead. Excess steps are CARRIED to the next frame(s) via the persisted
+// cur/curStep/queue — nothing is dropped, sampled, or coalesced; every op still
+// runs and still contributes its heat exactly as before. This paces the DRAIN, it
+// does not limit animation. Applies to BOTH drain paths (no-delay and timed) as a
+// single shared per-frame ceiling. Sentinel: Infinity (or <= 0) ⇒ unlimited /
+// disabled, so the default is byte-for-byte the current unbounded behavior.
+// NOTE: a slower drain raises pending() (queue length), which the coordinator's
+// raceGate/BACKLOG_CAP keys on — see the report; the coupling is benign back-
+// pressure (bounds the backlog), not a regression, but keep the cap generous.
+const MAX_OPS_PER_FRAME = 500;
+
+// ---- per-cell read/prog "heat" (glow coalescence) tunables ----
+// A read/prog burst used to create one Element.animate() per op; at no-delay a
+// LittleFS compaction spun up ~30k of them in one un-yielded frame (native WA
+// servicing froze the thread, and every glow expired before a frame painted).
+// Instead each op now just ADDS to a per-cell intensity the frame() loop renders
+// and decays — cost is O(active cells)/frame, never O(ops). Erase (sweep) and
+// the fill height keep their own animations untouched.
+//   heat[p] += HEAT_ADD per op; each frame heat[p] *= 0.5^(dt/halfLife).
+// The glow renders across TWO layers so the bloom sits UNIFORMLY above every
+// border: the BLOOM (core + outer box-shadow) on a per-cell .glow layer lifted to
+// z-index:5 (above every cell/sector body), and the heat RING on the cell body
+// below it (see drawHeat). The FLOOR matters: a single op already sits
+// at roughly old full strength (blur ~15px, spread ~3px, alpha ~1), driven by a
+// fast-attack presence curve (so it also fades smoothly as heat decays). The
+// log-compressed "burst" then pushes 30 / 300 / 30000 larger and whiter from
+// that floor, so they stay distinct and 30k is a bright near-white flare.
+const HEAT_ADD = 1;                 // intensity added per read/prog page op
+const HEAT_HALF_MS = 500;           // unscaled glow half-life (real ms); tune here
+const HEAT_HALF_MIN = 50;          // floor so a burst stays visible at max speed
+const HEAT_HALF_MAX = 3000;         // ceiling so a slow-mo glow can't linger forever
+const HEAT_SCALE_REF = 20000;       // scale at which the half-life is exactly HEAT_HALF_MS
+const HEAT_EPS = 0.04;              // below this a cell reverts to its resting CSS ring
+const HEAT_KNEE = 0.5;              // heat for ~86% presence: single op attacks fast, fades smooth
+const HEAT_ALPHA_GAIN = 1.0;       // so a single op (presence 0.86) already glows at ~full alpha
+const HEAT_BURST_LOG_MAX = 2.0;     // log10(1+heat) that saturates burst growth (~30k)
+const HEAT_BLUR_MIN = 10;           // outer-glow blur (px) for a single op (~old PING_KF)
+const HEAT_BLUR_ADD = 3;           // extra outer-glow blur a full burst adds
+const HEAT_SPREAD_MIN = 1;          // outer-glow spread (px) for a single op (~old PING_KF)
+const HEAT_SPREAD_ADD = 10;          // extra outer-glow spread a full burst adds
+const HEAT_READ_RGB = [99, 230, 255];   // --read cyan
+const HEAT_PROG_RGB = [255, 70, 10];  // --program blue
+// ---- ring (resting 1px edge) — tied to the SAME heat as the glow, not its own
+// on/off switch, but clamped earlier and capped lower so it stays restrained
+// (an intense glow already covers it; the ring must never look overblown). ----
+const HEAT_RING_KNEE = 0.15;        // heat for the ring's presence curve — clamps much earlier than HEAT_KNEE
+const HEAT_RING_ALPHA_MAX = 0.85;   // ring alpha ceiling, always < 1
+const HEAT_RING_GOLD = [244, 207, 126]; // resting gold edge for a programmed cell; alpha now tracks heat too
+// ---- white CORE — a hard, tight, blown-out center added ON TOP of the wide
+// feathered glow once burst nears saturation (a 30k-op flare), so the extreme
+// end reads as an actual blow-out instead of just a wider soft near-white halo.
+const HEAT_CORE_KNEE = 0.72;        // burst (0..1) where the core starts appearing
+const HEAT_CORE_ALPHA_MAX = 0.95;   // core alpha ceiling once fully saturated
+const HEAT_CORE_BLUR = 4;           // tight blur (px) — a hard center, not another halo
+const HEAT_CORE_SPREAD = 0.5;       // tiny spread so it reads as a core, not a second ring
+
 // Animations run via the Web Animations API so their duration is a direct JS
 // argument (curAnimMs) — CSS `animation:` shorthand doesn't reliably honor a
 // per-trigger duration, which is why erase used to flash at a fixed rate.
-const PROG_KF = [
-  { boxShadow: 'inset 0 0 0 1px #ffffff, 0 0 12px 1px #a9f1ff' },
-  { boxShadow: 'inset 0 0 0 1px #f4cf7e, 0 0 6px -2px #eab54a55' },
-];
-const PING_KF = [
-  { boxShadow: 'inset 0 0 0 1px #eafcff, 0 0 15px 3px #63e6ff' },
-  { boxShadow: 'inset 0 0 0 1px #63e6ff, 0 0 12px 1px #63e6ff', offset: 0.45 },
-  { boxShadow: 'inset 0 0 0 1px #233b44' },
-];
+// Read/prog glow is no longer keyframed per op — it coalesces into per-cell heat
+// (see glow() + the frame() render pass). Only erase keeps its Element.animate().
 const ERASE_KF = [
   { boxShadow: '0 0 0 1px #b978ff, 0 0 10px 0 #b978ff', background: '#1b1226' },
   { boxShadow: '0 0 0 1px #b978ff, 0 0 26px 2px #b978ff', background: '#2c1d3e', offset: 0.08 },
@@ -49,7 +102,18 @@ export function createViz(device) {
   const shown = new Uint16Array(npages);
   const cellEls = new Array(npages);
   const fillEls = new Array(npages);
+  const glowEls = new Array(npages);   // the glow's own DOM layer (see mountDie) — a sibling
+                                        // appended AFTER .fillwrap so it paints ABOVE .fill
   const sectorEls = new Array(sectorCount);
+
+  // Read/prog glow "heat" (coalescence — see HEAT_* tunables above). `glowHeat`
+  // is the additive intensity per cell, `glowKind` the palette (1 = read, 2 =
+  // prog), `glowHot` the small set of cells with live heat the frame() loop
+  // decays + renders, so a burst of thousands of reads is one summed glow per
+  // cell, not thousands of stacked Element.animate() objects.
+  const glowHeat = new Float32Array(npages);
+  const glowKind = new Uint8Array(npages);
+  const glowHot = new Set();
 
   const queue = [];
   let scale = 20000;         // sim-ns spent per real-ms (Infinity ⇒ no delay)
@@ -70,12 +134,68 @@ export function createViz(device) {
     cellEls[p].dataset.s = has ? 'prog' : 'erased';
     fillEls[p].style.height = has ? (shown[p] / pageSize * 100) + '%' : '0';
   }
-  // Duration is captured synchronously as `curAnimMs` — no class toggle, no
-  // animationend listeners to race, so erases can't be cut short at fast speed.
+  // Read/prog glow: coalesce, don't animate. Each op just BUMPS this cell's heat
+  // (O(1), no object allocated) and marks it live; the frame() loop decays and
+  // renders it. So a compaction's thousands of tiny reads sum into one bright,
+  // sustained flare on that sector instead of thousands of stacked, thread-
+  // freezing Element.animate() calls that all expire before a frame paints.
   function glow(p, kind) {
-    const el = cellEls[p];
-    if (reduced || prep || !el.animate) return;
-    el.animate(kind === 'ping' ? PING_KF : PROG_KF, { duration: curAnimMs, easing: 'ease' });
+    if (reduced || prep) return;
+    glowHeat[p] += HEAT_ADD;
+    glowKind[p] = kind === 'ping' ? 1 : 2;
+    glowHot.add(p);
+  }
+  // Render one cell's heat across TWO layers so the bloom sits UNIFORMLY above
+  // every border (the screenshot fix): the BLOOM (white core + outer glow) goes on
+  // the .glow layer (glowEls[p], z-index:5 — above every cell/sector body), and the
+  // heat RING (border) goes on the cell BODY itself, BELOW that bloom. Keeping the
+  // ring and the bloom on the same element at the same z made each cell's ring
+  // interleave with neighbor blooms by DOM paint order — a later cell's bloom
+  // covered its border but not the top-left corner (earlier neighbors), so borders
+  // peeked through directionally. With every bloom at z:5 over every body-level
+  // ring, no border can ever paint over the bloom, from any grid position/state.
+  //   `pres` is a fast-attack presence: a single op already glows at ~old full
+  // strength and fades smoothly as heat decays. `burst` is the log-compressed sum
+  // that pushes larger + whiter, and drives the white core near saturation. The
+  // ring shares this same `h`, on its own earlier-clamping curve. Returns true once
+  // faded back to the resting ring so the frame loop can drop the cell.
+  function drawHeat(p) {
+    const h = glowHeat[p];
+    const glowEl = glowEls[p], cell = cellEls[p];
+    if (h < HEAT_EPS) {                                          // revert both layers to the cell's resting CSS ring
+      glowEl.style.boxShadow = ''; cell.style.boxShadow = ''; return true;
+    }
+    const pres = 1 - Math.exp(-h / HEAT_KNEE);                    // 0..~1, ~0.86 at a single op
+    const burst = Math.min(1, Math.log10(1 + h) / HEAT_BURST_LOG_MAX);
+    const w = Math.pow(burst, 1.5);                              // whiten with the sum (cyan -> white)
+    const base = glowKind[p] === 1 ? HEAT_READ_RGB : HEAT_PROG_RGB;
+    const r = Math.round(base[0] + (255 - base[0]) * w);
+    const g = Math.round(base[1] + (255 - base[1]) * w);
+    const b = Math.round(base[2] + (255 - base[2]) * w);
+    const blur = (HEAT_BLUR_MIN + burst * HEAT_BLUR_ADD).toFixed(1);
+    const spread = (HEAT_SPREAD_MIN + burst * HEAT_SPREAD_ADD).toFixed(1);
+    const a = Math.min(1, pres * HEAT_ALPHA_GAIN).toFixed(2);
+    // Ring -> cell BODY (below the bloom). Same heat, own curve — clamps earlier
+    // (HEAT_RING_KNEE < HEAT_KNEE) and holds, capped under 1 so it never overblows.
+    // Inline overrides the resting CSS ring while hot; cleared to '' on fade above.
+    const ringPres = 1 - Math.exp(-h / HEAT_RING_KNEE);
+    const ringA = (Math.min(1, ringPres) * HEAT_RING_ALPHA_MAX).toFixed(2);
+    const ringRGB = shown[p] > 0 ? HEAT_RING_GOLD : [r, g, b];    // keep the prog gold edge under a glow
+    cell.style.boxShadow = `inset 0 0 0 1.5px rgba(${ringRGB[0]},${ringRGB[1]},${ringRGB[2]},${ringA})`;
+    // Bloom -> .glow layer (z:5, above every border). Hard white core listed FIRST
+    // so it paints on top of the wide glow; core is 0 until burst nears saturation.
+    const coreT = Math.max(0, (burst - HEAT_CORE_KNEE) / (1 - HEAT_CORE_KNEE));
+    const core = coreT > 0
+      ? `0 0 ${HEAT_CORE_BLUR}px ${HEAT_CORE_SPREAD}px rgba(255,255,255,${(coreT * HEAT_CORE_ALPHA_MAX).toFixed(2)}), `
+      : '';
+    glowEl.style.boxShadow = `${core}0 0 ${blur}px ${spread}px rgba(${r},${g},${b},${a})`;
+    return false;
+  }
+  // Glow half-life tracks the speed scale like the per-op durations do (longer in
+  // slow-mo, floored so a burst is visible at any speed; the floor at no-delay).
+  function glowHalfMs() {
+    if (!isFinite(scale)) return HEAT_HALF_MIN;
+    return clamp(HEAT_HALF_MS * HEAT_SCALE_REF / scale, HEAT_HALF_MIN, HEAT_HALF_MAX);
   }
   function sweep(s) {
     const el = sectorEls[s];
@@ -138,7 +258,8 @@ export function createViz(device) {
     if (ev.op === 'reset') {
       for (const q of queue) if (q.op === 'barrier') q.resolve();   // don't leave awaiters hanging
       queue.length = 0; cur = null; shown.fill(0);
-      for (let p = 0; p < npages; p++) { paint(p); cellEls[p].dataset.live = ''; }
+      glowHeat.fill(0); glowHot.clear();
+      for (let p = 0; p < npages; p++) { paint(p); cellEls[p].dataset.live = ''; cellEls[p].style.boxShadow = ''; glowEls[p].style.boxShadow = ''; }
       if (heat) refreshHeat(); return;
     }
     queue.push(ev);
@@ -151,24 +272,41 @@ export function createViz(device) {
     if (dt > 100) dt = 100;
     const noDelay = !isFinite(scale);
     let budget = noDelay ? Infinity : dt * scale;
+    // Per-frame drain cap (see MAX_OPS_PER_FRAME): a step ceiling shared by both
+    // paths. Infinity when disabled, so the loop below is byte-identical to the
+    // uncapped drain (Infinity - 1 === Infinity, `stepBudget > 0` always true).
+    let stepBudget = MAX_OPS_PER_FRAME > 0 ? MAX_OPS_PER_FRAME : Infinity;
     let guard = 200000;
     while (guard-- > 0) {
+      if (stepBudget <= 0) break;          // per-frame cap hit — carry the rest (cur/curStep/queue persist) to next frame
       if (!cur) {
         if (!queue.length) break;
         const ev = queue.shift();
         if (ev.op === 'barrier') { ev.resolve(); continue; }  // op fully played → resolve its await
         cur = stepsFor(ev);
-        curStep = 0; runStep(0);
+        curStep = 0; runStep(0); stepBudget--;
       }
-      if (noDelay) {                       // finish every remaining step of this op now
-        while (++curStep < cur.length) runStep(curStep);
-        cur = null; continue;
+      if (noDelay) {                       // finish this op's remaining steps, up to the frame cap
+        while (stepBudget > 0 && ++curStep < cur.length) { runStep(curStep); stepBudget--; }
+        if (curStep >= cur.length) { cur = null; continue; }  // op done → next op
+        break;                             // cap hit mid-op: curStep/curRem intact, resume next frame
       }
       if (budget >= curRem) {
         budget -= curRem;
-        if (++curStep < cur.length) runStep(curStep);
+        if (++curStep < cur.length) { runStep(curStep); stepBudget--; }
         else cur = null;
       } else { curRem -= budget; break; }
+    }
+    // Decay + render the read/prog glow heat. Cost is O(live cells), independent
+    // of how many ops the drain above enqueued — a 30k-read burst is one summed
+    // intensity per cell, not 30k animation objects. Deleting the current entry
+    // mid-iteration is safe over a Set.
+    if (glowHot.size) {
+      const k = Math.pow(0.5, dt / glowHalfMs());
+      for (const p of glowHot) {
+        glowHeat[p] *= k;
+        if (drawHeat(p)) { glowHeat[p] = 0; glowHot.delete(p); }
+      }
     }
     if (selected >= 0) renderInspector(selected);
     if (!stopped) rafId = requestAnimationFrame(frame);   // don't reschedule once stopped (teardown)
@@ -228,8 +366,18 @@ export function createViz(device) {
         for (let k = 0; k < pagesPerSector; k++) {
           const p = s * pagesPerSector + k;
           const cell = document.createElement('div'); cell.className = 'cell'; cell.dataset.s = 'erased';
-          const fill = document.createElement('i'); fill.className = 'fill'; cell.appendChild(fill);
-          sec.appendChild(cell); cellEls[p] = cell; fillEls[p] = fill;
+          // .fillwrap clips the rectangular .fill to the cell's rounded shape.
+          // .glow carries only the BLOOM (core + outer glow): it has a positive
+          // z-index and — because no ancestor up to .diewrap makes a stacking
+          // context — ALL blooms paint in the diewrap's context above EVERY opaque
+          // cell/sector body AND above every cell's border (the heat ring lives on
+          // the cell body, below this layer), in one layer, regardless of DOM order
+          // (bloom-on-bloom blends, so their order never matters). See the CSS.
+          const fillwrap = document.createElement('i'); fillwrap.className = 'fillwrap';
+          const fill = document.createElement('i'); fill.className = 'fill'; fillwrap.appendChild(fill);
+          const glowEl = document.createElement('i'); glowEl.className = 'glow';
+          cell.appendChild(fillwrap); cell.appendChild(glowEl);
+          sec.appendChild(cell); cellEls[p] = cell; fillEls[p] = fill; glowEls[p] = glowEl;
         }
         sec.addEventListener('click', () => {
           if (selected >= 0) sectorEls[selected].classList.remove('sel');
