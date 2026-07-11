@@ -1,5 +1,6 @@
-# CI mirror of `npm run ci`: build the FASTFFS WASM and run the guards
-# (fastffs pipeline, byte-exact integrity, and the headless dom-smoke).
+# CI mirror of `npm run ci`: build the FASTFFS + LittleFS WASM and run the full
+# guard suite (both pipelines, byte-exact integrity, console/dom-smoke, real
+# backend, lockstep concurrency, and the leak/heat guards).
 #
 # Day-to-day this project is verified locally with `npm run ci`; this workflow
 # just makes the same checks enforce on push once the repo is on GitHub.
@@ -15,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          submodules: recursive        # fs/fastffs — the live-map helper is on origin/main
+          submodules: recursive        # fs/fastffs (live-map helper on origin/main) + fs/littlefs
 
       - name: Set up Emscripten
         uses: mymindstorm/setup-emsdk@v16
@@ -27,4 +28,4 @@ jobs:
         with:
           node-version: 20
 
-      - run: npm run ci                 # build:fastffs + test:fastffs + test:integrity + test:domsmoke
+      - run: npm run ci                 # build:fastffs + build:littlefs + full npm test suite

@@ -1,4 +1,4 @@
-# Build the FASTFFS WASM and publish the visualizer to GitHub Pages.
+# Build the FASTFFS + LittleFS WASM and publish the visualizer to GitHub Pages.
 # The site is static (single-threaded WASM + ESM), so no special headers are
 # needed. `dist/` is a build artifact, so we build it here rather than commit it.
 name: pages
@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: 20
 
-      - run: npm run build:fastffs
+      - run: npm run build            # build:fastffs + build:littlefs — the live site needs both dist/*.mjs
 
       - name: Assemble site
         run: |
