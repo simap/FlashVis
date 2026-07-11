@@ -6,7 +6,7 @@
   "description": "Watch real flash filesystems work: FS-to-WASM over an emulated NOR chip.",
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
-    "build": "bash build/build-fastffs.sh",
+    "build": "npm run build:fastffs && npm run build:littlefs",
     "build:fastffs": "bash build/build-fastffs.sh",
     "build:littlefs": "bash build/build-littlefs.sh",
     "test:fastffs": "node scripts/fastffs-test.mjs",
