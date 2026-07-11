@@ -508,6 +508,11 @@ dialog.about[open]{animation:aboutIn .18s ease}
   padding:15px 18px;border-bottom:1px solid var(--line-soft);background:var(--panel)}
 .about-head h2{margin:0;font-family:"Space Grotesk",system-ui,sans-serif;font-weight:700;font-size:16px;letter-spacing:.02em;color:var(--txt)}
 .about-head h2 b{color:var(--prog);font-weight:700}
+/* The FLASHVIS wordmark, reused wherever the panel names the brand (title AND
+   prose) so header, title, and body all read as one logotype with no casing
+   clash. Same treatment as the header .logo: Space Grotesk, VIS in the accent. */
+.about .wordmark{font-family:"Space Grotesk",system-ui,sans-serif;font-weight:700;letter-spacing:.03em;color:var(--txt);white-space:nowrap}
+.about .wordmark b{color:var(--prog);font-weight:700}
 .about-close{flex:none;width:26px;height:26px;border-radius:6px;border:1px solid var(--line);
   background:var(--chrome);color:var(--txt-dim);font-size:16px;line-height:1;cursor:pointer;
   display:inline-flex;align-items:center;justify-content:center;transition:.13s}
@@ -667,13 +672,13 @@ dialog.about[open]{animation:aboutIn .18s ease}
      focus-return come for free; about.js wires open + backdrop-click close. -->
 <dialog class="about" id="aboutPanel" aria-labelledby="aboutHeading">
   <div class="about-head">
-    <h2 id="aboutHeading">About FLASH<b>VIS</b></h2>
+    <h2 id="aboutHeading">About <span class="wordmark">FLASH<b>VIS</b></span></h2>
     <button class="about-close" id="aboutClose" type="button" aria-label="Close" title="Close">&times;</button>
   </div>
   <div class="about-body">
     <section class="about-sec">
-      <p>flashvis runs real embedded filesystems, compiled to WebAssembly, against a
-      JavaScript emulation of an SPI NOR flash chip. Every read, program, and erase the
+      <p><span class="wordmark">FLASH<b>VIS</b></span> runs real embedded filesystems, compiled to
+      WebAssembly, against a JavaScript emulation of an SPI NOR flash chip. Every read, program, and erase the
       filesystem issues hits the emulated chip under real NOR rules and lights up the die, so you
       can watch and compare how filesystems behave on real flash.</p>
     </section>
@@ -707,9 +712,9 @@ dialog.about[open]{animation:aboutIn .18s ease}
     <section class="about-sec">
       <p class="about-eyebrow">How each filesystem copes</p>
       <h3>FASTFFS and LittleFS</h3>
-      <p>flashvis compares two filesystems today, <b>FASTFFS</b> and <b>LittleFS</b>, with more
-      planned. Both write copy-on-write and never overwrite in place, but they reclaim the freed
-      space differently.</p>
+      <p><span class="wordmark">FLASH<b>VIS</b></span> compares two filesystems today, <b>FASTFFS</b>
+      and <b>LittleFS</b>, with more planned. Both write copy-on-write and never overwrite in place,
+      but they reclaim the freed space differently.</p>
       <p><b>FASTFFS</b> writes file data copy-on-write and commits each change with an append-only
       index record, leaving old versions as obsolete data to reclaim later. Its garbage collector is
       incremental, so it runs opportunistically in small steps in the background between file
@@ -719,7 +724,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
       runs tight.</p>
       <p><b>LittleFS</b> is also copy-on-write, with dynamic wear-leveling built in, but it reclaims
       space as part of its writes rather than in a separate collectible pass, so it has no
-      incremental GC step for flashvis to drive. That is why the background GC control does not appear
+      incremental GC step for the visualizer to drive. That is why the background GC control does not appear
       when LittleFS is focused: the control governs the shared workload's GC share, which only a
       filesystem with incremental GC acts on.</p>
       <p>This is a primer, not a benchmark. FASTFFS pays a periodic GC cost while LittleFS folds
