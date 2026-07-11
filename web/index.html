@@ -698,12 +698,12 @@ dialog.about[open]{animation:aboutIn .18s ease}
         <li>Setting bits back to <span class="k">1</span> takes an <b>erase</b>, and erase only works
         on a whole <b>4 KB sector</b>. It is the slow, wearing operation.</li>
       </ul>
-      <p>Each die cell is one 256 byte page, and its fill height is the bytes programmed. A file
-      appends into its last page's <code>0xFF</code> slack in place, with no erase. Updates never
-      overwrite: a filesystem writes a fresh copy and marks the old one <b>obsolete</b>. When free
-      pages run low, garbage collection relocates a sector's live data, erases it, and bumps that
-      sector's erase count. The wear heatmap tints sectors by that count, so hotspots pool where
-      garbage collection keeps landing.</p>
+      <p>Each die cell is one 256 byte page, and its fill height is the bytes programmed. Past that
+      physical fill, the die can also tint pages by <b>logical</b> roles the filesystem assigns: live
+      versus obsolete (which copy it still treats as current, not a physical byte state) and data
+      versus metadata (file bytes versus the filesystem's own bookkeeping). The wear heatmap adds a
+      third view, tinting each sector by how many times it has been erased, so you can watch wear pool
+      into hotspots.</p>
       <p>Timing is an <b>ESP32-S3</b> preset: a 256 byte read about <b>0.1 ms</b>, a page program
       about <b>1.5 ms</b>, a sector erase about <b>21 ms</b>. Erase is by far the costliest, which is
       why filesystems work to avoid it; the header speed control scales this simulated flash time.</p>
@@ -730,13 +730,14 @@ dialog.about[open]{animation:aboutIn .18s ease}
     <section class="about-sec">
       <h3>How FASTFFS and LittleFS cope</h3>
       <p><span class="wordmark">FLASH<b>VIS</b></span> compares two filesystems today, <b>FASTFFS</b>
-      and <b>LittleFS</b>, with more planned. Both are copy-on-write and never overwrite in place;
-      they differ in how they reclaim the freed space.</p>
-      <p><b>FASTFFS</b> commits each change with an append-only index record and leaves old versions
-      as obsolete data. Its garbage collector is incremental, reclaiming in small background steps
-      that keep garbage low for a small, steady cost; the background GC control sets how much runs, so
-      with it on the 50% default can undersell it. What is left, it reclaims inline when free space
-      runs tight.</p>
+      and <b>LittleFS</b>, with more planned. Both are copy-on-write: they never overwrite in place but
+      write a fresh copy and mark the old one <b>obsolete</b>. Reclaiming that freed space means
+      relocating what is still live and erasing the sector, the operation that wears the flash, and
+      the two do it differently.</p>
+      <p><b>FASTFFS</b> commits each change with an append-only index record. Its garbage collector is
+      incremental, reclaiming in small background steps that keep garbage low for a small, steady
+      cost; the background GC control sets how much runs, so with it on the 50% default can undersell
+      it. What is left, it reclaims inline when free space runs tight.</p>
       <p><b>LittleFS</b> is copy-on-write with dynamic wear-leveling, and reclaims space as part of
       its writes rather than in a separate pass. It has no incremental GC step to drive, so the
       background GC control does not appear when LittleFS is focused.</p>
