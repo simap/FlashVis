@@ -381,7 +381,7 @@ async function boot() {
       { label: 'Ops', items: [
         { cls: 'read', word: 'Reading', title: 'XIP, no wear', glow: true },
         { cls: 'program', word: 'Programming', title: '1 to 0, in progress', glow: true },
-        { cls: 'mix', word: 'Read + write', title: 'one cell read and programmed at once', glow: true },
+        { cls: 'mix', word: 'Read + prog', title: 'one cell read and programmed at once', glow: true },
         { cls: 'erase', word: 'Erasing', title: 'sector to 0xFF', glow: true },
       ] },
     ];
