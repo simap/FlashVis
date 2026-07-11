@@ -214,7 +214,12 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
         await pace.after();
         return res;
       })();
-      p.finally(onSettle);
+      // Settle bookkeeping runs on both outcomes, but the .finally() chain is a
+      // SEPARATE promise from the `p` we return: if `work` throws (NO_SPACE, a
+      // read of a missing file) that chain rejects too, and nothing awaits it, so
+      // it leaks an unhandledRejection even when the caller handles the returned
+      // `p`. Neutralize the discarded branch; the real rejection still rides `p`.
+      p.finally(onSettle).catch(() => {});
       return p;
     }
 
