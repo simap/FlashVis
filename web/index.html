@@ -6,18 +6,92 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{
+  /* structural chrome — theme-neutral so contrast/readability is guaranteed
+     in every palette. Only the DATA colors below (state fills + op glows +
+     accent + sector background) are re-skinned per [data-theme]. */
   --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a;
   --line:#20313c; --line-soft:#182530;
   --txt:#cdd9e0; --txt-dim:#647884; --txt-faint:#6d818d;
+  --err:#e5686d; --queued:#7d8fa6; --lead:#8fe6a0;
+  /* desaturated 8-pin chip package (enclosure only, never the cell-state colors) */
+  --pkg-a:#17191c; --pkg-b:#0e1012; --pkg-line:#2b2f34; --pin:#7b8085; --pin-b:#43474b;
+  --sector-gap:6px; --cell-gap:2px; --radius:3px;
+
+  /* ============================ THEME PALETTES ============================
+     Each palette covers BOTH information layers and reads as one lifecycle
+     journey: erased -> programming -> live/metadata -> reading -> obsolete ->
+     erasing -> erased. The op-glow trio holds a fixed grammar in every theme
+     for muscle memory + colorblind separation: READ is the cool scan, PROGRAM
+     is the warm write, ERASE is the third-axis event (violet/magenta/lime).
+     Op colors are always higher chroma than the matte state fills, and the
+     glow blooms + desaturates to white — so op-vs-state never relies on hue
+     alone. viz.js re-sources --read / --program / --erase / --prog-edge /
+     --sector-bg for the live glow (see resolveTheme). Aurora is the :root
+     default so the page renders fully themed before JS runs. */
+
+  /* 1 · AURORA SIGNAL — the instrument-on-dark-glass default. */
   --erased:#132029; --erased-edge:#233b44;
   --prog:#eab54a; --prog-edge:#f4cf7e;
   --stale:#4c4636; --stale-edge:#5f5741; --index:#63a6c9;
-  --program:#a9f1ff; --erase:#b978ff; --read:#63e6ff;
-  --accent:#6fd6c2; --accent-dim:#2f5d57; --err:#e5686d;
-  --queued:#7d8fa6; --lead:#8fe6a0; --hold:#eab54a;
-  /* desaturated 8-pin chip package (enclosure only, never the cell-state colors above) */
-  --pkg-a:#17191c; --pkg-b:#0e1012; --pkg-line:#2b2f34; --pin:#7b8085; --pin-b:#43474b;
-  --sector-gap:6px; --cell-gap:2px; --radius:3px;
+  --read:#63e6ff; --program:#ff6a1a; --erase:#b978ff;
+  --accent:#6fd6c2; --accent-dim:#2f5d57; --hold:#eab54a;
+  --sector-bg:#0c1013;
+}
+/* 2 · EMBER FOUNDRY — a forge: cold iron erased, white-hot forging write,
+   cast-brass live data, a cool inspection arc for reads, a magnesium burn to
+   erase. Read teal / program red-orange / erase magenta span all three axes. */
+:root[data-theme="ember"]{
+  --erased:#16181b; --erased-edge:#2a2f33;
+  --prog:#d4972f; --prog-edge:#f0c368;
+  --stale:#46403a; --stale-edge:#5c554b; --index:#5aa0d6;
+  --read:#57e0d8; --program:#ff5a12; --erase:#ff4fd8;
+  --accent:#57e0d8; --accent-dim:#2b5f5c; --hold:#d4972f;
+  --sector-bg:#0d0e10;
+}
+/* 3 · ULTRAVIOLET LAB — an indigo cleanroom under UV. Ice-blue read, hot-
+   magenta write, a UV-reactive lime erase (blue/magenta/green is the most
+   colorblind-robust op trio). Live data glows orchid; metadata stays cyan. */
+:root[data-theme="uv"]{
+  --erased:#111427; --erased-edge:#25294a;
+  --prog:#c07be0; --prog-edge:#dca6f0;
+  --stale:#3f3a52; --stale-edge:#544d68; --index:#47c7d6;
+  --read:#6db8ff; --program:#ff4d9e; --erase:#9ee85a;
+  --accent:#6db8ff; --accent-dim:#2f4d78; --hold:#c07be0;
+  --sector-bg:#0b0d18;
+}
+/* 4 · TERMINAL PHOSPHOR — the storage-tool vernacular: green/amber/red CRT
+   phosphors on a green-black tube. Op TYPE also reads through MOTION (read
+   bloom / program fill-rise / erase sweep), which carries the green-vs-red
+   pair for colorblind viewers who can't split them by hue alone. */
+:root[data-theme="phosphor"]{
+  --erased:#0e150e; --erased-edge:#1f331f;
+  --prog:#8ccf5a; --prog-edge:#b6e88a;
+  --stale:#4a4a30; --stale-edge:#5f5f42; --index:#5ad2b0;
+  --read:#4dff88; --program:#ffb52e; --erase:#ff5140;
+  --accent:#4dff88; --accent-dim:#2a6b45; --hold:#ffb52e;
+  --sector-bg:#0a0f0a;
+}
+/* 5 · DEEP SEA — an abyssal dive: bioluminescent sea-green scan, an
+   anglerfish amber lure for writes, a jellyfish-violet erase. Live data is
+   warm coral against the cold trench; metadata a deep water blue. */
+:root[data-theme="deepsea"]{
+  --erased:#0d1a20; --erased-edge:#1e3640;
+  --prog:#e0975a; --prog-edge:#f2bd86;
+  --stale:#3f4642; --stale-edge:#545c56; --index:#4b93c9;
+  --read:#35e6c8; --program:#ff8a2b; --erase:#c65cff;
+  --accent:#35e6c8; --accent-dim:#245f56; --hold:#e0975a;
+  --sector-bg:#0a141a;
+}
+/* 6 · CYANOTYPE BLUEPRINT — a drafting print: paper-white-blue read over a
+   blueprint-cyan field, orange annotation for writes, a crimson correction to
+   erase. Live is the printed cyan line; metadata a warm amber margin note. */
+:root[data-theme="blueprint"]{
+  --erased:#0e1a2a; --erased-edge:#20364d;
+  --prog:#57b6e6; --prog-edge:#8fd2f2;
+  --stale:#3c4a57; --stale-edge:#51616f; --index:#e0a94b;
+  --read:#bfe3ff; --program:#ff7a33; --erase:#ff4d5e;
+  --accent:#57b6e6; --accent-dim:#2c5f7e; --hold:#ff7a33;
+  --sector-bg:#09131f;
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
@@ -139,7 +213,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .die-stack{width:100%;height:100%}
 .die{display:grid;grid-template-columns:repeat(var(--sector-cols,8),1fr);gap:var(--sector-gap);width:100%;height:100%}
 .sector{position:relative;display:grid;grid-template-columns:repeat(var(--page-cols,4),1fr);gap:var(--cell-gap);padding:3px;border-radius:var(--radius);
-  background:#0c1013;border:1px solid #1b1f23;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+  background:var(--sector-bg,#0c1013);border:1px solid #1b1f23;cursor:pointer;transition:border-color .15s,box-shadow .15s}
 .sector:hover{border-color:var(--accent-dim)}
 .sector.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 16px -4px var(--accent)}
 /* No box-shadow transition: the read/prog heat glow (viz.js) rewrites .glow's
@@ -163,12 +237,12 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    fall through. Translucent box-shadows blend additively, so bloom paint order is
    moot. */
 .cell .glow{position:absolute;inset:0;z-index:5;pointer-events:none}
-.cell[data-s="prog"]{box-shadow:inset 0 0 0 1px var(--prog-edge),0 0 6px -2px #eab54a55}
+.cell[data-s="prog"]{box-shadow:inset 0 0 0 1px var(--prog-edge),0 0 6px -2px color-mix(in srgb,var(--prog) 33%,transparent)}
 .cell[data-live="live"] .fill{background:var(--prog)}
 .cell[data-live="obsolete"] .fill{background:var(--stale)}
 .cell[data-live="obsolete"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
 .cell[data-live="meta"] .fill{background:var(--index)}
-.die.heat .sector{background:var(--wc,#0c141b);border-color:#0006}
+.die.heat .sector{background:var(--wc,var(--sector-bg,#0c141b));border-color:#0006}
 .die.heat .cell{opacity:.13}
 .die.heat .sector.sel{box-shadow:0 0 0 1px var(--accent)}
 
@@ -227,6 +301,23 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
 .sw.program{background:var(--program)} .sw.erase{background:var(--erase)} .sw.read{background:var(--read)}
+
+/* palette switcher — sits with the legend because it governs what the legend
+   MEANS: pick a palette and the whole die + live glow re-skins. A live preview
+   of the four load-bearing colors (read · write · erase · live) reads the theme
+   vars directly, so it recolors itself the instant the palette changes. */
+.theme-pick{display:inline-flex;align-items:center;gap:8px;color:var(--txt-dim);
+  font-size:10.5px;letter-spacing:.05em;cursor:pointer;user-select:none;
+  padding:3px 4px 3px 9px;border:1px solid var(--line-soft);border-radius:6px;background:#0c131a}
+.theme-pick:focus-within{border-color:var(--accent)}
+.tp-label{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint)}
+.tp-dots{display:inline-flex;gap:3px}
+.tp-dots i{width:9px;height:9px;border-radius:50%;box-shadow:inset 0 0 0 1px #fff2}
+.tp-dots .d-read{background:var(--read)} .tp-dots .d-prog-op{background:var(--program)}
+.tp-dots .d-erase{background:var(--erase)} .tp-dots .d-live{background:var(--prog)}
+.theme-pick select{font-family:inherit;font-size:11px;color:var(--txt);background:#16212b;
+  border:1px solid var(--line);border-radius:5px;padding:4px 7px;cursor:pointer;outline:none}
+.theme-pick select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
 /* side panel — telemetry + sector inspector, its own column (fix #2) */
 .panel{display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
@@ -366,6 +457,18 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
     <div class="diebar">
       <div class="legend" id="legendChips" role="list" aria-label="cell states"></div>
       <label class="toggle"><input type="checkbox" id="heat"><span class="tswitch"></span>WEAR HEATMAP</label>
+      <label class="theme-pick" title="color palette">
+        <span class="tp-label">PALETTE</span>
+        <span class="tp-dots" aria-hidden="true"><i class="d-read"></i><i class="d-prog-op"></i><i class="d-erase"></i><i class="d-live"></i></span>
+        <select id="theme" aria-label="color palette theme">
+          <option value="aurora">Aurora Signal</option>
+          <option value="ember">Ember Foundry</option>
+          <option value="uv">Ultraviolet Lab</option>
+          <option value="phosphor">Terminal Phosphor</option>
+          <option value="deepsea">Deep Sea</option>
+          <option value="blueprint">Cyanotype Blueprint</option>
+        </select>
+      </label>
     </div>
   </div>
 
