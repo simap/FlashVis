@@ -143,12 +143,22 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
   const journal = [];
   const journalSubs = [];
   let journalSeq = 0;
+  // Cap the scrollback so a long high-speed run (thousands of auto-workload op
+  // lines per second) can't grow this array without bound. 2000 is far above the
+  // 400 lines the tape ever displays (playground renderTapeFull slices -400), so
+  // trimming the oldest never drops anything on screen. It is also safe for a
+  // live command entry: the coordinator holds command entries by reference via
+  // entry.journalEntries and flips their state through setJournalState (which
+  // mutates the object, not this array), so a trimmed-but-still-live entry keeps
+  // working; only its far-off-screen history slot is dropped.
+  const JOURNAL_MAX = 2000;
   const notifyJournal = (change) => { for (const cb of journalSubs) cb(change); };
   /** Append one line to the journal and the legacy onLog sink. Returns the entry
    *  so its `state` can later be advanced in place via setJournalState. */
   function appendJournal(text, cls = 'out', state = 'done') {
     const entry = { id: journalSeq++, text, cls, state };
     journal.push(entry);
+    if (journal.length > JOURNAL_MAX) journal.splice(0, journal.length - JOURNAL_MAX);
     onLog?.(text, cls);
     notifyJournal({ type: 'append', entry, journal });
     return entry;

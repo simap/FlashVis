@@ -243,6 +243,7 @@ async function boot() {
     const el = document.createElement('div');
     el.className = 'line ' + (e.cls || 'out');
     el.dataset.state = e.state || 'done';
+    el.dataset.jid = e.id;          // stamp the journal id so the DOM-cap eviction can drop this node's tapeNodes entry
     el.textContent = tapeText(e);
     tapeNodes.set(e.id, el);
     return el;
@@ -260,7 +261,13 @@ async function boot() {
     const out = $('tape');
     if (change.type === 'append') {
       out.appendChild(tapeLine(change.entry));
-      while (out.children.length > 400) out.removeChild(out.firstChild);
+      // Cap the visible tape at 400 lines AND drop each evicted node's tapeNodes
+      // entry, so the Map stays bounded like the DOM instead of retaining every
+      // line ever appended as a detached node (the auto-workload op-log leak).
+      while (out.children.length > 400) {
+        const gone = out.removeChild(out.firstChild);
+        tapeNodes.delete(Number(gone.dataset.jid));
+      }
       out.scrollTop = out.scrollHeight;
     } else {
       const el = tapeNodes.get(change.entry.id);
