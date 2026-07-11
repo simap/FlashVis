@@ -6,10 +6,12 @@
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  /* structural chrome — theme-neutral so contrast/readability is guaranteed
-     in every palette. Only the DATA colors below (state fills + op glows +
-     accent + sector background) are re-skinned per [data-theme]. */
-  --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a;
+  /* Structural constants shared by every theme: hairlines and body text stay a
+     neutral cool grey so text/line contrast is guaranteed in ALL palettes (good
+     dark-theme practice — the ambient below carries the color, the type stays
+     maximally legible). --err/--lead/--queued are semantic (fault / leader /
+     queued) and read the same everywhere. Everything a theme owns is a var it
+     re-declares below. */
   --line:#20313c; --line-soft:#182530;
   --txt:#cdd9e0; --txt-dim:#647884; --txt-faint:#6d818d;
   --err:#e5686d; --queued:#7d8fa6; --lead:#8fe6a0;
@@ -18,87 +20,125 @@
   --sector-gap:6px; --cell-gap:2px; --radius:3px;
 
   /* ============================ THEME PALETTES ============================
-     Each palette covers BOTH information layers and reads as one lifecycle
-     journey: erased -> programming -> live/metadata -> reading -> obsolete ->
-     erasing -> erased. The op-glow trio holds a fixed grammar in every theme
-     for muscle memory + colorblind separation: READ is the cool scan, PROGRAM
-     is the warm write, ERASE is the third-axis event (violet/magenta/lime).
-     Op colors are always higher chroma than the matte state fills, and the
-     glow blooms + desaturates to white — so op-vs-state never relies on hue
-     alone. viz.js re-sources --read / --program / --erase / --prog-edge /
-     --sector-bg for the live glow (see resolveTheme). Aurora is the :root
-     default so the page renders fully themed before JS runs. */
+     Each palette re-skins the WHOLE page (ambient bg + panels + raised control
+     chrome + accent), not just the die, so the die never reads out of context.
+     Two information layers carry the data:
+       STATE FILLS (matte): erased / live (--prog) / obsolete (--stale) / metadata.
+       OP GLOWS (lit, bloom, desaturate-to-white with heat): read / program / erase.
+     Fixed op grammar in every theme for muscle memory + colorblind separation:
+     READ = cool scan, PROGRAM = warm write, ERASE = third-axis event.
+     The load-bearing requirement is the OP-OVER-STATE overlay: a glow renders on
+     top of a cell that already holds a state color, and BOTH must stay readable.
+     The base op hue (low/mid heat, before it whitens) is therefore kept distinct
+     from EVERY state it can sit on — by hue where possible, by lightness +
+     saturation where the families are close (read-over-live, program-over-live).
+     See the per-theme overlay notes. viz.js re-sources --read/--program/--erase/
+     --prog-edge/--sector-bg for the live glow. Aurora is the :root default so the
+     page renders fully themed before JS runs. */
 
-  /* 1 · AURORA SIGNAL — the instrument-on-dark-glass default. */
+  /* 1 · AURORA SIGNAL — instrument-on-dark-glass (default). */
+  --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a; --chrome:#16212b;
+  --glow-a:#12202b; --glow-b:#131a26;
   --erased:#132029; --erased-edge:#233b44;
   --prog:#eab54a; --prog-edge:#f4cf7e;
   --stale:#4c4636; --stale-edge:#5f5741; --index:#63a6c9;
   --read:#63e6ff; --program:#ff6a1a; --erase:#b978ff;
   --accent:#6fd6c2; --accent-dim:#2f5d57; --hold:#eab54a;
   --sector-bg:#0c1013;
+  /* overlay: read-cyan(L85) over metadata steel-blue(L66) → lightness+sat;
+     program red-orange(h18) over amber live(h41) → hue23+sat; erase violet
+     over brown obsolete → near-complementary. */
 }
 /* 2 · EMBER FOUNDRY — a forge: cold iron erased, white-hot forging write,
    cast-brass live data, a cool inspection arc for reads, a magnesium burn to
    erase. Read teal / program red-orange / erase magenta span all three axes. */
 :root[data-theme="ember"]{
+  --bg:#0d0e10; --panel:#16181c; --panel-2:#101113; --chrome:#1e2126;
+  --glow-a:#201a16; --glow-b:#1a1513;
   --erased:#16181b; --erased-edge:#2a2f33;
   --prog:#d4972f; --prog-edge:#f0c368;
   --stale:#46403a; --stale-edge:#5c554b; --index:#5aa0d6;
   --read:#57e0d8; --program:#ff5a12; --erase:#ff4fd8;
   --accent:#57e0d8; --accent-dim:#2b5f5c; --hold:#d4972f;
   --sector-bg:#0d0e10;
+  /* overlay: read teal(h175) over metadata blue(h205) → hue30+brightness;
+     program(h15) over brass(h36) → hue21+brightness; magenta erase over
+     taupe obsolete → far. */
 }
 /* 3 · ULTRAVIOLET LAB — an indigo cleanroom under UV. Ice-blue read, hot-
    magenta write, a UV-reactive lime erase (blue/magenta/green is the most
-   colorblind-robust op trio). Live data glows orchid; metadata stays cyan. */
+   colorblind-robust op trio). Live glows blue-violet; metadata is teal. */
 :root[data-theme="uv"]{
+  --bg:#0b0d16; --panel:#14162a; --panel-2:#0e1020; --chrome:#1c1e34;
+  --glow-a:#1c1a3a; --glow-b:#181534;
   --erased:#111427; --erased-edge:#25294a;
-  --prog:#c07be0; --prog-edge:#dca6f0;
-  --stale:#3f3a52; --stale-edge:#544d68; --index:#47c7d6;
+  --prog:#b072e0; --prog-edge:#d0a6f0;
+  --stale:#3f3a52; --stale-edge:#544d68; --index:#3fc9c9;
   --read:#6db8ff; --program:#ff4d9e; --erase:#9ee85a;
-  --accent:#6db8ff; --accent-dim:#2f4d78; --hold:#c07be0;
+  --accent:#6db8ff; --accent-dim:#2f4d78; --hold:#b072e0;
   --sector-bg:#0b0d18;
+  /* overlay: read blue(h210) over metadata teal(h180) → hue30 (metadata pulled
+     teal so read stays the only blue); program hot-magenta(h330) over live
+     blue-violet(h278) → hue52 + big sat/brightness gap; lime erase over
+     slate-violet obsolete → far. */
 }
 /* 4 · TERMINAL PHOSPHOR — the storage-tool vernacular: green/amber/red CRT
-   phosphors on a green-black tube. Op TYPE also reads through MOTION (read
-   bloom / program fill-rise / erase sweep), which carries the green-vs-red
-   pair for colorblind viewers who can't split them by hue alone. */
+   phosphors on a green-black tube. Read cyan-green vs live yellow-green split by
+   ~50deg + lightness; op TYPE also reads through MOTION (read bloom / program
+   fill-rise / erase sweep) for the green-vs-red colorblind pair. */
 :root[data-theme="phosphor"]{
+  --bg:#0a0f0a; --panel:#10160f; --panel-2:#0c110b; --chrome:#182016;
+  --glow-a:#12220f; --glow-b:#101a0d;
   --erased:#0e150e; --erased-edge:#1f331f;
-  --prog:#8ccf5a; --prog-edge:#b6e88a;
+  --prog:#7fbf55; --prog-edge:#a8e07f;
   --stale:#4a4a30; --stale-edge:#5f5f42; --index:#5ad2b0;
   --read:#4dff88; --program:#ffb52e; --erase:#ff5140;
   --accent:#4dff88; --accent-dim:#2a6b45; --hold:#ffb52e;
   --sector-bg:#0a0f0a;
+  /* overlay: read cyan-green(h145,L86) over live yellow-green(h95,L72) →
+     hue50+lightness14; program amber over green live → warm/cool; erase red
+     over olive obsolete → brighter+saturated; note green-family leans on
+     lightness + the phosphor motion cue. */
 }
 /* 5 · DEEP SEA — an abyssal dive: bioluminescent sea-green scan, an
-   anglerfish amber lure for writes, a jellyfish-violet erase. Live data is
-   warm coral against the cold trench; metadata a deep water blue. */
+   anglerfish amber lure for writes, a jellyfish-violet erase. Live is a warm
+   salmon-coral (pulled red so it can't collide with the amber write). */
 :root[data-theme="deepsea"]{
+  --bg:#0a1218; --panel:#101d24; --panel-2:#0b151b; --chrome:#16262e;
+  --glow-a:#0e2a30; --glow-b:#102028;
   --erased:#0d1a20; --erased-edge:#1e3640;
-  --prog:#e0975a; --prog-edge:#f2bd86;
+  --prog:#e07a5e; --prog-edge:#f0a888;
   --stale:#3f4642; --stale-edge:#545c56; --index:#4b93c9;
-  --read:#35e6c8; --program:#ff8a2b; --erase:#c65cff;
-  --accent:#35e6c8; --accent-dim:#245f56; --hold:#e0975a;
+  --read:#35e6c8; --program:#ff9a2e; --erase:#c65cff;
+  --accent:#35e6c8; --accent-dim:#245f56; --hold:#e07a5e;
   --sector-bg:#0a141a;
+  /* overlay: read sea-green(h168) over metadata blue(h205) → hue37+brightness;
+     program amber(h33) over salmon live(h15) → hue18 + yellower/brighter;
+     violet erase over grey-green obsolete → far. */
 }
 /* 6 · CYANOTYPE BLUEPRINT — a drafting print: paper-white-blue read over a
    blueprint-cyan field, orange annotation for writes, a crimson correction to
-   erase. Live is the printed cyan line; metadata a warm amber margin note. */
+   erase. Metadata is a warm amber margin note (cool read never collides). */
 :root[data-theme="blueprint"]{
+  --bg:#091320; --panel:#0f1d2c; --panel-2:#0a1420; --chrome:#16293a;
+  --glow-a:#123049; --glow-b:#0f2036;
   --erased:#0e1a2a; --erased-edge:#20364d;
-  --prog:#57b6e6; --prog-edge:#8fd2f2;
+  --prog:#4aa8dc; --prog-edge:#7cc4ea;
   --stale:#3c4a57; --stale-edge:#51616f; --index:#e0a94b;
-  --read:#bfe3ff; --program:#ff7a33; --erase:#ff4d5e;
+  --read:#cfe8ff; --program:#ff7a33; --erase:#ff4d5e;
   --accent:#57b6e6; --accent-dim:#2c5f7e; --hold:#ff7a33;
   --sector-bg:#09131f;
+  /* overlay: read paper-white(L92,sat~15%) over live saturated cyan(L64,sat~65%)
+     → chalk-over-line, a deliberate lightness+saturation split (the theme's one
+     cool-on-cool pair); program orange & erase crimson over cyan/amber states →
+     warm/cool, all high-contrast. */
 }
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{
   background:
-    radial-gradient(1200px 700px at 78% -8%, #12202b 0%, rgba(18,32,43,0) 60%),
-    radial-gradient(900px 600px at -6% 108%, #131a26 0%, rgba(19,26,38,0) 55%),
+    radial-gradient(1200px 700px at 78% -8%, var(--glow-a) 0%, transparent 60%),
+    radial-gradient(900px 600px at -6% 108%, var(--glow-b) 0%, transparent 55%),
     var(--bg);
   color:var(--txt);font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
   font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;height:100%;overflow:hidden;
@@ -116,7 +156,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    per-op stimulus — so the WORKLOAD strip below holds only stimulus. */
 .sig{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:6px 11px;
   padding:14px 22px 22px;border-bottom:1px solid var(--line-soft);
-  background:linear-gradient(180deg,#0d151dcc,#0b0f14);
+  background:linear-gradient(180deg,var(--panel),var(--bg));
   font-size:15px;letter-spacing:.005em}
 .logo{font-family:"Space Grotesk";font-weight:700;font-size:20px;letter-spacing:.15em;color:var(--txt)}
 .logo b{color:var(--prog);font-weight:700}
@@ -136,7 +176,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .fs{font-family:inherit;cursor:pointer;text-align:left;
   display:flex;flex-direction:column;gap:2px;min-width:118px;
   padding:6px 12px 7px;border:1px solid var(--line);border-radius:7px;
-  background:linear-gradient(180deg,#0e1720,#0b1218);color:var(--txt-dim);transition:.14s;position:relative}
+  background:linear-gradient(180deg,var(--chrome),var(--panel-2));color:var(--txt-dim);transition:.14s;position:relative}
 .fs:hover{border-color:var(--accent-dim);color:var(--txt)}
 .fs:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .fs-top{display:flex;align-items:center;gap:8px}
@@ -152,7 +192,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .fs-bar .tag{font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:var(--txt-faint)}
 
 .fs.on{border-color:var(--accent);color:var(--txt);
-  background:linear-gradient(180deg,#0f2029,#0c1a1f);box-shadow:0 0 0 1px var(--accent),0 0 22px -9px var(--accent)}
+  background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 14%,var(--chrome)),var(--panel-2));box-shadow:0 0 0 1px var(--accent),0 0 22px -9px var(--accent)}
 .fs.on .fs-name{color:var(--accent)}
 .fs.on .fs-v{color:var(--txt)}
 .fs.leader .fs-bar .track i{background:var(--lead);box-shadow:0 0 8px -2px var(--lead)}
@@ -290,12 +330,12 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .diebar{display:flex;align-items:center;gap:10px 12px;flex-wrap:wrap;justify-content:center}
 .legend{display:flex;gap:7px;flex-wrap:wrap;justify-content:center}
 .chip{position:relative;display:inline-flex;align-items:center;gap:6px;cursor:default;
-  font-size:11px;color:var(--txt-dim);padding:4px 8px;border-radius:5px;border:1px solid var(--line-soft);background:#0c131a}
+  font-size:11px;color:var(--txt-dim);padding:4px 8px;border-radius:5px;border:1px solid var(--line-soft);background:var(--panel-2)}
 .chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .chip .sw{width:11px;height:11px;border-radius:2px;flex:none;box-shadow:inset 0 0 0 1px #fff2}
 .chip .chip-hint{position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);
   width:max-content;max-width:230px;padding:6px 9px;border-radius:6px;font-size:10.5px;line-height:1.4;color:var(--txt);
-  background:#0a1219;border:1px solid var(--line);box-shadow:0 12px 30px -14px #000;
+  background:var(--panel-2);border:1px solid var(--line);box-shadow:0 12px 30px -14px #000;
   opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:5}
 .chip:hover .chip-hint,.chip:focus-visible .chip-hint,.chip:focus .chip-hint{opacity:1;visibility:visible}
 .sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
@@ -308,14 +348,14 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    vars directly, so it recolors itself the instant the palette changes. */
 .theme-pick{display:inline-flex;align-items:center;gap:8px;color:var(--txt-dim);
   font-size:10.5px;letter-spacing:.05em;cursor:pointer;user-select:none;
-  padding:3px 4px 3px 9px;border:1px solid var(--line-soft);border-radius:6px;background:#0c131a}
+  padding:3px 4px 3px 9px;border:1px solid var(--line-soft);border-radius:6px;background:var(--panel-2)}
 .theme-pick:focus-within{border-color:var(--accent)}
 .tp-label{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint)}
 .tp-dots{display:inline-flex;gap:3px}
 .tp-dots i{width:9px;height:9px;border-radius:50%;box-shadow:inset 0 0 0 1px #fff2}
 .tp-dots .d-read{background:var(--read)} .tp-dots .d-prog-op{background:var(--program)}
 .tp-dots .d-erase{background:var(--erase)} .tp-dots .d-live{background:var(--prog)}
-.theme-pick select{font-family:inherit;font-size:11px;color:var(--txt);background:#16212b;
+.theme-pick select{font-family:inherit;font-size:11px;color:var(--txt);background:var(--chrome);
   border:1px solid var(--line);border-radius:5px;padding:4px 7px;cursor:pointer;outline:none}
 .theme-pick select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
@@ -323,7 +363,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .panel{display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
 .card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line-soft);border-radius:8px;padding:13px 14px}
 .card h3{margin:0 0 10px;font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim);display:flex;justify-content:space-between}
-.util{height:9px;border-radius:5px;overflow:hidden;display:flex;background:#0a1016;border:1px solid var(--line-soft);margin-bottom:11px}
+.util{height:9px;border-radius:5px;overflow:hidden;display:flex;background:var(--panel-2);border:1px solid var(--line-soft);margin-bottom:11px}
 .util i{display:block;height:100%;width:0;transition:width .25s ease}
 .util .u-live{background:var(--prog)} .util .u-obs{background:var(--stale)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
@@ -345,7 +385,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    sim-global execution controls, not per-op stimulus) — this strip holds
    only Run/Step + BG GC. */
 .workload{flex:none;display:flex;align-items:center;gap:9px 12px;flex-wrap:wrap;
-  padding:9px 11px;border:1px solid var(--line-soft);border-radius:8px;background:linear-gradient(180deg,#0e1720,#0b1117)}
+  padding:9px 11px;border:1px solid var(--line-soft);border-radius:8px;background:linear-gradient(180deg,var(--chrome),var(--panel-2))}
 .workload::before{content:"WORKLOAD";font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint);align-self:center;writing-mode:vertical-rl;transform:rotate(180deg);margin-right:2px}
 .egrp{display:flex;align-items:center;gap:7px}
 .sep{width:1px;height:22px;background:var(--line)}
@@ -356,8 +396,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;heigh
 input[type=range]::-moz-range-thumb{width:13px;height:13px;border:none;border-radius:50%;background:var(--accent);cursor:pointer}
 input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 
-.btn{font-family:inherit;font-size:12px;color:var(--txt);background:#16212b;border:1px solid var(--line);border-radius:6px;padding:6px 11px;cursor:pointer;transition:.13s;display:inline-flex;align-items:center;gap:7px}
-.btn:hover{border-color:var(--accent-dim);background:#1a2833}
+.btn{font-family:inherit;font-size:12px;color:var(--txt);background:var(--chrome);border:1px solid var(--line);border-radius:6px;padding:6px 11px;cursor:pointer;transition:.13s;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{border-color:var(--accent-dim);background:color-mix(in srgb,var(--accent) 14%,var(--chrome))}
 .btn:active{transform:translateY(1px)}
 .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .btn.primary{background:var(--prog);color:#241a06;border-color:var(--prog);font-weight:600}
@@ -365,7 +405,7 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 .btn .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
 .toggle{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:10.5px;letter-spacing:.05em;cursor:pointer;user-select:none}
 .toggle input{position:absolute;opacity:0;pointer-events:none}
-.tswitch{width:32px;height:17px;border-radius:10px;background:#16212b;border:1px solid var(--line);position:relative;transition:.15s}
+.tswitch{width:32px;height:17px;border-radius:10px;background:var(--chrome);border:1px solid var(--line);position:relative;transition:.15s}
 .tswitch::after{content:"";position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:var(--txt-faint);transition:.15s}
 .toggle input:checked + .tswitch{background:var(--accent-dim);border-color:var(--accent)}
 .toggle input:checked + .tswitch::after{transform:translateX(15px);background:var(--accent)}
@@ -374,9 +414,9 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 /* the tape itself: journal of truth. #tape is the scrollable log (.tape-scroll);
    playground.js appends per-entry .line rows into it directly. */
 .tape{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;
-  background:#0a0f15;border:1px solid var(--line-soft);border-radius:8px;overflow:hidden}
+  background:var(--panel-2);border:1px solid var(--line-soft);border-radius:8px;overflow:hidden}
 .tape-gap{flex:none;display:flex;align-items:center;gap:10px;padding:8px 13px;
-  border-bottom:1px solid #3a2f1c;background:linear-gradient(180deg,#1c160b,#140f08);color:var(--prog-edge);font-size:11px}
+  border-bottom:1px solid color-mix(in srgb,var(--hold) 34%,var(--line-soft));background:linear-gradient(180deg,color-mix(in srgb,var(--hold) 14%,var(--panel-2)),var(--panel-2));color:var(--hold);font-size:11px}
 .tape-gap b{font-variant-numeric:tabular-nums}
 .tape-gap .catchup{margin-left:auto;font-size:10.5px;padding:4px 9px}
 .tape-scroll{flex:1;min-height:0;overflow:auto;padding:9px 13px;font-size:12px;line-height:1.55}
@@ -395,7 +435,7 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 .pokes{flex:none;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .pokes .reg{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint);margin-right:2px}
 .prompt{flex:none;display:flex;align-items:center;gap:8px;
-  border:1px solid var(--line-soft);border-radius:8px;background:#0a0f15;padding:8px 12px}
+  border:1px solid var(--line-soft);border-radius:8px;background:var(--panel-2);padding:8px 12px}
 .prompt .p{color:var(--accent);font-weight:700}
 .prompt input{flex:1;background:none;border:none;outline:none;color:var(--txt);font-family:inherit;font-size:12.5px;min-width:0}
 .prompt input::placeholder{color:var(--txt-faint)}
