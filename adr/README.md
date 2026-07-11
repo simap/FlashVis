@@ -14,32 +14,7 @@ Each record has a **Status**: `Proposed`, `Accepted`, `Superseded by ADR-XXXX`, 
 Supersede rather than edit: once an ADR is `Accepted`, changing the decision means writing a
 new ADR that supersedes it, so the trail of *why it changed* survives.
 
-## Index
-
-| ADR | Title | Status |
-|-----|-------|--------|
-| [0001](0001-single-static-page.md) | Ship as a single dependency-free static page | Superseded by [0005](0005-real-fs-to-wasm.md) |
-| [0002](0002-log-structured-nor-model.md) | Model the device as a log-structured FS on NOR | Superseded by [0005](0005-real-fs-to-wasm.md) |
-| [0003](0003-byte-programming-granularity.md) | Byte-level programming with a configurable granule | Superseded by [0005](0005-real-fs-to-wasm.md) |
-| [0004](0004-gc-wear-and-endurance.md) | Greedy GC, page-aligned records, scaled endurance | Superseded by [0005](0005-real-fs-to-wasm.md) |
-| [0005](0005-real-fs-to-wasm.md) | Compile real filesystems to WASM; JS emulates the NOR device | Accepted |
-| [0006](0006-emscripten-toolchain.md) | Emscripten as the WASM build toolchain | Accepted |
-| [0007](0007-timing-and-inspect.md) | Simulated flash timing (ESP32-S3) and inspect-driven coloring | Accepted |
-| [0008](0008-live-map-and-background-gc.md) | Per-page liveness via upstream inspect; background-GC modeling | Accepted |
-| [0009](0009-timed-playback-and-pacing.md) | Two-layer playback: instant execution, timed animation, await-pacing | Accepted |
-| [0010](0010-churn-model-in-js.md) | Port the FASTFFS churn model to JS for a target-live steady state | Accepted |
-| [0011](0011-uniform-fs-driver-abi.md) | A uniform FS-driver ABI behind the WASM shim | Accepted |
-| [0012](0012-per-fs-liveness-inspect.md) | Per-FS liveness via native inspect hooks | Accepted |
-| [0013](0013-fixed-wasm-memory.md) | Fixed WASM memory footprint (no `ALLOW_MEMORY_GROWTH`) | Accepted |
-| [0014](0014-console-fs-api.md) | Console FS API — friendly pokes + raw handles over a static pool | Accepted |
-| [0015](0015-session-manager-and-executor-seam.md) | A session abstraction, split from a manager, for the FS picker (and later lockstep) | Accepted |
-| [0016](0016-lockstep-coordinator.md) | A lockstep coordinator drives N sessions off one canonical step sequence | Accepted |
-| [0017](0017-broadcast-operations-focus-the-view.md) | Multi-FS by default — every operation broadcasts through one timeline; the view focuses one FS | Superseded by [0019](0019-atomic-command-broadcast.md) |
-| [0018](0018-console-tape-and-scoreboard.md) | The console tape as journal of truth; the scoreboard shell | Accepted |
-| [0019](0019-atomic-command-broadcast.md) | Broadcast the atomic command, not the op; a local inner API; complete on quiescence | Accepted |
-| [0020](0020-run-pause-gates-stimulus.md) | Run/Pause gates stimulus (the churn generator), not execution; Speed is the sole execution control | Accepted |
-| [0021](0021-per-fs-gc-capability.md) | A filesystem advertises FF_CAP_GC only if its GC is incremental (churn-safe); LittleFS drops it | Accepted |
-| [0022](0022-coalesced-heat-render.md) | Render read/prog op glows as a coalesced per-cell heat field, not per-op animations; never limit the glow to buy frame budget | Accepted |
+Reference another record inline as plain text — `ADR-0015` — not as a markdown link.
 
 ADRs 0001–0004 document the throwaway JS prototype that established the visual language.
-They're kept as history; the live architecture starts at 0005.
+They're kept as history; the live architecture starts at ADR-0005.
