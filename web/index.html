@@ -485,6 +485,49 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 .prompt input::placeholder{color:var(--txt-faint)}
 .prompt .hintk{white-space:nowrap}
 
+/* ============================ about / explainer ============================
+   A small info control by the logo opens a themed <dialog> primer. Everything
+   is theme-driven (panel/line/txt/accent vars), so it recolors with every
+   palette. The native dialog gives Esc-to-close, focus trapping, and focus
+   return for free; JS only wires open + backdrop-click close. */
+.about-btn{flex:none;width:19px;height:19px;margin-left:2px;border-radius:50%;
+  border:1px solid var(--line);background:var(--chrome);color:var(--txt-dim);
+  font-family:"Space Grotesk",system-ui,sans-serif;font-size:12px;font-weight:700;font-style:italic;
+  line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0;transition:.13s}
+.about-btn:hover{border-color:var(--accent);color:var(--accent)}
+.about-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+dialog.about{max-width:640px;width:calc(100% - 40px);max-height:84vh;overflow:auto;padding:0;
+  border:1px solid var(--line);border-radius:12px;color:var(--txt);
+  background:linear-gradient(180deg,var(--panel),var(--panel-2));
+  box-shadow:0 40px 120px -34px #000,0 0 0 1px #ffffff08}
+dialog.about::backdrop{background:rgba(4,7,10,.66)}
+dialog.about[open]{animation:aboutIn .18s ease}
+@keyframes aboutIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.about-head{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:15px 18px;border-bottom:1px solid var(--line-soft);background:var(--panel)}
+.about-head h2{margin:0;font-family:"Space Grotesk",system-ui,sans-serif;font-weight:700;font-size:16px;letter-spacing:.02em;color:var(--txt)}
+.about-head h2 b{color:var(--prog);font-weight:700}
+.about-close{flex:none;width:26px;height:26px;border-radius:6px;border:1px solid var(--line);
+  background:var(--chrome);color:var(--txt-dim);font-size:16px;line-height:1;cursor:pointer;
+  display:inline-flex;align-items:center;justify-content:center;transition:.13s}
+.about-close:hover{border-color:var(--accent);color:var(--accent)}
+.about-close:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.about-body{padding:16px 20px 22px;font-size:12.5px;line-height:1.62;color:var(--txt-dim)}
+.about-sec{margin-top:20px}.about-sec:first-child{margin-top:2px}
+.about-eyebrow{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);margin:0 0 6px}
+.about-sec h3{margin:0 0 8px;font-family:"Space Grotesk",system-ui,sans-serif;font-weight:600;font-size:14.5px;color:var(--txt)}
+.about-body p{margin:0 0 10px}
+.about-body p:last-child{margin-bottom:0}
+.about-body ul{margin:0 0 10px;padding-left:18px}
+.about-body li{margin:5px 0}
+.about-body b{color:var(--txt);font-weight:600}
+.about-body .k{color:var(--accent);font-weight:500}
+.about-body code{font-family:"JetBrains Mono",ui-monospace,monospace;font-size:11.5px;
+  color:var(--txt);background:var(--chrome);border:1px solid var(--line-soft);border-radius:4px;padding:.5px 5px}
+.about-note{margin-top:16px;padding:10px 12px;border:1px solid var(--line-soft);border-radius:8px;
+  background:var(--panel-2);color:var(--txt-faint);font-size:11.5px;line-height:1.55}
+
 @media (max-width:1040px){
   html,body{height:auto}
   body{overflow:auto;min-height:100%}
@@ -502,6 +545,8 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 
 <header class="sig" aria-label="flashvis status and controls">
   <span class="logo">FLASH<b>VIS</b></span>
+  <button class="about-btn" id="aboutBtn" type="button" aria-haspopup="dialog"
+          aria-label="About flashvis and flash filesystems" title="About flashvis">i</button>
   <span class="hdsep">·</span>
   <span class="word">real</span>
   <!-- The set-notation sentence (ADR-0018's scoreboard, restated, A1): the two
@@ -620,4 +665,70 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 <span id="specLive" class="hidden"></span>
 <span id="bootStatus" class="hidden"></span>
 
+<!-- About / explainer panel. A native <dialog> so Esc, focus trapping, and
+     focus-return come for free; about.js wires open + backdrop-click close. -->
+<dialog class="about" id="aboutPanel" aria-labelledby="aboutHeading">
+  <div class="about-head">
+    <h2 id="aboutHeading">About <b>flashvis</b></h2>
+    <button class="about-close" id="aboutClose" type="button" aria-label="Close" title="Close">&times;</button>
+  </div>
+  <div class="about-body">
+    <section class="about-sec">
+      <p><b>flashvis</b> runs real embedded filesystems, compiled to WebAssembly, against a
+      JavaScript emulation of an SPI NOR flash chip. Every read, program, and erase the
+      filesystem issues hits the emulated chip under real NOR rules and lights up the die, so you
+      can watch and compare how filesystems behave on real flash.</p>
+    </section>
+
+    <section class="about-sec">
+      <p class="about-eyebrow">What you are looking at</p>
+      <h3>A small SPI NOR chip</h3>
+      <p>The die is a <b>256 KB</b> NOR region: <b>64 sectors</b> of <b>4 KB</b>, each sector
+      <b>16 pages</b> of <b>256 bytes</b>. NOR has one governing asymmetry.</p>
+      <ul>
+        <li>Programming clears bits from <span class="k">1 to 0</span> at byte granularity. You can
+        keep programming into blank <code>0xFF</code> space without erasing, because writing
+        <code>0xFF</code> clears nothing.</li>
+        <li>To set bits back to <span class="k">1</span> you must <b>erase</b>, and erase only works
+        on a whole <b>4 KB sector</b>. It is the slow, wearing operation.</li>
+      </ul>
+      <p>Each cell on the die is one 256 byte page, and its fill height is the bytes programmed into
+      it. The program granule rounds every write up to a page and pads the rest with
+      <code>0xFF</code>, so small writes leave slack. Appending to a file grows it into that last
+      page's <code>0xFF</code> slack in place, with no erase.</p>
+      <p>Updates never overwrite in place. A filesystem writes a fresh copy and marks the old one
+      <b>obsolete</b>. When free pages run low, garbage collection reclaims a sector: it relocates
+      the live data out, erases the sector, and adds one to that sector's erase count.</p>
+      <p>The timing preset is an <b>ESP32-S3</b>: a 256 byte read takes about <b>0.1 ms</b>,
+      programming a page about <b>1.5 ms</b>, and erasing a sector about <b>21 ms</b>. Erase is by
+      far the most expensive operation, which is why filesystems work so hard to avoid it. The speed
+      control in the header scales this simulated flash time up or down.</p>
+      <p class="about-note">Turn on the wear heatmap to tint each sector by how many times it has
+      been erased. Hotspots pool wherever garbage collection keeps landing.</p>
+    </section>
+
+    <section class="about-sec">
+      <p class="about-eyebrow">How each filesystem copes</p>
+      <h3>FASTFFS and LittleFS</h3>
+      <p>flashvis compares two filesystems today, <b>FASTFFS</b> and <b>LittleFS</b>, with more
+      planned. Both avoid overwriting in place, but they reclaim space differently.</p>
+      <p><b>FASTFFS</b> is log-structured. Its garbage collector is incremental: each step advances
+      the smallest amount of reclamation it can, so it is safe to run a little at a time in the
+      background alongside the workload. That keeps reclaimable garbage low, for a small, steady GC
+      cost. The background GC control in the workload strip sets how much of that reclamation runs;
+      with it on, FASTFFS holds garbage down, so the 50% default can undersell it, and the garbage
+      that remains is compaction it runs under allocation pressure.</p>
+      <p><b>LittleFS</b> is copy-on-write with wear-leveling built in. It folds space reclamation
+      into its writes rather than running a separate collectible pass, so it has no incremental GC
+      step for flashvis to drive. That is why the background GC control does not appear when LittleFS
+      is focused: the control governs the shared workload's GC share, which only a filesystem with
+      incremental GC acts on.</p>
+      <p>This is a primer, not a benchmark. FASTFFS pays a periodic GC cost, LittleFS folds
+      reclamation into its writes, and the die and wear heatmap let you watch each approach play
+      out.</p>
+    </section>
+  </div>
+</dialog>
+
+<script type="module" src="./src/about.js"></script>
 <script type="module" src="./src/playground.js"></script>
