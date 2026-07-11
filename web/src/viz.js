@@ -64,14 +64,18 @@ const HEAT_BLUR_MIN = 10;           // outer-glow blur (px) for a single op (~ol
 const HEAT_BLUR_ADD = 3;           // extra outer-glow blur a full burst adds
 const HEAT_SPREAD_MIN = 1;          // outer-glow spread (px) for a single op (~old PING_KF)
 const HEAT_SPREAD_ADD = 10;          // extra outer-glow spread a full burst adds
-const HEAT_READ_RGB = [99, 230, 255];   // --read cyan
-const HEAT_PROG_RGB = [255, 70, 10];  // --program blue
+// Op-glow base colors are DEFAULTS ONLY; the live values are re-sourced from
+// the active theme's CSS custom properties by resolveTheme() (see createViz),
+// so switching [data-theme] recolors the glow without touching the heat model.
+// The defaults apply when there is no DOM/getComputedStyle (the viz-heat test).
+const DEFAULT_READ_RGB = [99, 230, 255];   // --read (cool scan)
+const DEFAULT_PROG_RGB = [255, 106, 26];   // --program (warm write), unified with the CSS var
 // ---- ring (resting 1px edge) — tied to the SAME heat as the glow, not its own
 // on/off switch, but clamped earlier and capped lower so it stays restrained
 // (an intense glow already covers it; the ring must never look overblown). ----
 const HEAT_RING_KNEE = 0.15;        // heat for the ring's presence curve — clamps much earlier than HEAT_KNEE
 const HEAT_RING_ALPHA_MAX = 0.85;   // ring alpha ceiling, always < 1
-const HEAT_RING_GOLD = [244, 207, 126]; // resting gold edge for a programmed cell; alpha now tracks heat too
+const DEFAULT_RING_HOT = [244, 207, 126]; // resting hot edge under a programmed cell's glow (theme --prog-edge); alpha tracks heat
 // ---- white CORE — a hard, tight, blown-out center added ON TOP of the wide
 // feathered glow once burst nears saturation (a 30k-op flare), so the extreme
 // end reads as an actual blow-out instead of just a wider soft near-white halo.
@@ -85,12 +89,51 @@ const HEAT_CORE_SPREAD = 0.5;       // tiny spread so it reads as a core, not a 
 // per-trigger duration, which is why erase used to flash at a fixed rate.
 // Read/prog glow is no longer keyframed per op — it coalesces into per-cell heat
 // (see glow() + the frame() render pass). Only erase keeps its Element.animate().
-const ERASE_KF = [
-  { boxShadow: '0 0 0 1px #b978ff, 0 0 10px 0 #b978ff', background: '#1b1226' },
-  { boxShadow: '0 0 0 1px #b978ff, 0 0 26px 2px #b978ff', background: '#2c1d3e', offset: 0.08 },
-  { boxShadow: '0 0 0 1px #b978ff, 0 0 18px 1px #b978ff', background: '#241a34', offset: 0.9 },
-  { boxShadow: 'none', background: '#0c141b' },
-];
+const DEFAULT_ERASE_RGB = [185, 120, 255]; // --erase sweep
+const DEFAULT_SECTOR_BG = '#0c141b';       // sector resting background the sweep restores to (theme --sector-bg)
+
+// ---- theme color resolution -------------------------------------------------
+// Parse a CSS color (#rgb / #rrggbb / rgb()/rgba()) to [r,g,b]; null if not
+// parseable. Tiny + dependency-free so it also runs under the test's fake DOM.
+function parseColor(s) {
+  if (!s) return null;
+  s = s.trim();
+  let m = s.match(/^#([0-9a-f]{3})$/i);
+  if (m) return m[1].split('').map((h) => parseInt(h + h, 16));
+  m = s.match(/^#([0-9a-f]{6})$/i);
+  if (m) return [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16));
+  m = s.match(/^rgba?\(([^)]+)\)/i);
+  if (m) { const p = m[1].split(/[ ,/]+/).filter(Boolean).map(parseFloat); return [Math.round(p[0]), Math.round(p[1]), Math.round(p[2])]; }
+  return null;
+}
+// Read a :root CSS custom property, falling back when there is no DOM /
+// getComputedStyle (the viz-heat test's fake DOM) or the value is missing.
+function cssVar(name) {
+  try {
+    const root = typeof document !== 'undefined' && document.documentElement;
+    if (!root || typeof getComputedStyle !== 'function') return '';
+    return getComputedStyle(root).getPropertyValue(name).trim();
+  } catch { return ''; }
+}
+const cssRGB = (name, fallback) => parseColor(cssVar(name)) || fallback;
+const cssStr = (name, fallback) => cssVar(name) || fallback;
+
+// Build the erase-sweep keyframes from the theme's erase color: the glow uses
+// the erase hue; the sector background tints toward it mid-sweep and restores
+// to the sector's resting background. Same shape / offsets / opacity as before —
+// only the source color is theme-driven now.
+const hex2 = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
+const tintHex = (rgb, base, t) => '#' + [0, 1, 2].map((i) => hex2(base[i] + (rgb[i] - base[i]) * t)).join('');
+function buildEraseKF(rgb, sectorBg) {
+  const g = `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+  const base = parseColor(sectorBg) || [12, 20, 27];
+  return [
+    { boxShadow: `0 0 0 1px ${g}, 0 0 10px 0 ${g}`, background: tintHex(rgb, base, 0.16) },
+    { boxShadow: `0 0 0 1px ${g}, 0 0 26px 2px ${g}`, background: tintHex(rgb, base, 0.34), offset: 0.08 },
+    { boxShadow: `0 0 0 1px ${g}, 0 0 18px 1px ${g}`, background: tintHex(rgb, base, 0.26), offset: 0.9 },
+    { boxShadow: 'none', background: sectorBg },
+  ];
+}
 
 export function createViz(device) {
   const { sectorSize, sectorCount, pageSize } = device;
@@ -123,6 +166,20 @@ export function createViz(device) {
   let heat = false, selected = -1, inspectorEl = null, onSelectCb = null;
   let lastMap = null;
   let prep = false;          // setup mode (ADR-0014): suppress animation, drain synchronously
+
+  // Theme-sourced glow colors (re-resolved from the active [data-theme]'s CSS
+  // custom properties on switch, via the exposed refreshTheme()). Defaults apply
+  // when there is no DOM (tests). This re-SOURCES color only — the heat model
+  // (coalescence, desaturate-to-white, ring/bloom split, decay) is unchanged.
+  let readRGB = DEFAULT_READ_RGB, progRGB = DEFAULT_PROG_RGB, ringHot = DEFAULT_RING_HOT;
+  let eraseKF = buildEraseKF(DEFAULT_ERASE_RGB, DEFAULT_SECTOR_BG);
+  function resolveTheme() {
+    readRGB = cssRGB('--read', DEFAULT_READ_RGB);
+    progRGB = cssRGB('--program', DEFAULT_PROG_RGB);
+    ringHot = cssRGB('--prog-edge', DEFAULT_RING_HOT);
+    eraseKF = buildEraseKF(cssRGB('--erase', DEFAULT_ERASE_RGB), cssStr('--sector-bg', DEFAULT_SECTOR_BG));
+  }
+  resolveTheme();
 
   const reduced = matchMedia('(prefers-reduced-motion:reduce)').matches;
   const pageOf = (off) => Math.floor(off / pageSize);
@@ -168,7 +225,7 @@ export function createViz(device) {
     const pres = 1 - Math.exp(-h / HEAT_KNEE);                    // 0..~1, ~0.86 at a single op
     const burst = Math.min(1, Math.log10(1 + h) / HEAT_BURST_LOG_MAX);
     const w = Math.pow(burst, 1.5);                              // whiten with the sum (cyan -> white)
-    const base = glowKind[p] === 1 ? HEAT_READ_RGB : HEAT_PROG_RGB;
+    const base = glowKind[p] === 1 ? readRGB : progRGB;
     const r = Math.round(base[0] + (255 - base[0]) * w);
     const g = Math.round(base[1] + (255 - base[1]) * w);
     const b = Math.round(base[2] + (255 - base[2]) * w);
@@ -180,7 +237,7 @@ export function createViz(device) {
     // Inline overrides the resting CSS ring while hot; cleared to '' on fade above.
     const ringPres = 1 - Math.exp(-h / HEAT_RING_KNEE);
     const ringA = (Math.min(1, ringPres) * HEAT_RING_ALPHA_MAX).toFixed(2);
-    const ringRGB = shown[p] > 0 ? HEAT_RING_GOLD : [r, g, b];    // keep the prog gold edge under a glow
+    const ringRGB = shown[p] > 0 ? ringHot : [r, g, b];    // keep the programmed cell's hot edge under a glow
     cell.style.boxShadow = `inset 0 0 0 1.5px rgba(${ringRGB[0]},${ringRGB[1]},${ringRGB[2]},${ringA})`;
     // Bloom -> .glow layer (z:5, above every border). Hard white core listed FIRST
     // so it paints on top of the wide glow; core is 0 until burst nears saturation.
@@ -200,7 +257,7 @@ export function createViz(device) {
   function sweep(s) {
     const el = sectorEls[s];
     if (reduced || prep || !el.animate) return;
-    el.animate(ERASE_KF, { duration: curAnimMs, easing: 'linear' });
+    el.animate(eraseKF, { duration: curAnimMs, easing: 'linear' });
   }
   function wearColor(w, ref) {
     const t = ref > 0 ? Math.min(1, w / ref) : 0;
@@ -408,6 +465,10 @@ export function createViz(device) {
     /** scale = simulated nanoseconds spent per real millisecond (Infinity ⇒ no delay). */
     setScale(simNsPerRealMs) { scale = simNsPerRealMs; },
     setHeatmap(on, dieEl) { heat = on; dieEl.classList.toggle('heat', on); if (on) refreshHeat(); },
+    /** Re-source the op-glow + erase-sweep colors from the active theme's CSS
+     *  custom properties (called on palette switch). Color only — the heat
+     *  mechanism is untouched; live cells pick up the new hue on the next frame. */
+    refreshTheme() { resolveTheme(); },
     pending() { return queue.length + (cur ? 1 : 0); },
     /** Resolve once the player has finished everything queued up to this point. */
     barrier() { return new Promise((resolve) => queue.push({ op: 'barrier', ns: 0, resolve })); },

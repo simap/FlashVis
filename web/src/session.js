@@ -455,6 +455,9 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     setScale(simNsPerRealMs) { viz.setScale(simNsPerRealMs); },
     setPrep(v) { prepMode = !!v; viz.setPrep(prepMode); },
     setHeatmap(on) { viz.setHeatmap(on, dieEl); },
+    /** Re-source this session's glow colors from the active palette (ADR color
+     *  themes): delegates to viz so a live theme switch recolors the glow. */
+    refreshTheme() { viz.refreshTheme(); },
     attachInspector(el) { viz.attachInspector(el); },
 
     // ---- per-session journal / tape (ADR-0017/0018/0019) ----
