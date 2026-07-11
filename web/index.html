@@ -680,44 +680,46 @@ dialog.about[open]{animation:aboutIn .18s ease}
   <div class="about-body">
     <section class="about-sec">
       <p><span class="wordmark">FLASH<b>VIS</b></span> runs real embedded filesystems, compiled to
-      WebAssembly, against a JavaScript emulation of an SPI NOR flash chip. Every read, program, and
+      WebAssembly, against an emulation of an SPI NOR flash chip. Every read, program, and
       erase lights up the die under real NOR flash rules, so you can watch and compare how
       filesystems behave. It exists to show how
       <a href="https://github.com/simap/FASTFFS" target="_blank" rel="noopener">FASTFFS</a>, a new
-      NOR flash filesystem, works next to established ones like LittleFS.</p>
+      NOR flash filesystem, works next to others like LittleFS.</p>
     </section>
 
     <section class="about-sec">
       <h3>You are looking at a SPI NOR flash chip</h3>
-      <p>The die is <b>256 KB</b> of NOR flash: <b>64 sectors</b> of <b>4 KB</b>, each <b>16 pages</b>
-      of <b>256 bytes</b>. One asymmetry governs NOR flash:</p>
-      <ul>
-        <li>Programming clears bits from <span class="k">1 to 0</span> a byte at a time. You can keep
-        programming into blank <code>0xFF</code> space without erasing, because writing
-        <code>0xFF</code> clears nothing.</li>
-        <li>Setting bits back to <span class="k">1</span> takes an <b>erase</b>, and erase only works
-        on a whole <b>4 KB sector</b>. It is the slow, wearing operation.</li>
-      </ul>
+      <p>The chip die visualization grid shows <b>256 KB</b> of NOR flash: <b>64 sectors</b> of <b>4 KB</b>, each <b>16 pages</b>
+      of <b>256 bytes</b>.</p> 
       <p>Each die cell is one 256 byte page, and its fill height is the bytes programmed. Past that
       physical fill, the die can also tint pages by <b>logical</b> roles the filesystem assigns: live
       versus obsolete (which copy it still treats as current, not a physical byte state) and data
       versus metadata (file bytes versus the filesystem's own bookkeeping). The wear heatmap adds a
       third view, tinting each sector by how many times it has been erased, so you can watch wear pool
       into hotspots.</p>
+      <p>NOR flash has a few peculiarities:</p>
+      <ul>
+        <li>Erased data reads as <code>0xFF</code>.</li>
+        <li>Programming only clears bits from <span class="k">1 to 0</span>, down to a byte at a time. You can keep
+        programming <code>1</code> bits into <code>0s</code> without erasing.</li>
+        <li>Setting bits back to <span class="k">1</span> takes an <b>erase</b>, and erase only works
+        on a whole <b>4 KB sector</b>. It is the slowest operation, and wears out the flash over time.</li>
+      </ul>
       <p>Timing is based on measured performance using an <b>ESP32-S3</b>, and is used both for flash
-      time accounting and relative visual animation speeds: a 256 byte read about <b>0.1 ms</b>, a
-      page program about <b>1.5 ms</b>, a sector erase about <b>21 ms</b>. Erase is by far the
-      costliest, which is why filesystems work to avoid it; the header speed control scales this
-      simulated flash time.</p>
+      time accounting and relative visual animation speeds: a 256 byte read is about <b>0.1 ms</b>, a
+      page program is about <b>1.5 ms</b>, and a sector erase is about <b>21 ms</b>. The speed control scales this
+      simulated flash time so you can watch it in super slomo, or speed it up to see how it behaves over time.</p>
     </section>
 
     <section class="about-sec">
       <h3>Two ways to drive it</h3>
       <p><b>Run</b>, in the header, starts the automated workload generator: it creates, replaces,
-      and deletes files continuously, so you watch steady-state behavior fill the die.</p>
+      and deletes files continuously to a roughly steady state of storage capacity, so you watch the 
+      die under a write heavy load. This is where most of the intersting action happens and where most
+      of the divergent filesystem behavior occurs.</p>
       <p>The console and the poke buttons (<b>write</b>, <b>read</b>, <b>ls</b>, <b>delete</b>,
       <b>gc</b>, <b>format</b>) drive one action at a time, so you can watch a single operation on the
-      die. Type <code>help()</code> for the full command list.</p>
+      die. Or put in a one liner to run a micro-benchmark. Type <code>help()</code> for the full command list.</p>
     </section>
 
     <section class="about-sec">
@@ -727,22 +729,24 @@ dialog.about[open]{animation:aboutIn .18s ease}
       and tracks each one's active flash time: the same work, timed. <b>Most ops in equal time</b>
       (race) lets each filesystem run as fast as it can and counts how far it gets: equal time, more
       work.</p>
+      <p>Switching modes will cause them to catch up using the new mode.</p>
     </section>
 
     <section class="about-sec">
       <h3>How FASTFFS and LittleFS cope</h3>
       <p><span class="wordmark">FLASH<b>VIS</b></span> compares two filesystems today, <b>FASTFFS</b>
-      and <b>LittleFS</b>, with more planned. Both are copy-on-write: they never overwrite in place but
-      write a fresh copy and mark the old one <b>obsolete</b>. Reclaiming that freed space means
-      relocating what is still live and erasing the sector, the operation that wears the flash, and
-      the two do it differently.</p>
-      <p><b>FASTFFS</b> commits each change with an append-only index record. Its garbage collector is
-      incremental, reclaiming in small background steps that keep garbage low for a small, steady
-      cost; the background GC control sets how much runs, so with it on the 50% default can undersell
-      it. What is left, it reclaims inline when free space runs tight.</p>
+      and <b>LittleFS</b>, with more planned.</p>
+      <p><b>FASTFFS</b> commits each change with an append-only index record. New data is written first,
+        then committed to the index with a small record (4 bytes). Its garbage collector is
+      incremental, reclaiming in small cheap background steps that keep garbage low for a small, steady
+      cost. The background GC control sets how often this runs during the automatic workload, but 
+      typically this would happen in the background while the application using FASTFFS is idle.
+      It will still reclaim inline when free (erased, usable) space runs tight. It has dynamic 
+      wear-leveling through two round-robin cursors: one for GC and one for alloc.</p>
       <p><b>LittleFS</b> is copy-on-write with dynamic wear-leveling, and reclaims space as part of
-      its writes rather than in a separate pass. It has no incremental GC step to drive, so the
-      background GC control does not appear when LittleFS is focused.</p>
+      its writes rather than in a background operation. It has no incremental GC step to drive, so the
+      background GC control does not appear when LittleFS is focused. It does have a GC function, but 
+      it does not reclaim space and is very expensive, so it is not used here out of fairness.</p>
       <p>The two filesystem cards in the header switch the view: click one to focus its die and
       compare the same workload on each.</p>
     </section>
