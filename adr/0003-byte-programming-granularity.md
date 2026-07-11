@@ -2,54 +2,26 @@
 
 - **Status:** Superseded by [ADR-0005](0005-real-fs-to-wasm.md)
 - **Date:** 2026-07-07
-- **Deciders:** Ben
+- **Deciders:** —
 
-> Superseded for the *filesystem* model, but the NOR device semantics decided here —
-> byte-granular program that only clears 1→0, configurable program alignment, 0xFF padding —
-> carry forward into the JS device emulator and will get their own device-semantics ADR.
+> Superseded for the *filesystem* model, but the NOR device semantics decided here carry forward
+> into the JS device emulator.
 
-## Context
+## Carried forward (still live in `device.js`)
 
-Most NOR parts (and the devices FASTFFS targets) can **program a single byte**, and can keep
-programming *more* bytes into a region that is still `0xFF` without erasing it first — because
-programming only ever clears `1 → 0`, and writing `0xFF` clears nothing, so unwritten bytes
-are undisturbed. The minimum program granule is often configurable (align writes to 1, 4, 16…
-bytes); anything short of the granule is padded with `0xFF`, which preserves whatever was —
-or wasn't — already there.
+NOR parts program a **single byte**, and can keep programming more bytes into a region still at
+`0xFF` without erasing first, because programming only clears `1 → 0` and writing `0xFF` clears
+nothing. This is NOR's distinctive capability: partial-page, append-in-place programming. The
+256 B page stays the visual quantum, rendered as a fractional fill (`used ÷ 256`) with the `0xFF`
+remainder shown as erased slack.
 
-The first cut of the visualizer treated a 256 B page as the atomic program unit. That is a
-NAND-shaped simplification and hides NOR's most distinctive capability: partial-page,
-append-in-place programming.
+## Prototype-only (not in the build)
 
-## Decision
+- A **configurable program granule** `G ∈ {1, 4, 16, 64, 256}` bytes (writes rounded up to a
+  multiple of `G`, padded with `0xFF`) and its padding-waste metric were prototype tunables. The
+  program-granule UI control was later **dropped** ([ADR-0018](0018-console-tape-and-scoreboard.md)).
+- Records were page-aligned per file (finest *invalidation* unit = page, finest *program* unit =
+  byte), a simplification of the fake FS; the real driver owns record layout now.
 
-We will track programming **in bytes** while keeping the 256 B page as the visual quantum:
-
-- Each page carries a **used-bytes** count (`0…256`); a cell renders a **fractional fill**
-  equal to `used ÷ 256`. The unfilled remainder is `0xFF` slack, shown as erased substrate.
-- A **program granule** `G ∈ {1, 4, 16, 64, 256}` bytes is user-selectable. Every write rounds
-  its byte length up to a multiple of `G`, and the pad is `0xFF`.
-- An **append-in-place** operation grows a file by programming more bytes into its last page's
-  `0xFF` remainder — **no erase, no new page** — until the page fills, then it spills to a new
-  page at the frontier. This is drawn as the fill rising within the existing cell.
-- A **padding-waste** metric surfaces internal fragmentation: `1 − liveData ÷ reservedPageBytes`.
-  It climbs as `G` grows or as many small records are stored.
-
-## Consequences
-
-- The demo can now *show* byte programming: partial cells, `0xFF` slack, and growth-without-erase.
-- Raising the granule visibly wastes space — the intended lesson about alignment cost.
-- Write amplification and waste are computed in bytes, which is the honest unit.
-- **Simplification we accept:** records are page-aligned per file (see
-  [ADR-0004](0004-gc-wear-and-endurance.md)); we do not pack multiple files' bytes into one
-  page. So the finest *invalidation* unit remains the page even though the finest *program*
-  unit is a byte. This keeps single-owner pages (simple GC, simple rendering) while still
-  demonstrating byte-granular programming within a page. If we later want to show record
-  packing and byte-level tombstoning, that is a new ADR.
-
-## Alternatives considered
-
-- **Fully byte-addressed log with multi-file page packing.** More faithful to how a real log
-  packs records, but partial-stale-within-a-page rendering and a byte-range allocator are a
-  large jump in complexity for the current teaching goal. Deferred, not rejected.
-- **Keep page-atomic programming.** Rejected: it misrepresents NOR, per the context above.
+*A fully byte-addressed log with multi-file page packing was deferred, not rejected: more faithful,
+but partial-stale-within-a-page rendering and a byte-range allocator were too large a jump then.*
