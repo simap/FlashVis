@@ -704,9 +704,11 @@ dialog.about[open]{animation:aboutIn .18s ease}
       versus metadata (file bytes versus the filesystem's own bookkeeping). The wear heatmap adds a
       third view, tinting each sector by how many times it has been erased, so you can watch wear pool
       into hotspots.</p>
-      <p>Timing is an <b>ESP32-S3</b> preset: a 256 byte read about <b>0.1 ms</b>, a page program
-      about <b>1.5 ms</b>, a sector erase about <b>21 ms</b>. Erase is by far the costliest, which is
-      why filesystems work to avoid it; the header speed control scales this simulated flash time.</p>
+      <p>Timing is based on measured performance using an <b>ESP32-S3</b>, and is used both for flash
+      time accounting and relative visual animation speeds: a 256 byte read about <b>0.1 ms</b>, a
+      page program about <b>1.5 ms</b>, a sector erase about <b>21 ms</b>. Erase is by far the
+      costliest, which is why filesystems work to avoid it; the header speed control scales this
+      simulated flash time.</p>
     </section>
 
     <section class="about-sec">
