@@ -486,15 +486,27 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
   // cheap waitStates(). ----
   function isWaiting(s) {
     if (mode === 'race') {
-      // Race: it has a next op to run AND its simNs has caught the shared raceClock,
-      // so the op can't dispatch until the clock advances. `simNs >= raceClock` is
-      // the CLOCK reason (paused). The pure animation-backlog reason (`simNs <
-      // raceClock` but `pending() >= BACKLOG_CAP`, i.e. animation catching up) is
-      // still-active and is excluded automatically by requiring simNs >= raceClock.
-      // hasWork: a queued step, or `running` (the producer will extend the frontier)
-      // — false at an idle frontier and when stopped with nothing queued.
+      // NB: `busy` (a command in flight) is NOT "running" — a Race command holds
+      // `busy` for its whole life, INCLUDING while its next op is parked at the race
+      // gate waiting for the clock (that is genuinely waiting). So we never key off
+      // busy; the clock + animation test below is the real discriminator.
+      // hasWork: a queued step, or `running` (the producer will extend the
+      // frontier) — false at an idle frontier and when stopped with nothing queued.
       const hasWork = (cursors.get(s) ?? 0) < sequence.length || running;
-      return hasWork && s.device.stats.simNs >= raceClock;
+      if (!hasWork) return false;
+      // Gate open (simNs < raceClock): the op can dispatch right now — not paused.
+      if (s.device.stats.simNs < raceClock) return false;
+      // Still animating a dispatched op — RUNNING, not paused. Race advances each
+      // session synchronously up to the clock every tick, so the FS actively RACING
+      // sits at/above the clock at rest while the op it just dispatched drains its
+      // animation; without this it would read waiting for the whole race and the CS
+      // pin would stay dark. This is exactly [14]'s Pace rule ("still animating never
+      // reads as waiting") extended to Race. A genuinely clock-blocked FS reads
+      // waiting once its last op's animation drains to quiescence (pending() === 0).
+      if (s.pending() > 0) return false;
+      // Quiescent AND caught the shared clock: the next op can't dispatch until the
+      // clock advances — the CLOCK reason (paused).
+      return true;
     }
     // Pace: this session resolved its own barrier()/phaser for the round while a
     // peer has not (paceWaiting). A session still executing or draining its op's

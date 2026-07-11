@@ -761,6 +761,40 @@ async function scenarioWaitingNotWhileAnimating() {
   else ok('no actively-animating session ever read waiting (execution/animation is not paused)');
 }
 
+// ---- Scenario 15 (KEY REGRESSION, RACE): `waiting` is FALSE while a RACE op
+// executes / animates ----
+// The Race analog of [14]. In Race each session runs SYNCHRONOUSLY up to the
+// shared clock every tick (raceTick's while-loop advances a session until its
+// simNs catches raceClock), so AT REST between ticks its simNs sits at/above
+// raceClock while the ops it just dispatched are still animating (pending() > 0).
+// The Race waiting gate looked only at `hasWork && simNs >= raceClock` - so it
+// reported that RUNNING/animating state as waiting=true. Symptom the user hit in
+// Race: a busy FS card reads "waiting" and the CS pin (lit when NOT waiting) is
+// dark for the whole race. Assert the INVARIANT: any session actively animating
+// (pending() > 0) reads waiting=FALSE, every frame, in Race. Mutation (drop the
+// busy/pending running-guard) -> this FAILs.
+async function scenarioWaitingNotWhileAnimatingRace() {
+  console.log('\n[15] waiting is FALSE while a RACE op executes / animates (a running FS is not paused)');
+  const rig = await makeRig({ speed: PACE_WAIT_SPEED });
+  rig.coord.setMode('race');
+  rig.coord.start();
+  let sawAnimating = false, bug = false, bugWho = '';
+  for (let t = 0; t < 900; t++) {
+    tickOnce(rig.dom); await flushMacro();
+    const ws = rig.coord.waitStates();
+    for (const s of rig.sessions) {
+      if (s.pending() > 0) {                          // actively animating a dispatched op (simNs at/above the clock)
+        sawAnimating = true;
+        if (ws[s.fsId]) { bug = true; bugWho = s.fsId; }
+      }
+    }
+  }
+  if (!sawAnimating) fail('[15] never observed a Race session animating (test did not exercise the drain path)');
+  else ok('exercised many Race op-animation drains (pending() > 0 while simNs at/above the clock)');
+  if (bug) fail(`[15] a session (${bugWho}) read waiting WHILE actively animating a Race op - a running FS misreported as paused`);
+  else ok('no actively-animating Race session ever read waiting (execution/animation is not paused)');
+}
+
 // ---- run all ----
 console.log('lockstep concurrency / no-double-execution suite (real coordinator + real WASM)\n');
 console.log('[0] exactly-once reference for a single gated command');
@@ -780,6 +814,7 @@ await scenarioPaceHolding();
 await scenarioWaitingRace();
 await scenarioWaitingPacePeer();
 await scenarioWaitingNotWhileAnimating();
+await scenarioWaitingNotWhileAnimatingRace();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
