@@ -499,6 +499,26 @@ async function boot() {
   // whole line as ONE atomic command (ADR-0019). History persisted like before. ----
   const HKEY = 'flashvis.console.history', HMAX = 20;
   const store = typeof window !== 'undefined' ? window.localStorage : null;
+
+  // ---- palette switcher (color themes): flip [data-theme] on :root and every
+  // session re-sources its op-glow + erase colors, so the LIVE heat recolors too
+  // (not just the static state fills). The legend chips and the switcher's own
+  // preview dots read the theme vars directly, so they re-skin for free. The
+  // choice is persisted, so a reload keeps the chosen palette. ----
+  const THEME_KEY = 'flashvis.theme';
+  const THEMES = ['aurora', 'ember', 'uv', 'phosphor', 'deepsea', 'blueprint'];
+  const themeSel = $('theme');
+  const applyTheme = (t) => {
+    if (!THEMES.includes(t)) t = 'aurora';
+    document.documentElement.dataset.theme = t;
+    if (themeSel) themeSel.value = t;
+    try { store?.setItem(THEME_KEY, t); } catch { /* no storage / private mode */ }
+    for (const s of sessions.values()) s.refreshTheme?.();
+  };
+  let savedTheme = 'aurora';
+  try { savedTheme = store?.getItem(THEME_KEY) || 'aurora'; } catch { /* ignore */ }
+  applyTheme(savedTheme);
+  themeSel?.addEventListener('change', (e) => applyTheme(e.target.value));
   const loadHist = () => { try { const h = JSON.parse(store.getItem(HKEY)); return Array.isArray(h) ? h : []; } catch { return []; } };
   const saveHist = () => { try { store.setItem(HKEY, JSON.stringify(cmdHist)); } catch { /* no storage / private mode */ } };
   let cmdHist = store ? loadHist() : [];
