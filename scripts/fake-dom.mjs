@@ -98,6 +98,10 @@ export function installFakeDom() {
   set('document', {
     getElementById: getEl,
     createElement: (tag) => new FakeEl(tag, byId),
+    // Real documents always have a root element; the palette switcher sets
+    // [data-theme] on it. No getComputedStyle here, so viz.js falls back to its
+    // default glow colors (the theme resolution is guarded for exactly this).
+    documentElement: new FakeEl('html', byId),
   });
   set('matchMedia', () => ({ matches: false, addEventListener() {}, addListener() {} }));
   set('requestAnimationFrame', (cb) => { rafQueue.push(cb); return rafQueue.length; });
