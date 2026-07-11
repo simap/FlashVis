@@ -711,19 +711,21 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <p class="about-eyebrow">How each filesystem copes</p>
       <h3>FASTFFS and LittleFS</h3>
       <p>flashvis compares two filesystems today, <b>FASTFFS</b> and <b>LittleFS</b>, with more
-      planned. Both avoid overwriting in place, but they reclaim space differently.</p>
-      <p><b>FASTFFS</b> is log-structured. Its garbage collector is incremental: each step advances
-      the smallest amount of reclamation it can, so it is safe to run a little at a time in the
-      background alongside the workload. That keeps reclaimable garbage low, for a small, steady GC
-      cost. The background GC control in the workload strip sets how much of that reclamation runs;
-      with it on, FASTFFS holds garbage down, so the 50% default can undersell it, and the garbage
-      that remains is compaction it runs under allocation pressure.</p>
-      <p><b>LittleFS</b> is copy-on-write with wear-leveling built in. It folds space reclamation
-      into its writes rather than running a separate collectible pass, so it has no incremental GC
-      step for flashvis to drive. That is why the background GC control does not appear when LittleFS
-      is focused: the control governs the shared workload's GC share, which only a filesystem with
-      incremental GC acts on.</p>
-      <p>This is a primer, not a benchmark. FASTFFS pays a periodic GC cost, LittleFS folds
+      planned. Both write copy-on-write and never overwrite in place, but they reclaim the freed
+      space differently.</p>
+      <p><b>FASTFFS</b> writes file data copy-on-write and commits each change with an append-only
+      index record, leaving old versions as obsolete data to reclaim later. Its garbage collector is
+      incremental, so it runs opportunistically in small steps in the background between file
+      operations, which keeps reclaimable garbage low for a small, steady cost. The background GC
+      control in the workload strip sets how much of that runs; with it on, FASTFFS holds garbage
+      down, so the 50% default can undersell it, and what remains is reclaimed inline when free space
+      runs tight.</p>
+      <p><b>LittleFS</b> is also copy-on-write, with dynamic wear-leveling built in, but it reclaims
+      space as part of its writes rather than in a separate collectible pass, so it has no
+      incremental GC step for flashvis to drive. That is why the background GC control does not appear
+      when LittleFS is focused: the control governs the shared workload's GC share, which only a
+      filesystem with incremental GC acts on.</p>
+      <p>This is a primer, not a benchmark. FASTFFS pays a periodic GC cost while LittleFS folds
       reclamation into its writes, and the die and wear heatmap let you watch each approach play
       out.</p>
     </section>
