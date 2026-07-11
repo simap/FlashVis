@@ -119,9 +119,9 @@ export async function createSession(fsId, { geometry, container, name }) {
       const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
       set('sFiles', String(files.size));
       set('fSim', fmtMs(device.stats.simNs));
-      set('sAmp', '1.0×'); set('fAmp', '1.0×');
+      set('sAmp', '1.0×');
       set('fProg', '0%'); set('fFree', String(geometry.sectorCount * (geometry.sectorSize / geometry.pageSize)));
-      set('sErase', String(device.stats.erases)); set('fErase', String(device.stats.erases));
+      set('sErase', String(device.stats.erases));
       set('sRead', String(device.stats.reads)); set('sWear', '0');
       const bytes = [...files.values()].reduce((a, b) => a + b, 0);
       set('sBytes', (bytes / 1024).toFixed(1) + ' KB');
@@ -156,6 +156,23 @@ export function createLockstep({ churn, gcRatio = 0.5 } = {}) {
   const raceRate = new Map();   // artificial per-session divergence, for exercising Race/behind
   let tick = 0;
 
+  // Per-FS EMA ops/sec (A8) — a lightweight stand-in for the real backend's
+  // metric, just enough for the UI to have a plausible, moving number to
+  // render a bar against. One "op" = one drained sequence entry (churn step,
+  // gc, or command) — not a byte-exact op count, this is a stub.
+  const opsEma = new Map();
+  const lastOpAt = new Map();
+  function recordOp(session) {
+    const now = Date.now();
+    const last = lastOpAt.get(session);
+    lastOpAt.set(session, now);
+    if (last === undefined) return;
+    const dtSec = Math.max(1, now - last) / 1000;
+    const inst = 1 / dtSec;
+    const prev = opsEma.get(session) ?? inst;
+    opsEma.set(session, prev + 0.3 * (inst - prev));
+  }
+
   function genChurnStep() {
     if (Math.random() < ratio) return { kind: 'gc' };
     let ev;
@@ -168,6 +185,7 @@ export function createLockstep({ churn, gcRatio = 0.5 } = {}) {
 
   async function runOn(session, index) {
     const entry = sequence[index];
+    recordOp(session);
     if (entry.kind === 'gc') return session.runGcStep();
     if (entry.kind === 'event') return session.runChurnEvent(entry.ev);
     let je = entry.journalEntries.get(session);
@@ -197,6 +215,16 @@ export function createLockstep({ churn, gcRatio = 0.5 } = {}) {
     if (mode === 'pace') { paceStep(); }
     else { for (const s of sessions) if (tick % (raceRate.get(s) ?? 1) === 0) advance(s); }
   }, 4);
+
+  // Stub approximation of the real coordinator's `waiting` (no real race clock):
+  // in Pace, a session whose cursor leads the shared min is parked waiting on the
+  // laggard. Keeps dom-smoke green without modelling the clock/barrier gate.
+  const stubWaiting = (s) => {
+    if (mode !== 'pace') return false;
+    const cs = sessions.map((x) => cursors.get(x) ?? 0);
+    const minCursor = cs.length ? Math.min(...cs) : 0;
+    return (cursors.get(s) ?? 0) > minCursor;
+  };
 
   return {
     setSessions(list) {
@@ -244,10 +272,30 @@ export function createLockstep({ churn, gcRatio = 0.5 } = {}) {
       return { entries, gap, behind: maxOther > c };
     },
     snapshots() {
+      // Pace "holding" (A8): a session that has run ahead of the slowest
+      // participant's cursor is parked at the frontier waiting on it — the
+      // real coordinator's phaser/join does this structurally; here it falls
+      // straight out of paceStep() only ever advancing sessions AT the min
+      // cursor, so "ahead of min, in pace mode" is exactly "holding".
+      const cursorVals = sessions.map((s) => cursors.get(s) ?? 0);
+      const minCursor = cursorVals.length ? Math.min(...cursorVals) : 0;
       return sessions.map((s) => ({
         fsId: s.fsId, name: s.name, stepCursor: cursors.get(s) ?? 0, simNs: s.device.stats.simNs,
         wa: 1 + (s.device.stats.programBytes || 0) / 1e6, files: s._files.size, garbagePct: 0,
+        opsPerSec: opsEma.get(s) ?? 0,
+        holding: mode === 'pace' && (cursors.get(s) ?? 0) > minCursor,
+        stalled: false, // the stub does not model a diverged race clock
+        waiting: stubWaiting(s), // instantaneous "sim paused"; stub-approximated (no real race clock)
       }));
+    },
+    /** Cheap per-fsId `waiting` map, mirroring the real coordinator's waitStates()
+     *  (no fsinfo/liveness). The stub has no real race clock, so it approximates:
+     *  in Pace, a session whose cursor LEADS the shared min is parked waiting on
+     *  the laggard. Simple and non-breaking; the real signal lives in lockstep.js. */
+    waitStates() {
+      const out = {};
+      for (const s of sessions) out[s.fsId] = stubWaiting(s);
+      return out;
     },
   };
 }
