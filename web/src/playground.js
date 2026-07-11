@@ -474,6 +474,7 @@ async function boot() {
   $('btnRun').addEventListener('click', () => setRunning(!coordinator.running));
   $('btnStep').addEventListener('click', () => coordinator.step());
   $('btnWrite').addEventListener('click', () => injectCommand('writeFile()'));
+  $('btnRead').addEventListener('click', () => injectCommand('readFile()'));
   $('btnLs').addEventListener('click', () => injectCommand('ls()'));
   $('btnDelete').addEventListener('click', () => injectCommand('deleteFile()'));
   $('btnGC').addEventListener('click', () => injectCommand('gc()'));
