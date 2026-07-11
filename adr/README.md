@@ -38,6 +38,7 @@ new ADR that supersedes it, so the trail of *why it changed* survives.
 | [0018](0018-console-tape-and-scoreboard.md) | The console tape as journal of truth; the scoreboard shell | Accepted |
 | [0019](0019-atomic-command-broadcast.md) | Broadcast the atomic command, not the op; a local inner API; complete on quiescence | Accepted |
 | [0020](0020-run-pause-gates-stimulus.md) | Run/Pause gates stimulus (the churn generator), not execution; Speed is the sole execution control | Accepted |
+| [0021](0021-per-fs-gc-capability.md) | A filesystem advertises FF_CAP_GC only if its GC is incremental (churn-safe); LittleFS drops it | Accepted |
 
 ADRs 0001–0004 document the throwaway JS prototype that established the visual language.
 They're kept as history; the live architecture starts at 0005.

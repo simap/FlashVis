@@ -366,11 +366,20 @@ void ff_dir_close(int h) {
     dir_used[h] = 0;
 }
 
-/* Run one round of littlefs janitorial work (mkconsistent + metadata compact
- * + populate the allocator). Returns 0 (nothing needed / done) or negative
- * error, mirroring lfs_fs_gc directly. */
+/* No-op: littlefs does NOT model a GC step (GC capability is off; see ff_caps).
+ * Its native lfs_fs_gc() is, per upstream, an idle-loop hint ("Calling lfs_fs_gc
+ * in your idle loop should move high latency tasks there as much as is currently
+ * possible"), and crucially it is NOT incremental: with no progress guard, every
+ * call redoes the whole mkconsistent + metadata-compact + allocator scan, burning
+ * hundreds of ms and thousands of reads each time, doing the same work over and
+ * over. FASTFFS's gc, by contrast, is a state machine that makes the smallest
+ * unit of progress per call, which is why churning it at ~gcRatio speeds FASTFFS
+ * up; doing the same to lfs_fs_gc just repeats one expensive scan. littlefs is
+ * copy-on-write and reclaims space inline during writes anyway, so there is no GC
+ * pass to model. The ABI symbol stays for uniformity but does nothing, and the
+ * runner also gates on FF_CAP_GC so it is never called. */
 int ff_gc_step(void) {
-    return lfs_fs_gc(&g_lfs);
+    return 0;
 }
 
 /* Recursive silent walk from "/", counting REG files and summing their sizes.
@@ -414,16 +423,18 @@ static struct walk_acc committed_walk(void) {
 uint32_t ff_committed_files(void) { return committed_walk().files; }
 uint32_t ff_committed_bytes(void) { return committed_walk().bytes; }
 
-/* ADR-0011: shim identity/capability discovery. Phase 1 does not export
- * ff_sector_classes or ff_live_map (Phase 2 territory), so LIVE_MAP and
- * SECTOR_CLASSES stay clear here; littlefs's native lfs_fs_gc and append
- * support are real, hence GC|APPEND. */
+/* ADR-0011: shim identity/capability discovery. */
 #define FF_CAP_GC              (1u << 0)
 #define FF_CAP_SECTOR_CLASSES  (1u << 1)
 #define FF_CAP_LIVE_MAP        (1u << 2)
 #define FF_CAP_APPEND          (1u << 3)
 
 uint32_t ff_abi_version(void) { return 1; }
-/* LIVE_MAP is on: the native liveness hook lives in lfs_inspect.c (ADR-0012).
- * SECTOR_CLASSES stays off — the per-page live map is the driver's coloring. */
-uint32_t ff_caps(void) { return FF_CAP_GC | FF_CAP_APPEND | FF_CAP_LIVE_MAP; }
+/* APPEND|LIVE_MAP. GC is deliberately OFF: littlefs is copy-on-write with no
+ * log-structured GC pass to model as a churn step, and its lfs_fs_gc() is a
+ * non-incremental idle-loop hint (see ff_gc_step) that repeats a full expensive
+ * scan on every call, so advertising GC here made the churn model burn hundreds
+ * of ms and thousands of reads every gc step. LIVE_MAP is on via the native hook
+ * in lfs_inspect.c (ADR-0012); SECTOR_CLASSES stays off, since the per-page live
+ * map is the driver's coloring. */
+uint32_t ff_caps(void) { return FF_CAP_APPEND | FF_CAP_LIVE_MAP; }
