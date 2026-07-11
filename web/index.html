@@ -33,8 +33,11 @@
      from EVERY state it can sit on — by hue where possible, by lightness +
      saturation where the families are close (read-over-live, program-over-live).
      See the per-theme overlay notes. viz.js re-sources --read/--program/--erase/
-     --prog-edge/--sector-bg for the live glow. Aurora is the :root default so the
-     page renders fully themed before JS runs.
+     --mix/--prog-edge/--sector-bg for the live glow. --mix is the DESIGNED color a
+     cell glows when a read and a program overlap it (both heat channels present) —
+     a natural fusion of the two, never the muddy read↔program midpoint; the render
+     pulls toward it by how co-present the two ops are. Aurora is the :root default
+     so the page renders fully themed before JS runs.
 
      DISTINCTIVENESS: the four state fills are meant to be unmistakably their OWN
      color at a glance, so coherence is carried by the ambient/substrate + one
@@ -50,7 +53,7 @@
   --erased:#132029; --erased-edge:#2b4a57;
   --prog:#f2b23a; --prog-edge:#ffd472;
   --stale:#5c646d; --stale-edge:#7c848d; --index:#3fa0e0;
-  --read:#4de3ff; --program:#ff6a1a; --erase:#b06bff;
+  --read:#4de3ff; --program:#ff6a1a; --erase:#b06bff; --mix:#3dffb0;
   --accent:#45d6c0; --accent-dim:#2f5d57; --hold:#f2b23a;
   --sector-bg:#0c1013;
   /* cells at a glance: dark slate / saturated gold / ash blue-grey / vivid sky-blue.
@@ -68,7 +71,7 @@
   --erased:#1c1a1e; --erased-edge:#3a342e;
   --prog:#ffc21f; --prog-edge:#ffe07a;
   --stale:#625049; --stale-edge:#83695f; --index:#3a6bff;
-  --read:#2fd6ff; --program:#ff3b1e; --erase:#ff3d7a;
+  --read:#2fd6ff; --program:#ff3b1e; --erase:#ff3d7a; --mix:#b6f03a;
   --accent:#ff7a4d; --accent-dim:#7a3316; --hold:#ffc21f;
   --sector-bg:#14100e;
   /* cells at a glance: basalt grey / sulfur gold / warm ash-brown / cobalt blue.
@@ -85,7 +88,7 @@
   --erased:#111427; --erased-edge:#2b3160;
   --prog:#b25cf0; --prog-edge:#d69cff;
   --stale:#55506a; --stale-edge:#726c88; --index:#2fd6cf;
-  --read:#5aa6ff; --program:#ff3d9e; --erase:#a6ff45;
+  --read:#5aa6ff; --program:#ff3d9e; --erase:#a6ff45; --mix:#7d6bff;
   --accent:#5aa6ff; --accent-dim:#2f4d78; --hold:#b25cf0;
   --sector-bg:#0b0d18;
   /* cells at a glance: dark indigo / vivid orchid / violet-grey ash / vivid teal.
@@ -104,7 +107,7 @@
   --erased:#0e150e; --erased-edge:#244020;
   --prog:#6ce02f; --prog-edge:#a6ff6b;
   --stale:#4a5540; --stale-edge:#626e54; --index:#2fd6d0;
-  --read:#4dff88; --program:#ffb52e; --erase:#ff4130;
+  --read:#4dff88; --program:#ffb52e; --erase:#ff4130; --mix:#d6ff4d;
   --accent:#4dff88; --accent-dim:#2a6b45; --hold:#ffb52e;
   --sector-bg:#0a0f0a;
   /* multi-phosphor, not one green: vivid green live / cyan metadata / dim grey-green
@@ -122,7 +125,7 @@
   --erased:#0d1a20; --erased-edge:#21455a;
   --prog:#ff7a52; --prog-edge:#ffa583;
   --stale:#47565a; --stale-edge:#63757a; --index:#2f9fe0;
-  --read:#2ff0c8; --program:#ff9a2e; --erase:#ff4db0;
+  --read:#2ff0c8; --program:#ff9a2e; --erase:#ff4db0; --mix:#8ff05a;
   --accent:#2ff0c8; --accent-dim:#245f56; --hold:#ff7a52;
   --sector-bg:#0a141a;
   /* cells at a glance: deep trench-blue / vivid coral / slate-teal ash / water-blue.
@@ -139,7 +142,7 @@
   --erased:#0e1a2a; --erased-edge:#24466b;
   --prog:#2f9fe0; --prog-edge:#6cc4f0;
   --stale:#46565f; --stale-edge:#61737d; --index:#f5b135;
-  --read:#d6ecff; --program:#ff7a33; --erase:#ff3b52;
+  --read:#d6ecff; --program:#ff7a33; --erase:#ff3b52; --mix:#ffc79e;
   --accent:#2f9fe0; --accent-dim:#2c5f7e; --hold:#ff7a33;
   --sector-bg:#09131f;
   /* cells at a glance: dark ink-blue / vivid blueprint-cyan / slate ash / vivid amber.

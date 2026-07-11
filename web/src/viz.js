@@ -90,7 +90,11 @@ const HEAT_CORE_SPREAD = 0.5;       // tiny spread so it reads as a core, not a 
 // Read/prog glow is no longer keyframed per op — it coalesces into per-cell heat
 // (see glow() + the frame() render pass). Only erase keeps its Element.animate().
 const DEFAULT_ERASE_RGB = [185, 120, 255]; // --erase sweep
+const DEFAULT_MIX_RGB = [61, 255, 176];    // --mix: the designed read+program overlap color (Aurora mint)
 const DEFAULT_SECTOR_BG = '#0c141b';       // sector resting background the sweep restores to (theme --sector-bg)
+
+// Component-wise linear interpolation between two [r,g,b] at t (0..1).
+const lerp3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 
 // ---- theme color resolution -------------------------------------------------
 // Parse a CSS color (#rgb / #rrggbb / rgb()/rgba()) to [r,g,b]; null if not
@@ -149,13 +153,17 @@ export function createViz(device) {
                                         // appended AFTER .fillwrap so it paints ABOVE .fill
   const sectorEls = new Array(sectorCount);
 
-  // Read/prog glow "heat" (coalescence — see HEAT_* tunables above). `glowHeat`
-  // is the additive intensity per cell, `glowKind` the palette (1 = read, 2 =
-  // prog), `glowHot` the small set of cells with live heat the frame() loop
-  // decays + renders, so a burst of thousands of reads is one summed glow per
-  // cell, not thousands of stacked Element.animate() objects.
-  const glowHeat = new Float32Array(npages);
-  const glowKind = new Uint8Array(npages);
+  // Read/prog glow "heat" (coalescence — see HEAT_* tunables above). TWO
+  // additive channels per cell, `readHeat` and `progHeat`, so a read and a
+  // program landing on the SAME cell BLEND instead of one overwriting the other
+  // (the old single-channel glowKind let the last op win the whole cell). Total
+  // heat `readHeat[p] + progHeat[p]` drives all the intensity math unchanged;
+  // the two channels only decide the COLOR (see drawHeat's blend toward the
+  // theme --mix). `glowHot` is still the small set of cells with live heat the
+  // frame() loop decays + renders — a burst of thousands of ops is still one
+  // summed glow per cell, O(active cells)/frame, never a per-op animate().
+  const readHeat = new Float32Array(npages);
+  const progHeat = new Float32Array(npages);
   const glowHot = new Set();
 
   const queue = [];
@@ -171,12 +179,13 @@ export function createViz(device) {
   // custom properties on switch, via the exposed refreshTheme()). Defaults apply
   // when there is no DOM (tests). This re-SOURCES color only — the heat model
   // (coalescence, desaturate-to-white, ring/bloom split, decay) is unchanged.
-  let readRGB = DEFAULT_READ_RGB, progRGB = DEFAULT_PROG_RGB, ringHot = DEFAULT_RING_HOT;
+  let readRGB = DEFAULT_READ_RGB, progRGB = DEFAULT_PROG_RGB, ringHot = DEFAULT_RING_HOT, mixRGB = DEFAULT_MIX_RGB;
   let eraseKF = buildEraseKF(DEFAULT_ERASE_RGB, DEFAULT_SECTOR_BG);
   function resolveTheme() {
     readRGB = cssRGB('--read', DEFAULT_READ_RGB);
     progRGB = cssRGB('--program', DEFAULT_PROG_RGB);
     ringHot = cssRGB('--prog-edge', DEFAULT_RING_HOT);
+    mixRGB = cssRGB('--mix', DEFAULT_MIX_RGB);
     eraseKF = buildEraseKF(cssRGB('--erase', DEFAULT_ERASE_RGB), cssStr('--sector-bg', DEFAULT_SECTOR_BG));
   }
   resolveTheme();
@@ -198,8 +207,8 @@ export function createViz(device) {
   // freezing Element.animate() calls that all expire before a frame paints.
   function glow(p, kind) {
     if (reduced || prep) return;
-    glowHeat[p] += HEAT_ADD;
-    glowKind[p] = kind === 'ping' ? 1 : 2;
+    if (kind === 'ping') readHeat[p] += HEAT_ADD;   // read channel
+    else progHeat[p] += HEAT_ADD;                    // program channel
     glowHot.add(p);
   }
   // Render one cell's heat across TWO layers so the bloom sits UNIFORMLY above
@@ -217,15 +226,24 @@ export function createViz(device) {
   // ring shares this same `h`, on its own earlier-clamping curve. Returns true once
   // faded back to the resting ring so the frame loop can drop the cell.
   function drawHeat(p) {
-    const h = glowHeat[p];
+    const rh = readHeat[p], ph = progHeat[p];
+    const h = rh + ph;                                           // total heat drives ALL intensity math, unchanged
     const glowEl = glowEls[p], cell = cellEls[p];
-    if (h < HEAT_EPS) {                                          // revert both layers to the cell's resting CSS ring
+    if (h < HEAT_EPS) {                                          // both channels faded → revert to resting ring, drop the cell
       glowEl.style.boxShadow = ''; cell.style.boxShadow = ''; return true;
     }
     const pres = 1 - Math.exp(-h / HEAT_KNEE);                    // 0..~1, ~0.86 at a single op
     const burst = Math.min(1, Math.log10(1 + h) / HEAT_BURST_LOG_MAX);
-    const w = Math.pow(burst, 1.5);                              // whiten with the sum (cyan -> white)
-    const base = glowKind[p] === 1 ? readRGB : progRGB;
+    const w = Math.pow(burst, 1.5);                              // whiten with the sum (base hue -> white)
+    // COLOR = which channels are present. Pure read → readRGB, pure program →
+    // progRGB (both byte-identical to the old single-channel render). When BOTH
+    // are present, pull the dominant hue toward the DESIGNED per-theme mix by
+    // co-presence `co` (a tent: 0 when one dominates, 1 when the two heats are
+    // equal) — so an overlapped read+program reads as its own thing, routed
+    // through the mix hue instead of muddying along the read↔program grey axis.
+    const co = 2 * Math.min(rh, ph) / h;                         // 0..1, peaks when comparable
+    const dom = ph >= rh ? progRGB : readRGB;                    // the leading channel's pure color
+    const base = co > 0 ? lerp3(dom, mixRGB, co) : dom;          // continuous at rh==ph (both give mixRGB)
     const r = Math.round(base[0] + (255 - base[0]) * w);
     const g = Math.round(base[1] + (255 - base[1]) * w);
     const b = Math.round(base[2] + (255 - base[2]) * w);
@@ -315,7 +333,7 @@ export function createViz(device) {
     if (ev.op === 'reset') {
       for (const q of queue) if (q.op === 'barrier') q.resolve();   // don't leave awaiters hanging
       queue.length = 0; cur = null; shown.fill(0);
-      glowHeat.fill(0); glowHot.clear();
+      readHeat.fill(0); progHeat.fill(0); glowHot.clear();
       for (let p = 0; p < npages; p++) { paint(p); cellEls[p].dataset.live = ''; cellEls[p].style.boxShadow = ''; glowEls[p].style.boxShadow = ''; }
       if (heat) refreshHeat(); return;
     }
@@ -361,8 +379,8 @@ export function createViz(device) {
     if (glowHot.size) {
       const k = Math.pow(0.5, dt / glowHalfMs());
       for (const p of glowHot) {
-        glowHeat[p] *= k;
-        if (drawHeat(p)) { glowHeat[p] = 0; glowHot.delete(p); }
+        readHeat[p] *= k; progHeat[p] *= k;                     // decay BOTH channels on the same half-life
+        if (drawHeat(p)) { readHeat[p] = 0; progHeat[p] = 0; glowHot.delete(p); }  // drop only when both < EPS
       }
     }
     if (selected >= 0) renderInspector(selected);
