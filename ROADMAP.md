@@ -31,7 +31,10 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       `origin`). A fresh clone now gets per-page obsolete coloring; the parent gitlink already
       pointed at this SHA, so no submodule bump was needed.
 - [x] Strip the now-dead CSS in `index.html`: `@keyframes prog/ping/erase-wash` plus the
-      `.cell.prog`/`.cell.ping`/`.sector.erasing` rules, all replaced by the Web Animations API.
+      `.cell.prog`/`.cell.ping`/`.sector.erasing` rules, moving the op glows into JS. (Read/prog
+      then moved *again*, off one Web-Animations object per op to a coalesced per-cell heat
+      field, to kill a ~1 s burst-freeze; only the erase sweep still animates via the Web
+      Animations API — see [ADR-0022](adr/0022-coalesced-heat-render.md).)
 - [x] **Port the FASTFFS churn model to JS** (`web/src/churn.js`). Byte-exact PRNG/event
       sequence (reproduces FASTFFS benchmark runs; feeds every FS the same logical workload for
       lockstep), idiomatic JS above the PRNG. A target live size fills toward a steady state
