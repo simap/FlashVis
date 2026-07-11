@@ -267,7 +267,9 @@ async function boot() {
   function onSessionJournal(session, change) {
     if (session !== activeSession) return;
     const out = $('tape');
-    if (change.type === 'append') {
+    if (change.type === 'clear') {
+      renderTapeFull();   // session.journal is now empty — this just paints the empty tape
+    } else if (change.type === 'append') {
       out.appendChild(tapeLine(change.entry));
       // Cap the visible tape at 400 lines AND drop each evicted node's tapeNodes
       // entry, so the Map stays bounded like the DOM instead of retaining every
@@ -479,6 +481,28 @@ async function boot() {
   $('btnDelete').addEventListener('click', () => injectCommand('deleteFile()'));
   $('btnGC').addEventListener('click', () => injectCommand('gc()'));
   $('btnFormat').addEventListener('click', () => injectCommand('format()'));
+
+  // ---- Reset (header): return the WHOLE sim to its just-booted state without
+  // a page reload — stop, re-format/mount every participating FS + wipe the
+  // coordinator's sequence/cursors/clock (coordinator.reset(), the SAME call
+  // boot() makes), clear each session's tape, then replay the boot log
+  // (help()/format()) exactly like boot() does so the tape reads identically
+  // to a fresh load. Die glow/fills/wear and the flash-time/op stats all
+  // clear for free: freshFormat() → runner.format() → device.reset(), which
+  // viz.js already treats as a full repaint (see the 'reset' event handling
+  // it and refreshHUD/refreshLiveness read off of). ----
+  $('btnReset')?.addEventListener('click', () => {
+    setRunning(false);
+    coordinator.reset();
+    for (const s of sessions.values()) s.clearJournal();
+    renderFsSet();
+    renderGap();
+    activeSession.refreshHUD($);
+    activeSession.refreshLiveness($);
+    $('specLive').textContent = 'formatted + mounted — empty and paused';
+    injectCommand('help()');
+    injectCommand('format()');
+  });
 
   // slider 0..100 → sim-ns per real-ms on a log scale. Real flash time = 1e6.
   function applySpeed(v) {

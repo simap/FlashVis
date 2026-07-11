@@ -164,6 +164,19 @@ if (!caughtUp) fail('present-gap header never cleared after Catch-up → Pace co
 if (!sawHolding) fail('fastffs (the Race leader) never showed the Pace "holding" state (.fs.waiting) while littlefs caught up');
 dom.dispatch('btnRun');   // pause again
 
+// ---- header Reset: returns the WHOLE sim to a clean boot state without a
+// page reload — stop, re-format every FS (files back to 0), wipe the tape,
+// then replay the boot log (help()/format()) exactly like boot() does. ----
+dom.dispatch('btnRun');   // resume, so Reset also proves it stops a running sim
+if (dom.getEl('runLabel').textContent !== 'Pause') fail('expected Run to resume before exercising Reset');
+dom.dispatch('btnReset');
+if (dom.getEl('runLabel').textContent !== 'Run') fail('Reset should stop the running sim (runLabel back to "Run")');
+if (tapeText().includes('cs0')) fail(`Reset should wipe the old tape, but it still shows pre-reset entries:\n${tapeText()}`);
+if (!tapeText().includes('help()')) fail(`Reset should replay the boot log (help()) on the tape:\n${tapeText()}`);
+if (!tapeText().includes('format()')) fail(`Reset should replay the boot log (format()) on the tape:\n${tapeText()}`);
+const filesAfterReset = parseInt(dom.getEl('sFiles').textContent, 10);
+if (!(filesAfterReset === 0)) fail(`Reset should return every FS to empty, HUD shows sFiles="${dom.getEl('sFiles').textContent}"`);
+
 console.log('PASS — booted the console/comparison UI against a stub backend (ADR-0018/0019/redesign contract):');
 console.log('  both FS live from load (no participation toggles — A2), fs-card focus-switch works,');
 console.log('  boot help()/format() broadcast to BOTH tapes (fix 1),');
@@ -171,6 +184,7 @@ console.log('  present-gap chip stays hidden in steady Pace (fix 4) and appears/
 console.log('  Write button injects a real writeFile() command onto the tape, and the A8 ops/s bar renders,');
 console.log(`  a typed multi-statement command with an undeclared loop var ran atomically with no global 'i' leak (files ${before} → ${filesAfterScript}),`);
 console.log('  the compare-mode wheel (A1a) switches pace<->race,');
-console.log('  and the Pace "holding" state (A8) shows on the leader while the laggard catches up.');
+console.log('  the Pace "holding" state (A8) shows on the leader while the laggard catches up,');
+console.log('  and the header Reset control stops the sim, wipes the tape, and replays the boot log with every FS back to empty.');
 dom.uninstall();
 process.exit(0);

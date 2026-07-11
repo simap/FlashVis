@@ -104,6 +104,7 @@ export async function createSession(fsId, { geometry, container, name }) {
       notify({ type: 'update', entry, journal });
       return entry;
     },
+    clearJournal() { journal.length = 0; notify({ type: 'clear', journal }); },
     _files: files,
     _journalOp(text, cls) { return session.appendJournal(text, cls, 'done'); },
     _bumpSim(n) { device.stats.simNs += Math.max(1000, n * 80); device.stats.programs++; device.stats.programBytes += n; },

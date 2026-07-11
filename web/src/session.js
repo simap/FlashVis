@@ -171,6 +171,15 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     notifyJournal({ type: 'update', entry, journal });
     return entry;
   }
+  /** Wipe the tape back to empty (a full-simulation Reset, not a per-op
+   *  concern) — used alongside freshFormat() so the console/tape shows the
+   *  same clean slate a fresh page load does. journalSeq keeps counting up
+   *  (never reused) so a stale id from before the clear can't collide with a
+   *  post-clear entry. */
+  function clearJournal() {
+    journal.length = 0;
+    notifyJournal({ type: 'clear', journal });
+  }
 
   function logOp(label, batch, err) {
     if (err) { appendJournal(`${label} → ${err.message || err}`, 'err'); return; }
@@ -486,6 +495,9 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     /** Advance an entry's lifecycle state ('queued' → 'live' → 'done') in place,
      *  notifying subscribers. No-op when unchanged. */
     setJournalState,
+    /** Wipe the tape to empty and notify subscribers ({ type: 'clear', journal }).
+     *  Pairs with freshFormat() for a full Reset-to-boot-state. */
+    clearJournal,
 
     /** Stop the player, unmount, and remove this session's die from the DOM.
      *  viz.stop() first so no rAF loop survives to pin the device + WASM module

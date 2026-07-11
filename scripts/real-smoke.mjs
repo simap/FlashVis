@@ -79,6 +79,42 @@ if (!sawAnyWaiter) fail('Race stall indicator never fired after a Pace->Race div
 if (sawBothWaiting) fail('Race stall indicator flagged BOTH FS at once (should only be the FS ahead of the clock)');
 if (!sawSingleWaiter) fail('Race stall indicator never showed exactly one waiter');
 
+// ---- typed gc() must report + glow exactly like churn-driven GC (fix: used to
+// route through the undefined api.fs.gcStep and silently do nothing). Pause
+// first so churn/gc auto-workload lines don't drown out the assertion. ----
+if (g('runLabel').textContent === 'Pause') dom.dispatch('btnRun');
+const tapeText = () => g('tape').children.map((c) => c.textContent).join('\n');
+const preGcLen = g('tape').children.length;
+const input = g('terminput');
+input.value = 'gc()';
+input.dispatch('keydown', { key: 'Enter' });
+let gcReported = false;
+for (let i = 0; i < 200 && !gcReported; i++) {
+  await tick(1);
+  gcReported = /gc\(\)\s*→\s*[\d.]+\s*(ms|s|µs)/.test(tapeText());
+}
+if (!gcReported) fail(`typed gc() never produced a timed "gc() → …" result line on the tape:\n${tapeText().split('\n').slice(-8).join('\n')}`);
+if (g('tape').children.length <= preGcLen) fail('typed gc() did not grow the tape at all');
+
+// ---- header Reset: stop, re-format both FS (files/stats back to 0), wipe the
+// tape, and replay the boot log (help()/format()) — no page reload. ----
+if (g('runLabel').textContent !== 'Pause') dom.dispatch('btnRun');   // get something running again
+await tick(60);
+dom.dispatch('btnReset');
+if (g('runLabel').textContent !== 'Run') fail('Reset should stop a running sim (runLabel back to "Run")');
+if (tapeText().includes('gc()')) fail(`Reset should wipe the pre-reset tape, but it still shows old entries:\n${tapeText()}`);
+if (!/help\(\)/.test(tapeText())) fail(`Reset should replay the boot log (help()) on the tape:\n${tapeText()}`);
+let formatSettled = false;
+for (let i = 0; i < 200 && !formatSettled; i++) {
+  await tick(1);
+  formatSettled = /format\(\)\s*→/.test(tapeText());
+}
+if (!formatSettled) fail(`Reset's replayed format() never completed on the tape:\n${tapeText()}`);
+if (Number(g('sFiles').textContent) !== 0) fail(`Reset should return the focused FS to 0 files, HUD shows sFiles="${g('sFiles').textContent}"`);
+if (/NaN|undefined/.test(card('fastffs').v)) fail(`fastffs vital looks wrong after Reset: "${card('fastffs').v}"`);
+
 console.log('PASS — real backend: both FS boot on real WASM, Pace advances flash time,');
-console.log('       Race shows workload "ops done" + ops/s, geometry has no "SOP-8", and the');
-console.log('       Race stall indicator fires for the ahead FS (only) after a Pace->Race divergence.');
+console.log('       Race shows workload "ops done" + ops/s, geometry has no "SOP-8", the');
+console.log('       Race stall indicator fires for the ahead FS (only) after a Pace->Race divergence,');
+console.log('       typed gc() reports timing/op-stats on the tape like churn-driven GC, and the header');
+console.log('       Reset control stops the sim, re-formats every FS, and wipes+replays the tape.');
