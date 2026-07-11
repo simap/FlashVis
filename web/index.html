@@ -356,26 +356,47 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
   background:var(--panel-2);border:1px solid var(--line);box-shadow:0 12px 30px -14px #000;
   opacity:0;visibility:hidden;transition:opacity .12s;pointer-events:none;z-index:5}
 .chip:hover .chip-hint,.chip:focus-visible .chip-hint,.chip:focus .chip-hint{opacity:1;visibility:visible}
+/* STATE fills are flat squares; OP GLOWS (reading/programming/erasing and the
+   read+program mix) are round dots with a colored halo, so the legend swatch
+   reads the same way the cell does — a fill vs a glow. */
 .sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
-.sw.program{background:var(--program)} .sw.erase{background:var(--erase)} .sw.read{background:var(--read)}
+.sw.glow{width:10px;height:10px;border-radius:50%}
+.sw.read.glow{background:var(--read);box-shadow:0 0 6px 0 var(--read),0 0 2px 0 var(--read)}
+.sw.program.glow{background:var(--program);box-shadow:0 0 6px 0 var(--program),0 0 2px 0 var(--program)}
+.sw.erase.glow{background:var(--erase);box-shadow:0 0 6px 0 var(--erase),0 0 2px 0 var(--erase)}
+.sw.mix.glow{background:var(--mix);box-shadow:0 0 6px 0 var(--mix),0 0 2px 0 var(--mix)}
 
 /* palette switcher — sits with the legend because it governs what the legend
-   MEANS: pick a palette and the whole die + live glow re-skins. A live preview
-   of the four load-bearing colors (read · write · erase · live) reads the theme
-   vars directly, so it recolors itself the instant the palette changes. */
+   MEANS: pick a palette and the whole die + live glow re-skins. It's a radiogroup
+   of one chip per theme; each chip previews ITS OWN five signature colors (read ·
+   write · mix · erase · live) via the .tprev-* blocks below, so you can see a
+   palette before selecting it. Chip chrome + the selected ring track the ACTIVE
+   theme's --chrome/--accent (the .tprev-* only re-declares the five dot vars). */
 .theme-pick{display:inline-flex;align-items:center;gap:8px;color:var(--txt-dim);
-  font-size:10.5px;letter-spacing:.05em;cursor:pointer;user-select:none;
-  padding:3px 4px 3px 9px;border:1px solid var(--line-soft);border-radius:6px;background:var(--panel-2)}
-.theme-pick:focus-within{border-color:var(--accent)}
+  padding:3px 9px;border:1px solid var(--line-soft);border-radius:6px;background:var(--panel-2)}
 .tp-label{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint)}
-.tp-dots{display:inline-flex;gap:3px}
-.tp-dots i{width:9px;height:9px;border-radius:50%;box-shadow:inset 0 0 0 1px #fff2}
-.tp-dots .d-read{background:var(--read)} .tp-dots .d-prog-op{background:var(--program)}
-.tp-dots .d-erase{background:var(--erase)} .tp-dots .d-live{background:var(--prog)}
-.theme-pick select{font-family:inherit;font-size:11px;color:var(--txt);background:var(--chrome);
-  border:1px solid var(--line);border-radius:5px;padding:4px 7px;cursor:pointer;outline:none}
-.theme-pick select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.theme-chips{display:inline-flex;gap:4px}
+.theme-chip{padding:3px 4px;border:1px solid var(--line);border-radius:5px;background:var(--chrome);
+  cursor:pointer;display:inline-flex;align-items:center;line-height:0;transition:.13s}
+.theme-chip:hover{border-color:var(--accent-dim)}
+.theme-chip:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.theme-chip.on{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 10px -3px var(--accent)}
+.tc-dots{display:inline-flex;gap:2px}
+.tc-dots i{width:7px;height:7px;border-radius:50%;box-shadow:inset 0 0 0 1px #ffffff33}
+.tc-dots .d-read{background:var(--read)} .tc-dots .d-prog-op{background:var(--program)}
+.tc-dots .d-mix{background:var(--mix)} .tc-dots .d-erase{background:var(--erase)}
+.tc-dots .d-live{background:var(--prog)}
+.tp-name{font-size:10.5px;color:var(--txt-dim);min-width:8.5em;white-space:nowrap}
+/* per-theme preview vars: mirror each palette's five dot colors (read/write/mix/
+   erase/live). Applied to a chip's subtree so its dots show that theme regardless
+   of the active one; kept adjacent here so they stay in sync with the palettes. */
+.tprev-aurora{--read:#4de3ff;--program:#ff6a1a;--mix:#3dffb0;--erase:#b06bff;--prog:#f2b23a}
+.tprev-magma{--read:#2fd6ff;--program:#ff3b1e;--mix:#b6f03a;--erase:#ff3d7a;--prog:#ffc21f}
+.tprev-uv{--read:#5aa6ff;--program:#ff3d9e;--mix:#7d6bff;--erase:#a6ff45;--prog:#b25cf0}
+.tprev-phosphor{--read:#4dff88;--program:#ffb52e;--mix:#d6ff4d;--erase:#ff4130;--prog:#6ce02f}
+.tprev-deepsea{--read:#2ff0c8;--program:#ff9a2e;--mix:#8ff05a;--erase:#ff4db0;--prog:#ff7a52}
+.tprev-blueprint{--read:#d6ecff;--program:#ff7a33;--mix:#ffc79e;--erase:#ff3b52;--prog:#2f9fe0}
 
 /* side panel — telemetry + sector inspector, its own column (fix #2) */
 .panel{display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
@@ -515,18 +536,14 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
     <div class="diebar">
       <div class="legend" id="legendChips" role="list" aria-label="cell states"></div>
       <label class="toggle"><input type="checkbox" id="heat"><span class="tswitch"></span>WEAR HEATMAP</label>
-      <label class="theme-pick" title="color palette">
+      <!-- Palette switcher: one chip per theme, each previewing its own colors.
+           Chips + the name readout are built by playground.js into #themeChips /
+           #themeName (single source of truth = THEME_LIST). -->
+      <div class="theme-pick">
         <span class="tp-label">PALETTE</span>
-        <span class="tp-dots" aria-hidden="true"><i class="d-read"></i><i class="d-prog-op"></i><i class="d-erase"></i><i class="d-live"></i></span>
-        <select id="theme" aria-label="color palette theme">
-          <option value="aurora">Aurora Signal</option>
-          <option value="magma">Magma</option>
-          <option value="uv">Ultraviolet Lab</option>
-          <option value="phosphor">Terminal Phosphor</option>
-          <option value="deepsea">Deep Sea</option>
-          <option value="blueprint">Cyanotype Blueprint</option>
-        </select>
-      </label>
+        <div class="theme-chips" id="themeChips" role="radiogroup" aria-label="color palette theme"></div>
+        <span class="tp-name" id="themeName" aria-live="polite"></span>
+      </div>
     </div>
   </div>
 

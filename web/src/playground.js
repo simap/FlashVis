@@ -360,15 +360,20 @@ async function boot() {
   // ---- die-adjacent legend chip-row (ADR-0018): per-FS class descriptor —
   // same baseline for both drivers today, a hook for future per-driver classes
   // (LittleFS metadata-pair / CTZ) without reworking the row's structure. ----
+  // Every color the die can display: the four matte STATE fills, then the op
+  // GLOWS (marked `glow` so the swatch renders as a glowing dot, not a fill),
+  // including the read+program MIX (--mix, the overlap color the dual-channel
+  // heat renders when a cell is read and programmed at once).
   function legendFor(_session) {
     return [
       { cls: 'erased', word: 'Erased', title: '0xFF — nothing written' },
       { cls: 'prog', word: 'Live', title: 'fill = bytes programmed' },
       { cls: 'obsolete', word: 'Obsolete', title: 'reclaimable garbage' },
       { cls: 'index', word: 'Metadata', title: 'index + records' },
-      { cls: 'program', word: 'Programming', title: '1→0, in progress' },
-      { cls: 'erase', word: 'Erasing', title: 'sector → 0xFF' },
-      { cls: 'read', word: 'Reading', title: 'XIP, no wear' },
+      { cls: 'read', word: 'Reading', title: 'XIP, no wear', glow: true },
+      { cls: 'program', word: 'Programming', title: '1→0, in progress', glow: true },
+      { cls: 'mix', word: 'Read + write', title: 'one cell read and programmed at once', glow: true },
+      { cls: 'erase', word: 'Erasing', title: 'sector → 0xFF', glow: true },
     ];
   }
   function renderLegend(session) {
@@ -377,7 +382,7 @@ async function boot() {
     for (const c of legendFor(session)) {
       const chip = document.createElement('div');
       chip.className = 'chip'; chip.tabIndex = 0; chip.setAttribute('role', 'listitem');
-      chip.innerHTML = `<span class="sw ${c.cls}"></span>${c.word}<span class="chip-hint">${c.title}</span>`;
+      chip.innerHTML = `<span class="sw ${c.cls}${c.glow ? ' glow' : ''}"></span>${c.word}<span class="chip-hint">${c.title}</span>`;
       row.appendChild(chip);
     }
   }
@@ -502,23 +507,69 @@ async function boot() {
 
   // ---- palette switcher (color themes): flip [data-theme] on :root and every
   // session re-sources its op-glow + erase colors, so the LIVE heat recolors too
-  // (not just the static state fills). The legend chips and the switcher's own
-  // preview dots read the theme vars directly, so they re-skin for free. The
-  // choice is persisted, so a reload keeps the chosen palette. ----
+  // (not just the static state fills). The legend chips read the theme vars
+  // directly, so they re-skin for free. The switcher is a radiogroup of one chip
+  // per theme; each chip previews ITS OWN five colors (read/write/mix/erase/live)
+  // via the .tprev-* CSS, so a palette is visible before you pick it. The choice
+  // is persisted, so a reload keeps the chosen palette. ----
   const THEME_KEY = 'flashvis.theme';
-  const THEMES = ['aurora', 'magma', 'uv', 'phosphor', 'deepsea', 'blueprint'];
-  const themeSel = $('theme');
+  const THEME_LIST = [
+    { id: 'aurora', name: 'Aurora Signal' },
+    { id: 'magma', name: 'Magma' },
+    { id: 'uv', name: 'Ultraviolet Lab' },
+    { id: 'phosphor', name: 'Terminal Phosphor' },
+    { id: 'deepsea', name: 'Deep Sea' },
+    { id: 'blueprint', name: 'Cyanotype Blueprint' },
+  ];
+  const THEMES = THEME_LIST.map((t) => t.id);
+  const themeChipEls = new Map();   // theme id -> chip button
   const applyTheme = (t) => {
     if (!THEMES.includes(t)) t = 'aurora';
     document.documentElement.dataset.theme = t;
-    if (themeSel) themeSel.value = t;
+    for (const [id, el] of themeChipEls) {
+      const on = id === t;
+      el.classList.toggle('on', on);
+      el.setAttribute('aria-checked', String(on));
+      el.tabIndex = on ? 0 : -1;    // roving tabindex: only the selected chip is a tab stop
+    }
+    const nameEl = $('themeName');
+    if (nameEl) nameEl.textContent = (THEME_LIST.find((x) => x.id === t) || {}).name || '';
     try { store?.setItem(THEME_KEY, t); } catch { /* no storage / private mode */ }
     for (const s of sessions.values()) s.refreshTheme?.();
   };
+  // Build one preview chip per theme into #themeChips.
+  const themeHost = $('themeChips');
+  if (themeHost) {
+    themeHost.innerHTML = '';
+    for (const { id, name } of THEME_LIST) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `theme-chip tprev-${id}`;
+      b.dataset.themeVal = id;
+      b.setAttribute('role', 'radio');
+      b.setAttribute('aria-label', `${name} palette`);
+      b.title = name;
+      b.innerHTML = '<span class="tc-dots" aria-hidden="true">' +
+        '<i class="d-read"></i><i class="d-prog-op"></i><i class="d-mix"></i><i class="d-erase"></i><i class="d-live"></i></span>';
+      b.addEventListener('click', () => applyTheme(id));
+      themeHost.appendChild(b);
+      themeChipEls.set(id, b);
+    }
+    // arrow keys move the selection (and focus) within the radiogroup
+    themeHost.addEventListener('keydown', (e) => {
+      const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
+      const fwd = e.key === 'ArrowRight' || e.key === 'ArrowDown';
+      if (!back && !fwd) return;
+      e.preventDefault();
+      const cur = THEMES.indexOf(document.documentElement.dataset.theme);
+      const next = THEMES[(cur + (fwd ? 1 : -1) + THEMES.length) % THEMES.length];
+      applyTheme(next);
+      themeChipEls.get(next)?.focus?.();
+    });
+  }
   let savedTheme = 'aurora';
   try { savedTheme = store?.getItem(THEME_KEY) || 'aurora'; } catch { /* ignore */ }
   applyTheme(savedTheme);
-  themeSel?.addEventListener('change', (e) => applyTheme(e.target.value));
   const loadHist = () => { try { const h = JSON.parse(store.getItem(HKEY)); return Array.isArray(h) ? h : []; } catch { return []; } };
   const saveHist = () => { try { store.setItem(HKEY, JSON.stringify(cmdHist)); } catch { /* no storage / private mode */ } };
   let cmdHist = store ? loadHist() : [];
