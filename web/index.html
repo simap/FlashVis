@@ -710,6 +710,27 @@ dialog.about[open]{animation:aboutIn .18s ease}
     </section>
 
     <section class="about-sec">
+      <p class="about-eyebrow">What you can do</p>
+      <h3>Two ways to drive it</h3>
+      <p><b>Run</b>, in the header, starts the automated workload generator. It creates, replaces,
+      and deletes files continuously, so you watch steady-state behavior fill the die.</p>
+      <p>The console, and the poke buttons for <b>write</b>, <b>read</b>, <b>ls</b>, <b>delete</b>,
+      <b>gc</b>, and <b>format</b>, drive one filesystem action at a time, so you can watch a single
+      operation play out on the die. Type <code>help()</code> in the console for the full command
+      list.</p>
+    </section>
+
+    <section class="about-sec">
+      <p class="about-eyebrow">Comparing filesystems</p>
+      <h3>Race and Pace</h3>
+      <p><b>Race</b> lets each filesystem run the workload as fast as it can, then compares who did
+      more: the most operations in equal time.</p>
+      <p><b>Pace</b> holds every filesystem to the same workload step, so the die images stay directly
+      comparable, while it tracks each one's total active flash time. You compare who did it in less:
+      the least time for the same operations. Switch modes from the header sentence.</p>
+    </section>
+
+    <section class="about-sec">
       <p class="about-eyebrow">How each filesystem copes</p>
       <h3>FASTFFS and LittleFS</h3>
       <p><span class="wordmark">FLASH<b>VIS</b></span> compares two filesystems today, <b>FASTFFS</b>
