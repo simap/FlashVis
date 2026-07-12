@@ -31,7 +31,10 @@ import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 
 // FS registry (ADR-0015): fsId → display name. All are live from page load
 // (ADR-0017 — "every active filesystem runs the same workload at once").
-const FS_REGISTRY = { fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS', jesfs: 'JesFS' };
+const FS_REGISTRY = {
+  fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS', jesfs: 'JesFS',
+  fatfs: 'FatFs + WL',   // ChaN FatFs over the ESP-IDF wear_levelling FTL
+};
 const DEFAULT_FS = 'fastffs';
 
 // Auto-workload churn config, scaled to the 256 KiB (4096×64) device. The model

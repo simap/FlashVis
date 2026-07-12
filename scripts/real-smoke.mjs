@@ -34,7 +34,7 @@ const card = (fs) => ({
   v: g('fsV-' + fs)?.textContent ?? '', tag: g('fsTag-' + fs)?.textContent ?? '',
   bar: g('fsBar-' + fs)?.style.width ?? '', waiting: !!g('fsCard-' + fs)?.classList.contains('waiting'),
 });
-const FS = ['fastffs', 'littlefs', 'spiffs', 'jesfs'];
+const FS = ['fastffs', 'littlefs', 'spiffs', 'jesfs', 'fatfs'];
 
 // ---- all FS live, cards + geometry built (redesign A1/A5) ----
 if (g('dieStack').children.length !== FS.length) fail(`expected ${FS.length} mounted dies, got ${g('dieStack').children.length}`);
