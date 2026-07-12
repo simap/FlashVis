@@ -34,20 +34,24 @@ const card = (fs) => ({
   v: g('fsV-' + fs)?.textContent ?? '', tag: g('fsTag-' + fs)?.textContent ?? '',
   bar: g('fsBar-' + fs)?.style.width ?? '', waiting: !!g('fsCard-' + fs)?.classList.contains('waiting'),
 });
-const FS = ['fastffs', 'littlefs'];
+const FS = ['fastffs', 'littlefs', 'spiffs', 'jesfs', 'fatfs'];
 
-// ---- both FS live, cards + geometry built (redesign A1/A5) ----
-if (g('dieStack').children.length !== 2) fail(`expected 2 mounted dies, got ${g('dieStack').children.length}`);
+// ---- all FS live, cards + geometry built (redesign A1/A5) ----
+if (g('dieStack').children.length !== FS.length) fail(`expected ${FS.length} mounted dies, got ${g('dieStack').children.length}`);
 for (const fs of FS) if (!g('fsCard-' + fs)) fail(`fs card missing for ${fs}`);
 const geo = g('geoLine').innerHTML || g('geoLine').textContent || '';
 if (!geo.includes('NOR')) fail(`geometry line looks wrong: "${geo}"`);
 if (/SOP-8/.test(geo)) fail('geometry line still says "SOP-8" (should be scrubbed)');
 
 // ---- Pace: running advances real flash time; readouts are sane (no NaN) ----
+// Poll rather than fixed-wait: Pace's first churn round starts only after every
+// session's player drains its boot format, and SPIFFS's format erases all 64
+// sectors (~1.4 s simulated) — far slower than FASTFFS's 2-erase format.
 const vBefore = card('fastffs').v;
 dom.dispatch('btnRun');
-await tick(200);
-if (card('fastffs').v === vBefore) fail('Pace running did not advance flash time (churn not driving the real device?)');
+let advanced = false;
+for (let i = 0; i < 3000 && !advanced; i += 50) { await tick(50); advanced = card('fastffs').v !== vBefore; }
+if (!advanced) fail('Pace running did not advance flash time (churn not driving the real device?)');
 for (const fs of FS) { const c = card(fs); for (const [k, val] of Object.entries(c)) if (/NaN|undefined/.test(String(val))) fail(`${fs}.${k} = ${val} in Pace`); }
 if (!/ms\/op|µs\/op/.test(card('fastffs').tag)) fail(`Pace tag should be a per-op time, got "${card('fastffs').tag}"`);
 
@@ -67,17 +71,18 @@ dom.dispatch('modeWheel');          // back to Pace
 await tick(400);                    // let flash time diverge
 dom.dispatch('modeWheel');          // -> Race; ahead FS should stall
 
-let sawSingleWaiter = false, sawBothWaiting = false, sawAnyWaiter = false;
+// With N participants, every FS ahead of the reseated clock may wait at once —
+// only the frontier FS (defining raceClock's floor) must never be flagged. So the
+// invariant is "a nonempty PROPER subset waits": all-N-waiting is the flicker bug.
+let sawAnyWaiter = false, sawAllWaiting = false;
 for (let round = 0; round < 12; round++) {
   await tick(8);
   const w = FS.filter((fs) => card(fs).waiting);
   if (w.length) sawAnyWaiter = true;
-  if (w.length === 1) sawSingleWaiter = true;
-  if (w.length === 2) sawBothWaiting = true;
+  if (w.length === FS.length) sawAllWaiting = true;
 }
 if (!sawAnyWaiter) fail('Race stall indicator never fired after a Pace->Race divergence (the ahead FS should show "waiting")');
-if (sawBothWaiting) fail('Race stall indicator flagged BOTH FS at once (should only be the FS ahead of the clock)');
-if (!sawSingleWaiter) fail('Race stall indicator never showed exactly one waiter');
+if (sawAllWaiting) fail('Race stall indicator flagged EVERY FS at once (the frontier FS should never wait)');
 
 // ---- typed gc() must report + glow exactly like churn-driven GC (fix: used to
 // route through the undefined api.fs.gcStep and silently do nothing). Pause

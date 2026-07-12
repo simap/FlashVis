@@ -70,11 +70,12 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       live size, file-size distribution, create/replace/delete mix, seed — so the workload can be
       shaped (and reproduced) instead of hardcoded. (Later — the hardcoded model is fine for
       testing as is; this is more an exploration nicety.)
-- [ ] **About-filesystems explainer.** An in-app primer: how NOR flash works (erase-before-write,
+- [x] **About-filesystems explainer.** An in-app primer: how NOR flash works (erase-before-write,
       sector/page granularity, wear, `0xFF` as the erased state), and how each filesystem copes with
       those limits (log-structured writes, wear-leveling, garbage collection). The garbage% story
       lives here — it's GC-ratio-dependent, FASTFFS's background GC keeps it low (so the 50% default
-      undersells it), and the residual is compaction-only, run under allocation pressure.
+      undersells it), and the residual is compaction-only, run under allocation pressure. (Being
+      extended to cover the three drivers below.)
 
 ## Borrow from FASTFFS later
 The FASTFFS repo has more reusable workload and fault machinery worth pulling rather than
@@ -93,19 +94,26 @@ op set our shim ABI mines ([ADR-0011](adr/0011-uniform-fs-driver-abi.md)), so th
 reusable. Only the FS core is load-bearing; the surrounding ESP-IDF VFS/POSIX plumbing is scaffolding
 a bare WASM embedding replaces itself.
 
-- [ ] **SPIFFS** — [pellepl/spiffs](https://github.com/pellepl/spiffs) (MIT; ESP-IDF vendors a
+- [x] **SPIFFS** — [pellepl/spiffs](https://github.com/pellepl/spiffs) (MIT; ESP-IDF vendors a
       lightly-patched fork). Easiest port, the LittleFS bar: NOR-native, driven by an injectable
       `spiffs_config` HAL (`hal_read_f` / `hal_write_f` / `hal_erase_f`) that maps one-to-one onto
-      the shim's read / prog / erase.
-- [ ] **JesFS** — [joembedded/JesFs](https://github.com/joembedded/JesFs) (MIT; the benchmark pins
+      the shim's read / prog / erase. **Landed:** upstream submodule at `fs/spiffs`, benchmark
+      tuning mirrored (incl. ESP-IDF's buffer derivations), true 1:1 per-page live map off the
+      object-lookup tables, and `SPIFFS_gc_quick(0)` as a genuinely bounded `ff_gc_step`
+      (ADR-0021 bar met — caps GC|LIVE_MAP|APPEND).
+- [x] **JesFS** — [joembedded/JesFs](https://github.com/joembedded/JesFs) (MIT; the benchmark pins
       `3a1dff76` as a submodule). NOR/SPI-native; its HAL is SPI-*command* level (RDID / page-program
       / 4 KiB-erase opcodes) rather than read / prog / erase — but the benchmark already ships both
       adapters we'd reuse: a JesFS→`benchfs_ops_t` common-API adapter (`esp32s3_jesfs/main/main.c`)
       whose op set our shim already mirrors, and a fake-SPI lower layer (`jesfs_ll_esp_partition.c`)
       that already decodes the SPI opcodes into block read/prog/erase. Porting is mostly swapping its
       bottom `esp_partition_read/write/erase_range` for the three HAL imports (and answering RDID with
-      a plausible JEDEC id/density) — not writing a shim from scratch.
-- [ ] **FAT + FTL** — two stacked libraries, mirroring the benchmark's `esp_vfs_fat_spiflash_mount_rw_wl`:
+      a plausible JEDEC id/density) — not writing a shim from scratch. **Landed:** submodule pinned at
+      the benchmark SHA, both adapters ported (RDID answers as an MX25R2035F, density 0x12), seek
+      emulated by rewind+re-read, sector-magic live map; caps LIVE_MAP only (reclamation is inline
+      just-in-time — no churn-safe GC step, per ADR-0021). Generated workload names (≤18 chars) fit
+      its 21-char limit.
+- [x] **FAT + FTL** — two stacked libraries, mirroring the benchmark's `esp_vfs_fat_spiflash_mount_rw_wl`:
   - **[ChaN FatFs](http://elm-chan.org/fsw/ff/)** (BSD-1-clause-style) — portable ANSI-C, but does
     no erase and no wear-leveling: it expects an overwrite-in-place block device via `disk_read` /
     `disk_write` (512 B logical sectors). Inert over raw NOR without the layer beneath it.
@@ -117,3 +125,13 @@ a bare WASM embedding replaces itself.
     exactly that reason).
 
     Stack: FatFs `disk_read` / `disk_write` (512 B) → `wear_levelling` remap → NOR read / prog / erase.
+
+    **Landed** (displayed as "FatFs + WL", name provisional): both cores vendored byte-identical to
+    ESP-IDF v5.3.2 (`9d7f2d6`; FatFs is ChaN R0.15p2 — IDF's copy chosen over an elm-chan archive
+    because it *is* what the benchmark ran and its `ff.c` is stock ChaN; verified by diff against the
+    pinned commit). WL core unmodified — only the `Flash_Access` backend re-stubbed onto the HAL; the
+    inspect hook reaches WL's logical→physical map via a subclass, composing the FAT12 view through
+    it. 4 KiB WL sectors, two FATs, LFN enabled (the shared workload's names exceed 8.3); 4 sectors
+    WL overhead → 240 KiB logical volume, ~224 KiB usable (~2.3× the churn steady state). Caps
+    APPEND|LIVE_MAP — no GC concept (ADR-0021). Same 3000-op churn costs ~14.6k erases vs FASTFFS's
+    ~1k: the write-amplification centerpiece.

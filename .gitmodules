@@ -5,3 +5,10 @@
 [submodule "fs/littlefs"]
 	path = fs/littlefs
 	url = https://github.com/littlefs-project/littlefs.git
+[submodule "fs/spiffs"]
+	path = fs/spiffs
+	url = https://github.com/pellepl/spiffs.git
+[submodule "fs/jesfs"]
+	path = fs/jesfs
+	url = https://github.com/joembedded/JesFs.git
+	branch = master
