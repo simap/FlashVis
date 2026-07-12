@@ -34,12 +34,24 @@ uint32_t g_sector_size     = 4096;
 uint32_t g_sector_count    = 64;
 static uint32_t g_program_granule = 1;
 
-/* Fixed sizes per the locked contract: cache_size=256 (a factor of the 4096
- * sector size and a multiple of the program granule for our geometry),
- * lookahead_size=16, block_cycles=500 (real wear-leveling). */
-#define LFS_CACHE_SIZE      256
-#define LFS_LOOKAHEAD_SIZE  16
-#define LFS_BLOCK_CYCLES    500
+/* Benchmark-parity sizes. The FASTFFS ESP32-S3 LittleFS benchmark ran the
+ * joltwallet/esp_littlefs IDF component (benchmarks/esp32s3_littlefs/main/
+ * idf_component.yml, "joltwallet/littlefs") with zero CONFIG_LITTLEFS_*
+ * overrides in sdkconfig.defaults, so its effective lfs_config was the
+ * component's Kconfig defaults, which esp_littlefs.c copies verbatim:
+ *   LITTLEFS_READ_SIZE=128  LITTLEFS_WRITE_SIZE=128  LITTLEFS_CACHE_SIZE=512
+ *   LITTLEFS_LOOKAHEAD_SIZE=128  LITTLEFS_BLOCK_CYCLES=512
+ * (corroborated by fs/fastffs/existing_flash_filesystems_research.md, which
+ * lists the same values plus the 1,152 B read/prog/lookahead buffer total =
+ * 512+512+128). Mirrored here so flashvis shows the traffic that was
+ * benchmarked: 128 B read/program granularity, 512 B caches. cache_size=512
+ * is a factor of the 4096 block size and a multiple of prog/read size (128);
+ * lookahead 128 B maps 1024 blocks, comfortably covering any geometry here. */
+#define LFS_READ_SIZE       128
+#define LFS_PROG_SIZE       128
+#define LFS_CACHE_SIZE      512
+#define LFS_LOOKAHEAD_SIZE  128
+#define LFS_BLOCK_CYCLES    512
 
 /* ---- backend callbacks (littlefs core → JS chip): block+off → absolute byte offset ---- */
 static int be_read(const struct lfs_config *c, lfs_block_t block,
@@ -105,8 +117,16 @@ static void cfg_init(void) {
     g_cfg.erase = be_erase;
     g_cfg.sync  = be_sync;
 
-    g_cfg.read_size  = 1;                                  /* NOR reads are byte-addressable */
-    g_cfg.prog_size  = g_program_granule ? g_program_granule : 1;
+    /* Benchmark parity (see LFS_* above): reads and programs happen in 128 B
+     * units even though the NOR device is byte-addressable — that is what the
+     * benchmarked joltwallet build did, and littlefs pads commits to prog_size,
+     * so this affects the on-disk layout, not just traffic shape. The ABI's
+     * program_granule is still honored when it demands MORE than 128 (a device
+     * whose program unit is coarser than the benchmark's must win over parity);
+     * granules <= 128, including the default 1, get the benchmark's 128. */
+    g_cfg.read_size  = LFS_READ_SIZE;
+    g_cfg.prog_size  = g_program_granule > LFS_PROG_SIZE ? g_program_granule
+                                                         : LFS_PROG_SIZE;
     g_cfg.block_size = g_sector_size;
     g_cfg.block_count = g_sector_count;
     g_cfg.block_cycles = LFS_BLOCK_CYCLES;
