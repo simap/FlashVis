@@ -60,7 +60,7 @@ op with its flash-op breakdown and time — e.g. `write(f000-159461b1.bin, 28226
 138 prog 151 read` — and none of that changes; the only console change is that GC lines are grayed. The
 on-screen numbers must then be reconstructable from the console by hand:
 
-- **Count the non-gray lines → that is `fileOpCount`.**
+- **Count the non-gray high level op lines → that is `fileOpCount`.** writeFile, ls, churn ops, etc.
 - **Sum every line's time (gray GC lines included) → that is the flash-time total.**
 - Experimentally: spam `gc()` and watch flash time climb while ops stays put.
 
