@@ -181,7 +181,7 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     notifyJournal({ type: 'clear', journal });
   }
 
-  function logOp(label, batch, err) {
+  function logOp(label, batch, err, cls = 'out') {
     if (err) { appendJournal(`${label} → ${err.message || err}`, 'err'); return; }
     const ns = batch.reduce((a, e) => a + e.ns, 0);
     const c = { read: 0, prog: 0, erase: 0 };
@@ -190,7 +190,7 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     if (c.erase) parts.push(`${c.erase} erase`);
     if (c.prog) parts.push(`${c.prog} prog`);
     if (c.read) parts.push(`${c.read} read`);
-    appendJournal(`${label} → ${fmtTime(ns)}${parts.length ? ' · ' + parts.join(' ') : ''}`, 'out');
+    appendJournal(`${label} → ${fmtTime(ns)}${parts.length ? ' · ' + parts.join(' ') : ''}`, cls);
   }
 
   // Logs each op's simulated flash cost, then rethrows a thrown error (after
@@ -198,12 +198,12 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
   // a script can `try/catch` a failed readFile/deleteFile/etc. runEntry()
   // (lockstep.js, the churn/gc synchronous path) wraps its own call in a
   // try/catch, so this rethrow doesn't change churn/GC step behavior.
-  function timed(label, fn) {
+  function timed(label, fn, cls) {
     currentBatch = [];
     let res, err = null;
     try { res = fn(); } catch (e) { err = e; }
     const batch = currentBatch; currentBatch = null;
-    logOp(label, batch, err);
+    logOp(label, batch, err, cls);
     if (err) throw err;
     return res;
   }
@@ -234,16 +234,16 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
   // both hooks are bypassed entirely and the die is flushed synchronously —
   // bulk setup shouldn't lockstep with anything.
   function buildLocalApi(rng, pace, onIssue, onSettle) {
-    function runOp(label, work) {
+    function runOp(label, work, cls) {
       onIssue();
       const p = (async () => {
         if (prepMode) {
-          const res = timed(label, work);
+          const res = timed(label, work, cls);
           viz.flush();
           return res;
         }
         await pace.before();
-        const res = timed(label, work);
+        const res = timed(label, work, cls);
         await pace.after();
         return res;
       })();
@@ -342,7 +342,7 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     // how every other multi-step console helper (e.g. mkdir -p) reports.
     function gc(n = 1) {
       const steps = Math.max(1, n | 0);
-      return runOp('gc()', () => { let r; for (let i = 0; i < steps; i++) r = runner.gcStep(); return r; });
+      return runOp('gc()', () => { let r; for (let i = 0; i < steps; i++) r = runner.gcStep(); return r; }, 'gc');
     }
 
     // ---- Tier 2 — raw fs.* handles (ADR-0014), paced locally the same way. ----
@@ -415,7 +415,7 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     /** One opportunistic GC step, timed + logged; null no-op when unsupported
      *  (runner.gcStep() itself gates on FF_CAP_GC). GC is background maintenance,
      *  NOT a file op (ADR-0023): it charges flash time but never bumps fileOpCount. */
-    runGcStep() { return timed('gc()', () => runner.gcStep()); },
+    runGcStep() { return timed('gc()', () => runner.gcStep(), 'gc'); },
 
     /** Run one atomic COMMAND (ADR-0019) — `fn` is `async (api) => any`, `seed` is
      *  the per-command draw seed baked at broadcast(), `pace` is the coordinator's

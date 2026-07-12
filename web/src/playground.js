@@ -249,15 +249,14 @@ async function boot() {
   }
   // GC lines render gray — "there, but in the background" (ADR-0023). GC is not a
   // workload op, so its tape lines are visually demoted while still carrying their
-  // flash-time cost (so summing every line's time — gray ones included — still
-  // reconstructs the flash-time total). A gc op-result line reads `gc() → …` and a
-  // gc(n) reads `gc(3) → …`, so a `gc(` prefix on the raw text uniquely tags them
-  // (no file op's result line starts with `gc(`); the typed-command echo is `> gc()`
-  // and is deliberately left un-grayed, as it is input, not an op line.
-  const isGcLine = (e) => /^gc\(/.test(e.text || '');
+  // flash-time cost (summing every line's time — gray ones included — still
+  // reconstructs the flash-time total). The `gc` class is carried STRUCTURALLY on
+  // the journal entry: gc()/runGcStep() tag their op with cls 'gc' at the source
+  // (session.js), so it flows straight through e.cls — no text matching, and a
+  // file named `gc(...)` can never be mistaken for a GC op.
   function tapeLine(e) {
     const el = document.createElement('div');
-    el.className = 'line ' + (e.cls || 'out') + (isGcLine(e) ? ' gc' : '');
+    el.className = 'line ' + (e.cls || 'out');
     el.dataset.state = e.state || 'done';
     el.dataset.jid = e.id;          // stamp the journal id so the DOM-cap eviction can drop this node's tapeNodes entry
     el.textContent = tapeText(e);

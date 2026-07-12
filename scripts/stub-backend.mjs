@@ -73,7 +73,7 @@ function buildLocalApi(session) {
     stat: async (name) => { session._bumpFileOp(); return (session._files.has(name) ? { name, size: session._files.get(name) } : null); },
     fs: {
       format: async () => { session._bumpFileOp(); session._files.clear(); session._journalOp('format() → mounted, empty', 'out'); },
-      gcStep: async () => { session._journalOp('gc() → 0 reclaimed', 'out'); return null; },
+      gcStep: async () => { session._journalOp('gc() → 0 reclaimed', 'gc'); return null; },   // gc line tagged 'gc' structurally (ADR-0023)
     },
   };
 }
@@ -123,7 +123,7 @@ export async function createSession(fsId, { geometry, container, name }) {
       if (ev.type === 'write') { session._bumpFileOp(); files.set(ev.name, ev.size); session._bumpSim(ev.size); session.appendJournal(`write(${ev.name}, ${ev.size} B)`, 'sys', 'done'); }
       else if (ev.type === 'delete') { session._bumpFileOp(); files.delete(ev.name); session.appendJournal(`delete(${ev.name})`, 'sys', 'done'); }
     },
-    runGcStep() { session.appendJournal('gc()', 'sys', 'done'); },   // gc is NOT a file op (ADR-0023)
+    runGcStep() { session.appendJournal('gc()', 'gc', 'done'); },   // gc: NOT a file op, tagged 'gc' so its tape line grays (ADR-0023)
     freshFormat() { files.clear(); device.stats.simNs = 0; fileOps = 0; },
 
     refreshHUD($) {
