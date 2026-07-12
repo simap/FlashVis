@@ -33,7 +33,7 @@ import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 // (ADR-0017 — "every active filesystem runs the same workload at once").
 const FS_REGISTRY = {
   fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS', jesfs: 'JesFS',
-  fatfs: 'FatFs + WL',   // ChaN FatFs over the ESP-IDF wear_levelling FTL
+  fatfs: 'FAT + WL',   // ChaN FatFs over the ESP-IDF wear_levelling FTL — one logical FS entry
 };
 const DEFAULT_FS = 'fastffs';
 
