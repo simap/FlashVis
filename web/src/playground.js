@@ -225,7 +225,15 @@ async function boot() {
   $('specLive').textContent = `loading ${Object.values(FS_REGISTRY).join(' + ')} (WASM)…`;
   for (const fsId of Object.keys(FS_REGISTRY)) sessions.set(fsId, await mkSession(fsId));
   coordinator.setSessions([...sessions.values()]);
-  coordinator.reset();   // fresh, empty, mounted — silent internal setup, not a tape entry
+  // Reset run state WITHOUT pre-formatting ({ format: false }): the boot log
+  // broadcast below includes format(), which is the ONE real format each chip
+  // gets — visible, journaled, true cost on the tape (ADR-0018). The old
+  // silent pre-format here ran a full second device format ahead of it (2× the
+  // erase sweep at boot — SPIFFS swept all 64 sectors twice). The short
+  // not-yet-formatted window before that command executes is safe: every
+  // driver returns blank-chip fsinfo/liveMap values, and the format command
+  // precedes any churn in the canonical sequence.
+  coordinator.reset({ format: false });
 
   // ---- command compiler → broadcast: the ONE path console input, boot
   // logging, and every poke button all go through (ADR-0018/0019). ----
@@ -521,17 +529,17 @@ async function boot() {
   $('btnFormat').addEventListener('click', () => injectCommand('format()'));
 
   // ---- Reset (header): return the WHOLE sim to its just-booted state without
-  // a page reload — stop, re-format/mount every participating FS + wipe the
-  // coordinator's sequence/cursors/clock (coordinator.reset(), the SAME call
-  // boot() makes), clear each session's tape, then replay the boot log
-  // (help()/format()) exactly like boot() does so the tape reads identically
-  // to a fresh load. Die glow/fills/wear and the flash-time/op stats all
-  // clear for free: freshFormat() → runner.format() → device.reset(), which
-  // viz.js already treats as a full repaint (see the 'reset' event handling
-  // it and refreshHUD/refreshLiveness read off of). ----
+  // a page reload — stop, wipe the coordinator's sequence/cursors/clock (the
+  // SAME { format: false } reset boot() makes), clear each session's tape,
+  // then replay the boot log (help()/format()) exactly like boot() does so the
+  // tape reads identically to a fresh load. The replayed format() command is
+  // the ONE real format each chip gets (no silent pre-format — the
+  // double-format bug); its runner.format() → device.reset() clears die
+  // glow/fills/wear and the flash-time/op stats for free, since viz.js treats
+  // the 'reset' event as a full repaint. ----
   $('btnReset')?.addEventListener('click', () => {
     setRunning(false);
-    coordinator.reset();
+    coordinator.reset({ format: false });
     for (const s of sessions.values()) s.clearJournal();
     renderFsSet();
     renderGap();

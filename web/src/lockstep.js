@@ -644,9 +644,21 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
      *  (ADR-0015's "no carryover" rule extended to N sessions). Clearing `sequence`
      *  drops any queued commands along with the churn steps, and re-seeding
      *  cmdRng makes a fresh run's broadcast content reproducible. Also zeroes the
-     *  shared Race clock and re-baselines Stop/abort bookkeeping. */
-    reset() {
-      for (const s of sessions) s.freshFormat();
+     *  shared Race clock and re-baselines Stop/abort bookkeeping.
+     *
+     *  `format` (default true) fresh-formats every chip — ADR-0016's
+     *  "participant-set change resets everyone to a fresh chip". Pass
+     *  { format: false } ONLY when a broadcast format() command is queued
+     *  immediately after (the boot / header-Reset flow): the chip is blanked
+     *  (session.blankChip — unmount + device reset, wiping flash/stats/queued
+     *  animation instantly) and that command then performs the ONE real,
+     *  journaled, animated format (ADR-0018) instead of a silent device format
+     *  followed by the command's second full one (the double-format boot bug —
+     *  SPIFFS swept all 64 sectors twice). Unmounted+blank returns blank-chip
+     *  fsinfo/liveMap values on every driver, so the short window before the
+     *  command executes is safe to poll. */
+    reset({ format = true } = {}) {
+      for (const s of sessions) (format ? s.freshFormat() : s.blankChip?.());
       churn.reset();
       sequence.length = 0;
       rnd = mulberry32(GEN_SEED);

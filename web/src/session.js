@@ -467,6 +467,22 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
      *  A fresh chip has done no file ops, so the file-op count resets too (ADR-0023);
      *  this is silent internal setup, not a tape entry, so it does not itself count. */
     freshFormat() { runner.format(); runner.mount(); fileOpCount = 0; },
+    /** Return the chip to the boot-blank state WITHOUT a device format, for a
+     *  coordinator reset that is immediately followed by a broadcast format()
+     *  command (the boot / header-Reset flow — the command performs the ONE
+     *  real, journaled, animated format; a device format here would double it).
+     *  Unmount first so no driver RAM state points at wiped flash, then
+     *  device.reset(): flash→0xFF, stats/wear zeroed, and the 'reset' event
+     *  flushes this session's viz queue/heat instantly — so Reset blanks the
+     *  die NOW instead of letting stale pre-Reset animation drain out ahead of
+     *  the replayed boot log. Unmounted+blank is the same state a fresh boot
+     *  polls (fsinfo/liveMap return blank-chip values on every driver). The
+     *  file-op count restarts too (ADR-0023). */
+    blankChip() {
+      try { runner.unmount(); } catch { /* driver-specific unmount quirks */ }
+      device.reset();
+      fileOpCount = 0;
+    },
 
     barrier: () => viz.barrier(), pending: () => viz.pending(),
     /** Log + pace primitive, exposed so the coordinator's pace hooks (and any
