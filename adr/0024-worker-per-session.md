@@ -4,8 +4,10 @@
 - **Date:** 2026-07-12
 - **Deciders:** —
 
-Amends ADR-0019: retires the Pace op-level phaser (rendezvous coarsens to the step boundary);
-the command-atomic broadcast, quiescence model, and tape lifecycle stand.
+Amends ADR-0019: the Pace op-level phaser's mechanism is replaced by a speed-scaled
+simNs-chunk barrier — sub-op-fine at slow speeds, coarse at high — so the visible op-by-op
+cross-FS pacing survives where it is perceptible; the command-atomic broadcast, quiescence
+model, and tape lifecycle stand.
 
 ## Context
 
@@ -24,33 +26,47 @@ thread as it happens — costs ~0.33 µs/event to marshal, so a compaction-scale
 serializing (measured: 40.5 k events structured-clone in 13.7 ms): **as much as executing it**.
 Fine-grained streaming merely relocates the stall.
 
-The decision is **worker per session** (not one shared worker): each filesystem gets its own core,
-so one driver's compaction never delays another's progress, and the layout matches the product's
-mental model — N independent chips racing. The consequence accepted with it: every cross-session
-rendezvous (Race metering, Pace stepping) now spans threads, so the interfaces must be **coarse**,
-sized so that synchronization and marshalling stay off the per-op path.
+The decision is **worker per session** (not one shared worker), and the goal ordering matters:
+**total simulation throughput first** — N drivers on N cores; serializing five on one thread is
+the real ceiling — **main-thread jank second** (the tens-of-ms pauses were tolerable on their
+own). Worker per session fixes both, and the layout matches the product's mental model — N
+independent chips racing. The consequence accepted with it: every cross-session rendezvous
+(Race metering, Pace stepping) now spans threads, so cross-thread traffic must be sized so that
+synchronization and marshalling stay off the per-op path — while pacing granularity itself must
+stay **sub-op-fine at slow speeds**, where watching ops interleave across filesystems is the
+product.
 
 ## Decision
 
-**Worker per session; every cross-thread interface is chunk-granular, never op-granular.**
+**Worker per session; time crosses the thread boundary as speed-scaled simNs chunks, so the
+rendezvous is exactly as fine as the current speed makes visible.**
 
-- **Grant-based scheduling replaces per-op gating.** The coordinator (main) stays the sole
-  sequence authority (ADR-0016) and issues **work grants**: in Pace, "run sequence entry k" to
-  every worker, joining on completion acks (the rendezvous moves from the per-op animation
-  barrier to the step boundary); in Race, "run until your simNs reaches R" — a released batch of
-  race-clock ns — re-granted per tick. The hot `simNs < raceClock` read disappears as a
-  cross-thread query; the worker self-meters inside its grant (Race semantics are unchanged —
-  "run while simNs < R" is today's `raceGateOpen`, evaluated worker-side; overshoot stays one op)
-  and reports `simNs`/`fileOpCount` in the ack, so the 16 ms rate sampler and the per-frame
-  waiting/stalled pins read main-side grant bookkeeping and mirrored counters, never a cross-thread
-  query on a hot path. A Pace ack fires when the entry has executed AND its metered playback
-  drained — ADR-0009's drain-to-zero, now worker-side. No SharedArrayBuffer required (kept as an
-  optimization option, accepting COOP/COEP if ever taken).
+- **The clock is released in chunks; sequence issuance keeps its ADR-0016 semantics.** Two grant
+  kinds cross the boundary. *Sequence issuance:* the coordinator (main) stays the sole sequence
+  authority — Pace issues the one shared entry to every worker (cursors move together); Race
+  lets each worker consume entries at its own cursor. *Time release:* the coordinator releases
+  the shared clock in chunks of Δ sim-ns and releases chunk n+1 only when every participant has
+  acked chunk n, so no session runs more than one chunk ahead. That IS Race's equal-active-time
+  ("run while simNs < released clock" is today's `raceGateOpen`, evaluated worker-side; overshoot
+  stays one op), and in Pace the same barrier paces playback between step joins. **Δ is tuned to
+  messaging overhead, SPEED scale, and the target frame cadence — Δ ≈ scale / target-FPS: ~50 µs
+  of sim per chunk at 333× slow-mo, ~150 ms at 10× real-time — so coordination overhead per real
+  second stays roughly constant at every speed.** The property that matters: at slow speeds the
+  chunk is far smaller than an op, so cross-FS pacing stays sub-op-fine exactly where it is
+  visible; the rendezvous coarsens only at high speeds, where per-op interleaving is imperceptible
+  anyway. Acks carry `simNs`/`fileOpCount`, so the 16 ms rate sampler and the waiting/stalled pins
+  read main-side grant bookkeeping and mirrored counters, never a cross-thread query on a hot
+  path. A Pace step ack fires when the entry has executed AND its metered playback drained —
+  ADR-0009's drain-to-zero, now worker-side. No SharedArrayBuffer required (see Alternatives for
+  what it would cost).
 - **Commands stay atomic at the command level** (ADR-0019): a console line ships as **source**
   (closures don't cross postMessage), compiles and runs worker-side against the local inner API,
   returns its result and per-op log lines in one reply. Quiescence detection moves inside the
   worker unchanged — `session.runCommand`'s in-flight counter + macrotask-boundary re-check
-  relocates with session.js, and the command's ack IS its quiescence.
+  relocates with session.js, and the command's ack IS its quiescence. **A command's awaited ops
+  resolve as released chunks cover their simulated time, so a console-pasted micro-benchmark
+  paces both across filesystems and over real time at any SPEED** — atomicity (no interleaving
+  of two commands' ops) stands.
 - **The heat field moves into the worker; the main thread pulls, it is not pushed.** Each worker
   runs its session's glow accumulation (`readHeat`/`progHeat` bump + decay — the ADR-0022
   representation) against granted time. The main thread renders the **focused** die by pulling the
@@ -93,12 +109,14 @@ sized so that synchronization and marshalling stay off the per-op path.
 - Teardown becomes a two-sided handshake: a `setSessions` removal must settle that session's
   outstanding grant acks (else a Pace round's `Promise.all` hangs and wedges the coordinator —
   ADR-0016's barrier-hang in grant form) before terminating the worker.
-- Pace's rendezvous coarsens from per-op to per-step — **this amends ADR-0019**: the
-  dynamic-membership op-level phaser is retired, and sessions within one step are no longer
-  op-interleaved in real time. Step-boundary state — the comparison the product makes — is
-  unaffected, and the tape's command-granular `queued → live → done` lifecycle (ADR-0018) survives
-  untouched: it keys off broadcast ('queued'), grant ('live'), and ack ('done') — the same
-  boundaries it already used, observed over the wire instead of in-process.
+- The dynamic-membership op-level phaser is retired in favor of the chunk barrier — **this
+  amends ADR-0019's mechanism, not its visible behavior where it matters**: at slow-mo the chunk
+  (microseconds of sim time) is far finer than an op, so the mid-command, op-by-op cross-FS
+  lockstep the phaser bought remains visible; only at high speed does the rendezvous coarsen to
+  chunk granularity, where per-op interleaving was already imperceptible. Step-boundary state is
+  unaffected, and the tape's command-granular `queued → live → done` lifecycle (ADR-0018)
+  survives untouched: it keys off broadcast ('queued'), issue ('live'), and ack ('done') — the
+  same boundaries it already used, observed over the wire instead of in-process.
 - Determinism is preserved by construction: one coordinator-owned sequence, events shipped whole,
   command source compiled per-worker with the per-command seed (ADR-0019).
 
@@ -113,6 +131,11 @@ sized so that synchronization and marshalling stay off the per-op path.
   bursts as expensive as execution; rejected.
 - **Time-slicing on the main thread:** the worst op is one WASM call with no interior yield point;
   measured ineffective; rejected.
-- **SharedArrayBuffer rings/Atomics as the baseline:** works, but drags COOP/COEP onto the dev
-  server and any static host for a cost the grant/pull design avoids; kept as an optimization,
-  not a dependency.
+- **SharedArrayBuffer rings/Atomics as the baseline:** works, and would let workers self-pace
+  with zero message overhead — but SAB requires cross-origin isolation: `COOP: same-origin` +
+  `COEP` headers on EVERY host (the dev server and any static/prod host — header-less static
+  hosts need service-worker shims), every cross-origin subresource must opt in via CORS/CORP
+  (the page's Google-Fonts load breaks without `crossorigin` or self-hosting), and the isolated
+  page can no longer interact with cross-origin popups/embeds. The chunk design needs none of
+  it, and its messaging overhead is held constant by construction (Δ ≈ scale / target-FPS);
+  kept strictly as a later optimization if measured chunk-ack latency ever bites.
