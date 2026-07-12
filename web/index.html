@@ -301,6 +301,11 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .cell[data-live="obsolete"] .fill{background:var(--stale)}
 .cell[data-live="obsolete"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
 .cell[data-live="meta"] .fill{background:var(--index)}
+/* WL (class 4, FAT+WL): the wear-levelling FTL's own bookkeeping — conceptually
+   a layer of metadata, so it renders as a SHADE of the metadata color, not a
+   new hue. Derived from --index/--panel via color-mix so it tracks every
+   palette without per-theme declarations. */
+.cell[data-live="wl"] .fill{background:color-mix(in srgb,var(--index) 45%,var(--panel))}
 .die.heat .sector{background:var(--wc,var(--sector-bg,#0c141b));border-color:#0006}
 .die.heat .cell{opacity:.13}
 .die.heat .sector.sel{box-shadow:0 0 0 1px var(--accent)}
@@ -367,6 +372,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    (the chip background shows through, mirroring a glow riding over a cell). */
 .sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
+.sw.wl{background:color-mix(in srgb,var(--index) 45%,var(--panel))}  /* shade of metadata — see [data-live="wl"] */
 .sw.glow{width:11px;height:11px;border-radius:50%;background:transparent}
 .sw.read.glow{box-shadow:inset 0 0 0 1.5px var(--read),0 0 6px 0 var(--read)}
 .sw.program.glow{box-shadow:inset 0 0 0 1.5px var(--program),0 0 6px 0 var(--program)}

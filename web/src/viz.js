@@ -411,7 +411,9 @@ export function createViz(device) {
     for (let k = 0; k < pagesPerSector; k++) {
       const p = base + k;
       if (shown[p] > 0) { progPages++; bytes += shown[p]; }
-      if (lastMap) { const c = lastMap[p]; if (c === 3) live++; else if (c === 2) obs++; else if (c === 1) meta++; }
+      // WL (class 4) and any unknown higher class count as metadata here, same
+      // as applyLiveMap's rendering fallback.
+      if (lastMap) { const c = lastMap[p]; if (c === 3) live++; else if (c === 2) obs++; else if (c === 1 || c >= 4) meta++; }
     }
     const role = meta > live + obs ? 'index / metadata' : obs > live ? 'obsolete' :
       live > 0 ? 'live data' : progPages > 0 ? 'in-flight' : 'erased';
@@ -497,13 +499,18 @@ export function createViz(device) {
 
     applyLiveMap(states) {
       lastMap = states;
-      const NAME = ['', 'meta', 'obsolete', 'live'];
-      for (let p = 0; p < npages; p++) cellEls[p].dataset.live = shown[p] > 0 ? NAME[states[p]] : '';
+      // Class 4 = driver-declared WL/FTL bookkeeping (FAT+WL), rendered as a
+      // shade of metadata. Any class beyond the table degrades to plain 'meta'
+      // — never an unstyled name, never a throw — so an FS emitting a class
+      // this UI doesn't know about stays legible.
+      const NAME = ['', 'meta', 'obsolete', 'live', 'wl'];
+      for (let p = 0; p < npages; p++) cellEls[p].dataset.live = shown[p] > 0 ? (NAME[states[p]] ?? 'meta') : '';
     },
     liveCounts() {
-      const t = [0, 0, 0, 0];
-      if (lastMap) for (let p = 0; p < npages; p++) if (shown[p] > 0) t[lastMap[p]]++;
-      return { erased: t[0], metadata: t[1], obsolete: t[2], live: t[3] };
+      const t = [0, 0, 0, 0, 0];
+      if (lastMap) for (let p = 0; p < npages; p++) if (shown[p] > 0) t[Math.min(lastMap[p], 4)]++;
+      // WL (class 4) is a species of metadata for every counter that predates it.
+      return { erased: t[0], metadata: t[1] + t[4], obsolete: t[2], live: t[3] };
     },
 
     metrics() {

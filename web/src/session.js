@@ -128,7 +128,9 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     let live = 0, obsolete = 0, metadata = 0;
     for (let p = 0; p < cachedMap.length; p++) {
       const c = cachedMap[p];
-      if (c === 3) live++; else if (c === 2) obsolete++; else if (c === 1) metadata++;
+      // Class 4 (WL/FTL bookkeeping, FAT+WL) and any unknown higher class count
+      // as metadata — matching viz.applyLiveMap's rendering fallback.
+      if (c === 3) live++; else if (c === 2) obsolete++; else if (c === 1 || c >= 4) metadata++;
     }
     cachedCounts = { live, obsolete, metadata };
   }
