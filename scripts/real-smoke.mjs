@@ -17,6 +17,13 @@ const dom = installFakeDom();
 process.on('unhandledRejection', (e) => { console.error('\nFAIL — unhandled rejection:', e && e.stack || e); process.exit(1); });
 function fail(msg) { console.error('\nFAIL —', msg); process.exit(1); }
 
+// Disable the hold-pin show-threshold (playground HOLD_SHOW_MS): the debounce
+// is real-time while this harness pumps a fake frame clock, so with it on the
+// card `.waiting` polls below would race wall-clock instead of deterministically
+// tracking the raw unified waitStates() signal (which is what the assertions
+// pin down; the debounce itself is a trivial display-side delay).
+globalThis.__flashvisHoldShowMs = 0;
+
 await import('../web/src/playground.js');   // starts boot() against the REAL backend
 
 // ---- wait for boot() (real WASM load + format + mount both FS) ----
@@ -43,6 +50,23 @@ const geo = g('geoLine').innerHTML || g('geoLine').textContent || '';
 if (!geo.includes('NOR')) fail(`geometry line looks wrong: "${geo}"`);
 if (/SOP-8/.test(geo)) fail('geometry line still says "SOP-8" (should be scrubbed)');
 
+// ---- Boot "holding on the wrong FS" guard: while the boot format() command's
+// animation drains, SPIFFS's 64-erase sweep far outlasts the other formats, so
+// the FAST FSs go idle waiting on it — THEY may show holding — but SPIFFS
+// itself (the laggard, actively draining) must NEVER flag. This was the
+// user-visible bug: the slow-formatting FS's own card read "◷ holding". ----
+let bootSawWaiter = false, bootSpiffsFlagged = false, bootDrained = false;
+for (let i = 0; i < 800 && !bootDrained; i++) {
+  await tick(1);
+  const w = FS.filter((fs) => card(fs).waiting);
+  if (w.length) bootSawWaiter = true;
+  if (w.includes('spiffs')) bootSpiffsFlagged = true;
+  bootDrained = bootSawWaiter && w.length === 0;   // waiters appeared, then all cleared = round done
+}
+if (!bootSawWaiter) fail('no FS ever showed holding during the boot format drain (the fast FSs idle on SPIFFS\'s 64-erase sweep and should flag)');
+if (bootSpiffsFlagged) fail('SPIFFS (the boot-format laggard, actively draining its own animation) flagged holding — the wrong-FS bug');
+if (!bootDrained) fail('the boot format round never drained to all-clear within the poll bound');
+
 // ---- Pace: running advances real flash time; readouts are sane (no NaN) ----
 // Poll rather than fixed-wait: Pace's first churn round starts only after every
 // session's player drains its boot format, and SPIFFS's format erases all 64
@@ -63,26 +87,36 @@ if (!/^\d+$/.test(card('fastffs').v)) fail(`Race vital should be an integer op c
 if (!/ops\/s$/.test(card('fastffs').tag)) fail(`Race tag should end "ops/s", got "${card('fastffs').tag}"`);
 
 // ---- The stall indicator (Race analog of pace holding): run Pace long enough to
-// diverge the two FS in flash time, switch to Race (raceClock reseats to the min,
-// so the ahead FS is stalled until the clock climbs), and watch the cards. The
-// ahead FS must read "waiting"; the FS at the frontier must NOT; and never both at
-// once (that would be the flicker bug). ----
+// diverge the FSs in flash time, switch to Race (raceClock reseats to the min, so
+// every ahead FS is stalled until the clock climbs), and watch the cards. Ahead
+// FSs must read "waiting"; the FRONTIER FS — the min-flash-time laggard defining
+// the reseated clock's floor, i.e. the one everybody is waiting FOR — must NEVER
+// be flagged (the "holding on the wrong FS" bug). ----
 dom.dispatch('modeWheel');          // back to Pace
 await tick(400);                    // let flash time diverge
-dom.dispatch('modeWheel');          // -> Race; ahead FS should stall
+// Identify the frontier BEFORE switching: in Pace the card vital is that FS's
+// own flash time, so the smallest parsed time marks the laggard/frontier.
+const parseTimeMs = (t) => { const m = String(t).match(/([\d.]+)\s*(ms|s)$/); return m ? parseFloat(m[1]) * (m[2] === 's' ? 1000 : 1) : NaN; };
+const paceMs = Object.fromEntries(FS.map((fs) => [fs, parseTimeMs(card(fs).v)]));
+for (const fs of FS) if (!(paceMs[fs] > 0)) fail(`could not parse ${fs}'s Pace flash-time vital ("${card(fs).v}") to find the frontier`);
+const frontierFs = FS.reduce((a, b) => (paceMs[a] <= paceMs[b] ? a : b));
+dom.dispatch('modeWheel');          // -> Race; the ahead FSs should stall
 
 // With N participants, every FS ahead of the reseated clock may wait at once —
-// only the frontier FS (defining raceClock's floor) must never be flagged. So the
-// invariant is "a nonempty PROPER subset waits": all-N-waiting is the flicker bug.
-let sawAnyWaiter = false, sawAllWaiting = false;
+// only the frontier FS must never be flagged. So the invariant is "a nonempty
+// PROPER subset waits, never including the frontier": all-N-waiting (or a
+// flagged frontier) is the wrong-FS bug.
+let sawAnyWaiter = false, sawAllWaiting = false, sawFrontierWaiting = false;
 for (let round = 0; round < 12; round++) {
   await tick(8);
   const w = FS.filter((fs) => card(fs).waiting);
   if (w.length) sawAnyWaiter = true;
   if (w.length === FS.length) sawAllWaiting = true;
+  if (w.includes(frontierFs)) sawFrontierWaiting = true;
 }
 if (!sawAnyWaiter) fail('Race stall indicator never fired after a Pace->Race divergence (the ahead FS should show "waiting")');
 if (sawAllWaiting) fail('Race stall indicator flagged EVERY FS at once (the frontier FS should never wait)');
+if (sawFrontierWaiting) fail(`Race stall indicator flagged the FRONTIER FS (${frontierFs}, min flash time — the laggard the others wait on); the laggard must never show holding`);
 
 // ---- typed gc() must report + glow exactly like churn-driven GC (fix: used to
 // route through the undefined api.fs.gcStep and silently do nothing). Pause
@@ -118,8 +152,10 @@ if (!formatSettled) fail(`Reset's replayed format() never completed on the tape:
 if (Number(g('sFiles').textContent) !== 0) fail(`Reset should return the focused FS to 0 files, HUD shows sFiles="${g('sFiles').textContent}"`);
 if (/NaN|undefined/.test(card('fastffs').v)) fail(`fastffs vital looks wrong after Reset: "${card('fastffs').v}"`);
 
-console.log('PASS — real backend: both FS boot on real WASM, Pace advances flash time,');
-console.log('       Race shows workload "ops done" + ops/s, geometry has no "SOP-8", the');
-console.log('       Race stall indicator fires for the ahead FS (only) after a Pace->Race divergence,');
-console.log('       typed gc() reports timing/op-stats on the tape like churn-driven GC, and the header');
-console.log('       Reset control stops the sim, re-formats every FS, and wipes+replays the tape.');
+console.log('PASS — real backend: all FS boot on real WASM; during the boot-format drain the fast');
+console.log('       FSs show holding while SPIFFS (the draining laggard) never does; Pace advances');
+console.log('       flash time; Race shows workload "ops done" + ops/s; geometry has no "SOP-8";');
+console.log('       after a Pace->Race divergence the stall indicator fires for ahead FSs only —');
+console.log('       never all at once, never the frontier (min flash time) FS; typed gc() reports');
+console.log('       timing/op-stats on the tape like churn-driven GC; and the header Reset control');
+console.log('       stops the sim, wipes+replays the tape, landing exactly one replayed format.');

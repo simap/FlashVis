@@ -78,19 +78,22 @@ const RACE_STEP_GUARD = 8000;
 // permanently behind the clock at no-delay.
 const NO_DELAY_STEP_NS = 50 * 1e6;
 
+// Race holding (holdingNow): an idle, clock-gated FS counts as WAITING ON THE
+// OTHERS only when its simNs sits more than this above the field's minimum —
+// the FS at the min (the frontier) has a gap of 0 and NEVER flags, and an FS
+// merely pacing between ops at Speed (gate shut for one op-cost) stays under
+// it. A real post-divergence equalization lead is far above 50 ms of flash
+// time; a single big op (one erase, 21 ms) stays below. (A LittleFS compaction
+// can transiently exceed it right after its burst — the display-side show
+// threshold absorbs that flicker.)
+const STALL_GAP_NS = 50 * 1e6;
+
 // snapshots().opsPerSec (ADR-0020): WORKLOAD ops/sec (sequence steps consumed),
 // smoothed with a ~2s time constant. Workload ops arrive coarsely (one whole
 // step at a time, so the raw per-tick rate is spiky: 0 on most ticks, a burst on
 // the tick a step lands). A longer tau averages those into a steady bar instead
 // of a twitchy one, while still decaying visibly to 0 once the dies go idle.
 const OPS_EMA_TAU_MS = 2000;
-
-// Race-stall (snapshots().stalled): a race FS whose simNs sits more than this
-// above the running frontier (the min simNs the shared clock is serving) is
-// waiting for raceClock to climb to it, not just overshooting the clock by one
-// op. 50ms of flash time is far above any single-step overshoot and far below a
-// real Pace→Race divergence.
-const STALL_GAP_NS = 50 * 1e6;
 
 // ---- Pace's op-level rendezvous: a DYNAMIC-MEMBERSHIP phased barrier (ADR-0019) ----
 // Phase k releases when every session STILL ACTIVE in this command has arrived at
@@ -124,6 +127,12 @@ function createPhaser(participants) {
       arrivals.delete(session);
       tryRelease();       // a departure can itself satisfy a pending phase
     },
+    /** True while `session` has arrived at the CURRENT phase and is parked
+     *  waiting for the release — the mid-command "idle, waiting on a slower
+     *  peer's op" state the holding signal needs to see (holdingNow). NB: a
+     *  session ARRIVES the moment its op finishes executing, possibly while its
+     *  own animation still drains — holdingNow's pending() guard covers that. */
+    parked(session) { return arrivals.has(session); },
   };
 }
 
@@ -166,6 +175,11 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
   // draining its op's animation has an UNRESOLVED barrier and is NOT in here, so
   // "still animating" never reads as waiting (the naive "simNs didn't move" bug).
   let paceWaiting = new Set();
+  // The live command round's phaser (null between command rounds): holdingNow
+  // reads its parked() so a session idling MID-command — arrived at the current
+  // op phase, waiting on a slower peer's op (e.g. everyone parked on SPIFFS's
+  // 64-erase boot format) — reads as holding, not just post-quiescence waits.
+  let pacePhaser = null;
 
   // ---- Stop/abort (ADR-0019 Consequences): every command execution captures the
   // token active when it STARTS. stop() flips it aborted and resolves its promise
@@ -414,6 +428,7 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
       paceArrived = new Set();
       paceWaiting = new Set();
       const phaser = createPhaser(due);
+      pacePhaser = phaser;                 // visible to holdingNow for the round's lifetime
       // A due session marks itself "holding" the moment its own ops quiesce (it
       // has left the phaser) — so if a slower peer is still issuing ops, this one
       // reads as parked-waiting until the whole round's barrier releases below.
@@ -431,6 +446,8 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
         // abort/advance branches below. Rewind (cursor stays at i), mirroring the
         // command-abort model — the FS is recoverable, not frozen.
         releaseBusy(); paceArrived = new Set(); paceWaiting = new Set(); return;
+      } finally {
+        pacePhaser = null;                 // command ops done (or abandoned) — no live phaser to park in
       }
       if (tok.aborted) { releaseBusy(); paceArrived = new Set(); paceWaiting = new Set(); return; }   // abandoned mid-flight — cursors stay at i, lock released
     } else {
@@ -475,43 +492,64 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
     sampleRates(now);
   }, 16);
 
-  // ---- `waiting`: the instantaneous "this FS sim is paused" signal (per-frame
-  // counterpart to the coarse holding/stalled card readouts). True ONLY when a
-  // session WANTS to dispatch its next sequence step but a cross-FS / clock gate
-  // won't let it. Evaluated FRESH from current gate state (no tick-delayed
-  // sample), so a per-rAF poll sees a pause the instant it begins and clears.
-  // FALSE while executing OR animating an op, FALSE when idle at the frontier,
-  // FALSE when stopped with nothing to run. Backs both snapshots().waiting and the
-  // cheap waitStates(). ----
-  function isWaiting(s) {
+  // ---- HOLDING (unified, mode-agnostic): an FS is holding iff it is IDLE —
+  // its own player fully drained, nothing of its own left to execute — BECAUSE
+  // the coordinator cannot advance it until OTHER participants catch up. The
+  // session still executing or draining its animation (the laggard) must NEVER
+  // read as holding, in either mode: the `pending() > 0` guard is the first
+  // check (the boot bug flagged the slow-formatting FS itself). Race: idle
+  // at/above the shared clock with work ahead — the clock is climbing to it
+  // because slower peers hold the frontier down (post-divergence simNs
+  // equalization). Pace: finished the current round — command quiesced
+  // (paceArrived), round drain-barrier resolved (paceWaiting), or cursor ahead
+  // of the shared min (the Race→Pace catch-up lead) — while some OTHER
+  // participant has not. ONE predicate backs snapshots().holding/stalled/
+  // waiting AND waitStates(), so every consumer shares the definition; the UI
+  // layers a show-threshold on top (playground's hold loop) so a sub-tick
+  // flicker never paints. Evaluated FRESH from current gate state — cheap
+  // enough (no fsinfo/liveness walk) to poll every animation frame. ----
+  function holdingNow(s) {
+    if (s.pending() > 0) return false;   // executing / animating = running, never holding
+    const c = cursors.get(s) ?? 0;
     if (mode === 'race') {
       // NB: `busy` (a command in flight) is NOT "running" — a Race command holds
-      // `busy` for its whole life, INCLUDING while its next op is parked at the race
-      // gate waiting for the clock (that is genuinely waiting). So we never key off
-      // busy; the clock + animation test below is the real discriminator.
+      // `busy` for its whole life, INCLUDING while its next op is parked at the
+      // race gate waiting for the clock (that is genuinely holding). So we never
+      // key off busy; the clock + the pending() guard above discriminate.
       // hasWork: a queued step, or `running` (the producer will extend the
       // frontier) — false at an idle frontier and when stopped with nothing queued.
-      const hasWork = (cursors.get(s) ?? 0) < sequence.length || running;
-      if (!hasWork) return false;
-      // Gate open (simNs < raceClock): the op can dispatch right now — not paused.
-      if (s.device.stats.simNs < raceClock) return false;
-      // Still animating a dispatched op — RUNNING, not paused. Race advances each
-      // session synchronously up to the clock every tick, so the FS actively RACING
-      // sits at/above the clock at rest while the op it just dispatched drains its
-      // animation; without this it would read waiting for the whole race and the CS
-      // pin would stay dark. This is exactly [14]'s Pace rule ("still animating never
-      // reads as waiting") extended to Race. A genuinely clock-blocked FS reads
-      // waiting once its last op's animation drains to quiescence (pending() === 0).
-      if (s.pending() > 0) return false;
-      // Quiescent AND caught the shared clock: the next op can't dispatch until the
-      // clock advances — the CLOCK reason (paused).
-      return true;
+      const hasWork = c < sequence.length || running;
+      if (!hasWork || s.device.stats.simNs < raceClock) return false;
+      // Idle and clock-gated — but is it waiting ON THE OTHERS, or merely
+      // pacing between its own ops at Speed? The sim-domain discriminator: its
+      // simNs lead over the slowest participant (the frontier, which holds the
+      // reseated clock's floor down). The frontier's own gap is 0, so the
+      // laggard everyone waits for can never flag; an inter-op pacing pause is
+      // one op-cost, under STALL_GAP_NS; an equalization lead is far above it.
+      const minSim = sessions.length ? Math.min(...sessions.map((t) => t.device.stats.simNs)) : 0;
+      return (s.device.stats.simNs - minSim) > STALL_GAP_NS;
     }
-    // Pace: this session resolved its own barrier()/phaser for the round while a
-    // peer has not (paceWaiting). A session still executing or draining its op's
-    // animation has an unresolved barrier and is NOT in the set -> not waiting. The
-    // size guard drops the flag the instant everyone has arrived (round advancing).
-    return paceWaiting.has(s) && paceWaiting.size < sessions.length;
+    // Pace. "Done for now": quiesced its command (paceArrived), resolved the
+    // round's drain barrier (paceWaiting), parked MID-command at the live
+    // phaser's current phase (arrived, waiting on a slower peer's op — the
+    // boot-format case), or leading the min cursor (nothing queued for it
+    // until the laggards climb). "Blocked by others": a peer is genuinely
+    // behind this cursor, or shares it and is still working — not done, OR
+    // done-but-draining (a phaser arrival can precede its own animation
+    // finishing; that peer is still the thing being waited on).
+    const doneSet = (t) => paceArrived.has(t) || paceWaiting.has(t) || (pacePhaser ? pacePhaser.parked(t) : false);
+    const stillWorking = (t) => !doneSet(t) || t.pending() > 0;
+    let leads = false, peerWorking = false;
+    for (const t of sessions) {
+      if (t === s) continue;
+      const ct = cursors.get(t) ?? 0;
+      if (ct < c) { leads = true; peerWorking = true; }
+      else if (ct === c && stillWorking(t)) peerWorking = true;
+    }
+    // The (leads || doneSet(s)) term keeps a fully idle frontier dark: with no
+    // round in flight nobody is in the sets and every cursor is equal, so no
+    // session may read as waiting on the others — they are all just idle.
+    return peerWorking && (leads || doneSet(s));
   }
 
   return {
@@ -596,6 +634,7 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
       busy.clear();
       raceWaiters = [];
       paceWaiting = new Set();
+      pacePhaser = null;
     },
     get running() { return running; },
     /** Manual single nudge: every session gets its own next step in Race
@@ -674,6 +713,7 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
       lastSampleNow = 0;
       paceArrived = new Set();
       paceWaiting = new Set();
+      pacePhaser = null;
     },
     /** Append one ATOMIC COMMAND at the sequence frontier ("present"), so the
      *  leader hits it next and each follower hits it when its cursor arrives —
@@ -726,8 +766,6 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
      *  session's own mapDirty gate and pure (no viz mutation), so this readout
      *  neither re-walks the live map itself nor mutates the die from a getter. */
     snapshots() {
-      const minCursor = sessions.length ? Math.min(...sessions.map((s) => cursors.get(s) ?? 0)) : 0;
-      const minSim = sessions.length ? Math.min(...sessions.map((s) => s.device.stats.simNs)) : 0;
       return sessions.map((s) => {
         const info = s.runner.fsinfo();
         const stats = s.device.stats;
@@ -742,34 +780,27 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
         // the sequence position (Pace rendezvous / present-gap), NOT the op count.
         const opsPerSec = Math.max(0, opsEma.get(s) ?? 0);
         const fileOpCount = s.fileOpCount ?? 0;
-        // holding: this FS reached the Pace frontier and is blocked on the
-        // laggard — either its cursor leads the shared min (a Race→Pace catch-up
-        // leftover: nothing queued for it, sitting in the round's barrier) or it
-        // finished the live command's ops and is parked in the phaser waiting on a
-        // slower peer (paceArrived). Never true in Race, nor when not waiting.
-        const holding = mode === 'pace' && (cursor > minCursor || paceArrived.has(s));
-        // stalled: the Race analog of pace holding. After a Pace→Race switch the
-        // ahead FS sits above the reseated clock and can't advance until raceClock
-        // climbs to it, while the FS at the frontier races on. Flag it when it is
-        // meaningfully ahead of the running frontier (min simNs) — a normal race
-        // overshoot is one op (< STALL_GAP_NS), a real stall is the whole divergence
-        // — and only while the race clock is actively advancing (lastTickNow set),
-        // so a paused/idle race doesn't read as waiting. Bursty pacing (run to the
-        // clock, wait, jump) is why we key on the simNs gap, not on frozen ticks.
-        const stalled = mode === 'race' && lastTickNow !== 0 && (stats.simNs - minSim) > STALL_GAP_NS;
-        // waiting: instantaneous "the FS sim is paused" (see isWaiting), the
-        // per-frame counterpart to holding/stalled, IN ADDITION to them (unchanged).
-        const waiting = isWaiting(s);
+        // holding / stalled / waiting are ONE signal now (holdingNow, above):
+        // idle because the others must catch up, never the laggard itself.
+        // `holding` is its Pace face and `stalled` its Race face (kept as
+        // separate fields for existing consumers); `waiting` is the raw
+        // mode-agnostic instantaneous value. All three agree with waitStates()
+        // by construction — the UI adds its show-threshold on top.
+        const hn = holdingNow(s);
+        const holding = mode === 'pace' && hn;
+        const stalled = mode === 'race' && hn;
+        const waiting = hn;
         return { fsId: s.fsId, name: s.name, stepCursor: cursor, fileOpCount, simNs: stats.simNs, wa, files: info.files, garbagePct, opsPerSec, holding, stalled, waiting };
       });
     },
-    /** Cheap per-fsId `waiting` map (the same signal snapshots().waiting carries),
-     *  with NO fsinfo()/liveness walk, so it is light enough to poll every animation
-     *  frame (the CS "sim paused" pin). Reads the SAME underlying gate state as
-     *  snapshots().waiting. Returns `{ [fsId]: boolean }`. */
+    /** Cheap per-fsId HOLDING map (the same unified signal snapshots().waiting
+     *  carries — holdingNow), with NO fsinfo()/liveness walk, so it is light
+     *  enough to poll every animation frame (the FS-card pins + CS status dot).
+     *  Raw and instantaneous: the display-side show-threshold lives in the UI.
+     *  Returns `{ [fsId]: boolean }`. */
     waitStates() {
       const out = {};
-      for (const s of sessions) out[s.fsId] = isWaiting(s);
+      for (const s of sessions) out[s.fsId] = holdingNow(s);
       return out;
     },
   };

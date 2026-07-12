@@ -643,6 +643,12 @@ async function scenarioPaceHolding() {
   else ok('holding is false in Race mode (mode guard)');
   rig.coord.stop();
   rig.coord.setMode('pace');
+  // Unified holding semantics: an FS flags ONLY once its own player is drained
+  // (pending() === 0) — a lead FS still draining its Race backlog is running,
+  // not holding. Drain the PLAYERS only (viz frames, no coordinator ticks, so
+  // the diverged cursors stay put), then sample.
+  for (let g2 = 0; g2 < 800 && rig.sessions.some((s) => s.pending() > 0); g2++) { rig.dom.tick(1); await flushMacro(); }
+  if (rig.sessions.some((s) => s.pending() > 0)) { fail('[11] players never drained after stop() (cannot sample holding)'); return; }
   const s0 = Object.fromEntries(rig.coord.snapshots().map((s) => [s.fsId, s]));
   const lead = s0.fastffs.stepCursor >= s0.littlefs.stepCursor ? 'fastffs' : 'littlefs';
   const lag = lead === 'fastffs' ? 'littlefs' : 'fastffs';
@@ -744,14 +750,19 @@ async function scenarioWaitingNotWhileAnimating() {
   const rig = await makeRig({ speed: PACE_WAIT_SPEED });
   rig.coord.setMode('pace');
   rig.coord.start();
-  let sawAnimating = false, bug = false, bugWho = '';
+  let sawAnimating = false, bug = false, bugWho = '', holdBug = false, holdWho = '';
   for (let t = 0; t < 900; t++) {
     tickOnce(rig.dom); await flushMacro();
     const ws = rig.coord.waitStates();
+    const snaps = Object.fromEntries(rig.coord.snapshots().map((x) => [x.fsId, x]));
     for (const s of rig.sessions) {
       if (s.pending() > 0) {                          // actively animating a completed op (simNs flat)
         sawAnimating = true;
         if (ws[s.fsId]) { bug = true; bugWho = s.fsId; }
+        // Bug-1 guard (the "holding on the WRONG FS" boot bug): the card-facing
+        // snapshot fields must obey the same invariant — an FS still draining
+        // its own animation (the laggard) may NEVER read holding/stalled.
+        if (snaps[s.fsId].holding || snaps[s.fsId].stalled) { holdBug = true; holdWho = s.fsId; }
       }
     }
   }
@@ -759,6 +770,8 @@ async function scenarioWaitingNotWhileAnimating() {
   else ok('exercised many op-animation drains (pending() > 0 while simNs flat)');
   if (bug) fail(`[14] a session (${bugWho}) read waiting WHILE actively animating an op - the naive-simNs regression`);
   else ok('no actively-animating session ever read waiting (execution/animation is not paused)');
+  if (holdBug) fail(`[14] a session (${holdWho}) read holding/stalled WHILE actively animating - the wrong-FS holding bug`);
+  else ok('no actively-animating session ever read holding/stalled (the laggard never flags)');
 }
 
 // ---- Scenario 15 (KEY REGRESSION, RACE): `waiting` is FALSE while a RACE op
@@ -778,14 +791,17 @@ async function scenarioWaitingNotWhileAnimatingRace() {
   const rig = await makeRig({ speed: PACE_WAIT_SPEED });
   rig.coord.setMode('race');
   rig.coord.start();
-  let sawAnimating = false, bug = false, bugWho = '';
+  let sawAnimating = false, bug = false, bugWho = '', holdBug = false, holdWho = '';
   for (let t = 0; t < 900; t++) {
     tickOnce(rig.dom); await flushMacro();
     const ws = rig.coord.waitStates();
+    const snaps = Object.fromEntries(rig.coord.snapshots().map((x) => [x.fsId, x]));
     for (const s of rig.sessions) {
       if (s.pending() > 0) {                          // actively animating a dispatched op (simNs at/above the clock)
         sawAnimating = true;
         if (ws[s.fsId]) { bug = true; bugWho = s.fsId; }
+        // Bug-1 guard, Race face: a still-draining FS never reads holding/stalled.
+        if (snaps[s.fsId].holding || snaps[s.fsId].stalled) { holdBug = true; holdWho = s.fsId; }
       }
     }
   }
@@ -793,6 +809,8 @@ async function scenarioWaitingNotWhileAnimatingRace() {
   else ok('exercised many Race op-animation drains (pending() > 0 while simNs at/above the clock)');
   if (bug) fail(`[15] a session (${bugWho}) read waiting WHILE actively animating a Race op - a running FS misreported as paused`);
   else ok('no actively-animating Race session ever read waiting (execution/animation is not paused)');
+  if (holdBug) fail(`[15] a session (${holdWho}) read holding/stalled WHILE actively animating - the wrong-FS holding bug`);
+  else ok('no actively-animating Race session ever read holding/stalled (the laggard never flags)');
 }
 
 // ---- run all ----

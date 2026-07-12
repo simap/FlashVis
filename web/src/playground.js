@@ -368,10 +368,11 @@ async function boot() {
       card.setAttribute('aria-pressed', String(snap.fsId === focusedFsId));
       const good = goodOf(snap);
       card.classList.toggle('leader', leaderGood > 0 && good >= leaderGood);
-      // Parked-waiting indicator: pace "holding" (waiting on the laggard) OR race
-      // "waiting" (ahead of the shared clock, stalled until it climbs up). Same
-      // visual, mode-aware label.
-      card.classList.toggle('waiting', !!snap.holding || !!snap.stalled);
+      // Parked-waiting indicator: the card's `.waiting` class is OWNED by the
+      // per-frame hold loop (below the intervals), which debounces the unified
+      // waitStates() signal — never toggled from this 250 ms telemetry tick,
+      // or the two cadences would fight. Only the mode-appropriate pin LABEL
+      // is kept fresh here.
       $('fsHold-' + snap.fsId).textContent = mode === 'race' ? '◷ waiting' : '◷ holding';
       // Mode-aware vital: RACE = workload ops done (more wins) = fileOpCount, the
       // high-level FILE ops this FS got through in the shared flash-time budget
@@ -466,24 +467,40 @@ async function boot() {
   setInterval(() => activeSession.refreshLiveness($), 250);
   setInterval(() => { renderFsSet(); renderGap(); }, 250);
 
-  // ---- CS (pin 1) activity indicator: the fast, twitchy per-frame twin of
-  // the card's holding/stalled readout (ADR-0020's waitStates(), read fresh
-  // every frame — never cached). Cheap (no WASM/liveness walk), so a plain
-  // rAF loop is fine; not folded into the 250ms renderFsSet interval because
-  // that cadence would flatten the RACE burst-flicker this pin exists to
-  // show. Reflects whichever fs is FOCUSED, re-read every frame since focus
-  // can change under it. Guarded so a headless/test DOM without rAF (or
-  // before `coordinator` exists) never throws. ----
+  // ---- HOLD indicators — every FS card's pin AND the CS (pin 1) status dot:
+  // one per-frame fast path over coordinator.waitStates(), the unified holding
+  // signal (lockstep holdingNow — an FS is holding iff it is IDLE because the
+  // others must catch up; an FS still executing or draining its animation
+  // never flags). A pin SHOWS only after the raw signal has held continuously
+  // for HOLD_SHOW_MS — a sub-frame flicker never paints — and CLEARS instantly
+  // the moment the signal drops. Runs per animation frame (cheap: waitStates
+  // does no fsinfo/liveness walk), never on the 250 ms telemetry tick, so the
+  // display tracks the sim in real time. The CS pin mirrors whichever FS is
+  // FOCUSED, re-read every frame since focus can change under it. ----
+  // Test seam (same idea as __flashvisBackend): harnesses set
+  // globalThis.__flashvisHoldShowMs = 0 so fake-clock polls stay deterministic
+  // instead of racing a real-time debounce.
+  const HOLD_SHOW_MS = globalThis.__flashvisHoldShowMs ?? 300;
+  const holdSince = new Map();   // fsId -> performance.now() when the raw signal turned true
   const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
   const pinCS = $('pinCS');
-  if (pinCS) {
-    (function csTick() {
-      const waiting = !!coordinator.waitStates()[focusedFsId];
-      pinCS.classList.toggle('cs-active', !waiting);
-      pinCS.classList.toggle('cs-paused', waiting);
-      raf(csTick);
-    })();
-  }
+  (function holdTick() {
+    const now = performance.now();
+    const ws = coordinator.waitStates();
+    for (const fsId of Object.keys(ws)) {
+      let show = false;
+      if (ws[fsId]) {
+        if (!holdSince.has(fsId)) holdSince.set(fsId, now);
+        show = now - holdSince.get(fsId) >= HOLD_SHOW_MS;
+      } else holdSince.delete(fsId);
+      $('fsCard-' + fsId)?.classList.toggle('waiting', show);
+      if (pinCS && fsId === focusedFsId) {
+        pinCS.classList.toggle('cs-active', !show);
+        pinCS.classList.toggle('cs-paused', show);
+      }
+    }
+    raf(holdTick);
+  })();
 
   // ---- Run/Pause, Step: act on the WHOLE participating set via the coordinator. ----
   const setRunning = (v) => {

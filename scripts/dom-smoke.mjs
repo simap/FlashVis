@@ -25,6 +25,10 @@ const dom = installFakeDom();
 const fail = (msg) => { console.error('FAIL —', msg); dom.uninstall(); process.exit(1); };
 
 globalThis.__flashvisBackend = { createSession, createLockstep };
+// Disable the hold-pin show-threshold (playground HOLD_SHOW_MS): this harness
+// pumps a fake frame clock, so a real-time debounce would race the poll loops;
+// with 0 the card/pin classes track the raw unified waitStates() signal.
+globalThis.__flashvisHoldShowMs = 0;
 
 await import('../web/src/playground.js');   // starts boot()
 
