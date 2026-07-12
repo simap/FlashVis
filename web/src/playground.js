@@ -247,9 +247,17 @@ async function boot() {
     const echo = e.cls === 'in' ? '› ' : '';
     return icon + echo + e.text;
   }
+  // GC lines render gray — "there, but in the background" (ADR-0023). GC is not a
+  // workload op, so its tape lines are visually demoted while still carrying their
+  // flash-time cost (so summing every line's time — gray ones included — still
+  // reconstructs the flash-time total). A gc op-result line reads `gc() → …` and a
+  // gc(n) reads `gc(3) → …`, so a `gc(` prefix on the raw text uniquely tags them
+  // (no file op's result line starts with `gc(`); the typed-command echo is `> gc()`
+  // and is deliberately left un-grayed, as it is input, not an op line.
+  const isGcLine = (e) => /^gc\(/.test(e.text || '');
   function tapeLine(e) {
     const el = document.createElement('div');
-    el.className = 'line ' + (e.cls || 'out');
+    el.className = 'line ' + (e.cls || 'out') + (isGcLine(e) ? ' gc' : '');
     el.dataset.state = e.state || 'done';
     el.dataset.jid = e.id;          // stamp the journal id so the DOM-cap eviction can drop this node's tapeNodes entry
     el.textContent = tapeText(e);
@@ -331,7 +339,7 @@ async function boot() {
     // of ms/op): in lockstep Pace every FS shares the same ops/sec, so only the
     // per-op flash cost separates them, and less time per op reads as the
     // fuller/leading bar.
-    const goodOf = (s) => (mode === 'race' ? (s.opsPerSec || 0) : (s.simNs > 0 ? s.stepCursor / s.simNs : 0));
+    const goodOf = (s) => (mode === 'race' ? (s.opsPerSec || 0) : (s.simNs > 0 ? s.fileOpCount / s.simNs : 0));
     const leaderGood = snaps.reduce((m, s) => Math.max(m, goodOf(s)), 0);
     for (const snap of snaps) {
       if (!fsSetBuilt.has(snap.fsId)) {
@@ -349,16 +357,17 @@ async function boot() {
       // visual, mode-aware label.
       card.classList.toggle('waiting', !!snap.holding || !!snap.stalled);
       $('fsHold-' + snap.fsId).textContent = mode === 'race' ? '◷ waiting' : '◷ holding';
-      // Mode-aware vital: RACE = workload ops done (more wins) = stepCursor, the
-      // sequence steps this FS got through in the shared flash-time budget; PACE =
-      // flash time (less wins). The bar rates goodness (throughput / efficiency);
-      // the tag carries the live number — ops/sec in Race, ms/op in Pace. Flash
-      // ops (reads/programs/erases) are the COST view (the die + Flash Stats),
-      // deliberately not the "ops" the compare modes measure.
-      $('fsV-' + snap.fsId).textContent = mode === 'race' ? String(snap.stepCursor) : fmtTime(snap.simNs);
+      // Mode-aware vital: RACE = workload ops done (more wins) = fileOpCount, the
+      // high-level FILE ops this FS got through in the shared flash-time budget
+      // (ADR-0023 — a whole console loop counts each inner op, and GC no-ops never
+      // count); PACE = flash time (less wins). The bar rates goodness (throughput /
+      // efficiency); the tag carries the live number — ops/sec in Race, ms/op in
+      // Pace. Flash ops (reads/programs/erases) are the COST view (the die + Flash
+      // Stats), deliberately not the "ops" the compare modes measure.
+      $('fsV-' + snap.fsId).textContent = mode === 'race' ? String(snap.fileOpCount) : fmtTime(snap.simNs);
       $('fsL-' + snap.fsId).textContent = mode === 'race' ? 'ops done' : 'flash time';
       $('fsBar-' + snap.fsId).style.width = (leaderGood > 0 ? Math.round((good / leaderGood) * 100) : 0) + '%';
-      $('fsTag-' + snap.fsId).textContent = mode === 'race' ? `${fmtRate(snap.opsPerSec || 0)} ops/s` : fmtPerOp(snap.simNs, snap.stepCursor);
+      $('fsTag-' + snap.fsId).textContent = mode === 'race' ? `${fmtRate(snap.opsPerSec || 0)} ops/s` : fmtPerOp(snap.simNs, snap.fileOpCount);
     }
   }
 

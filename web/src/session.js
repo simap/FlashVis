@@ -210,6 +210,20 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
 
   let prepMode = false;
 
+  // ADR-0023: file-granular op count, decoupled from the coordinator's sequence
+  // cursor. Incremented by exactly 1 per HIGH-LEVEL file operation — the friendly
+  // API surface (writeFile/readFile/deleteFile/ls/getFiles/mkdir/stat), the
+  // lifecycle ops (fs.format/mount/unmount), and each churn file-event — and
+  // NEVER at runOp() (shared with the fs-level handle/dir rung), never on gc
+  // (background maintenance), never at the command boundary. So a whole console
+  // line like `for (i=0;i<100;i++) ls()` counts 100, and a bare writeFile counts
+  // 1 even though it internally does open+write+close. This is the number the
+  // scoreboard shows as "ops done" / rates ops-per-sec against (lockstep.js reads
+  // it via s.fileOpCount); the cursor stays the sequence index and Pace rendezvous
+  // unit, untouched.
+  let fileOpCount = 0;
+  const bumpFileOp = () => { fileOpCount += 1; };
+
   // ---- the LOCAL inner API (ADR-0014 refined by ADR-0019) ----
   // Built fresh per command invocation (runCommand, below) around a per-command
   // seeded RNG and the coordinator's pace hooks. Every op funnels through
@@ -261,6 +275,7 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     function writeFile(name, size) {
       const n = name ?? randomName();
       const sz = size ?? randomSize();
+      bumpFileOp();
       return runOp(`write(${n}, ${sz} B)`, () => {
         runner.write(n, deterministicBytes(hashNameSize(n, sz), sz));
         return { name: n, size: sz };
@@ -268,10 +283,12 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     }
     function readFile(arg) {
       const n = resolveName(arg);
+      bumpFileOp();
       return runOp(`read(${n})`, () => ({ name: n, size: runner.read(n).length }));
     }
     function deleteFile(arg) {
       const n = resolveName(arg);
+      bumpFileOp();
       return runOp(`delete(${n})`, () => {
         const st = runner.stat(n);
         runner.remove(n);
@@ -280,7 +297,9 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
     }
     async function mkdir(path) {
       // mkdir -p: each path component is its own paced op (ADR-0014), real on
-      // hierarchical FSs, a no-op success on flat ones.
+      // hierarchical FSs, a no-op success on flat ones. One FILE op per mkdir
+      // CALL (ADR-0023), regardless of how many components it creates.
+      bumpFileOp();
       let cur = '';
       for (const part of String(path).split('/').filter(Boolean)) {
         cur += (cur ? '/' : '') + part;
@@ -308,9 +327,12 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
       if (sorted) files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
       return files;
     }
-    const ls = (prefix) => scanDir(prefix, { printEach: true, sorted: false });
-    const getFiles = (prefix) => scanDir(prefix, { printEach: false, sorted: true });
-    const stat = (name) => runOp(`stat(${name})`, () => runner.stat(name));
+    // ls/getFiles/stat each count as ONE file op per call (ADR-0023), even though
+    // ls/getFiles internally fan out into openDir + N×dir.read + dir.close (the
+    // fs rung, below the line and NOT counted).
+    const ls = (prefix) => { bumpFileOp(); return scanDir(prefix, { printEach: true, sorted: false }); };
+    const getFiles = (prefix) => { bumpFileOp(); return scanDir(prefix, { printEach: false, sorted: true }); };
+    const stat = (name) => { bumpFileOp(); return runOp(`stat(${name})`, () => runner.stat(name)); };
     // Console/button gc(n=1): routes through the SAME runOp (paced, timed,
     // journal-logged, die-animated) path every other console helper uses —
     // previously this fell through to the undefined api.fs.gcStep (fs has no
@@ -343,9 +365,11 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
       stat: (n) => runOp(`stat(${n})`, () => runner.stat(n)),
       list: () => runOp('list()', () => runner.list()),
       mkdir: (n) => runOp(`mkdir(${n})`, () => runner.mkdir(n)),
-      format: () => runOp('format()', () => runner.format()),
-      mount: () => runOp('mount()', () => runner.mount()),
-      unmount: () => runOp('unmount()', () => runner.unmount()),
+      // Lifecycle ops ARE file-rung ops (ADR-0023) — counted; the rest of fs.*
+      // (raw whole-file + handle/dir ops) is the fs rung, not counted.
+      format: () => { bumpFileOp(); return runOp('format()', () => runner.format()); },
+      mount: () => { bumpFileOp(); return runOp('mount()', () => runner.mount()); },
+      unmount: () => { bumpFileOp(); return runOp('unmount()', () => runner.unmount()); },
       sectorClasses: () => runOp('sectorClasses()', () => runner.sectorClasses()),
       liveMap: () => runOp('liveMap()', () => runner.liveMap()),
       write: (n, d) => runOp(`write(${n}, ${sizeOf(d)} B)`, () => runner.write(n, d)),
@@ -366,21 +390,31 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
   const session = {
     fsId, name: name || fsId, caps: runner.caps, runner, device, viz, geometry: runner.geometry,
 
+    /** ADR-0023: cumulative count of high-level FILE ops this session has run
+     *  (friendly API + lifecycle + churn file-events; gc and fs-rung ops excluded).
+     *  The scoreboard's "ops done" and the ops/sec rate read this, not the cursor. */
+    get fileOpCount() { return fileOpCount; },
+
     /** Execute one churn event (WRITE/DELETE); DONE/NO_SLOT are no-ops. Content is
      *  deterministic from ev.writeSeed, so the same event is byte-identical on any FS.
      *  Churn steps are simple, synchronous, single-op sequence entries — they don't
      *  need the async command machinery below (ADR-0019). */
     runChurnEvent(ev) {
+      // Each churn WRITE/DELETE is one file-event = one file op (ADR-0023);
+      // DONE/NO_SLOT issue nothing and are not counted.
       if (ev.type === CHURN_EVENT.WRITE) {
+        bumpFileOp();
         return timed(`write(${ev.name}, ${ev.size} B)`, () => runner.write(ev.name, deterministicBytes(ev.writeSeed, ev.size)));
       }
       if (ev.type === CHURN_EVENT.DELETE) {
+        bumpFileOp();
         return timed(`delete(${ev.name})`, () => runner.remove(ev.name));
       }
       return undefined; // DONE / NO_SLOT: nothing to issue this step
     },
     /** One opportunistic GC step, timed + logged; null no-op when unsupported
-     *  (runner.gcStep() itself gates on FF_CAP_GC). */
+     *  (runner.gcStep() itself gates on FF_CAP_GC). GC is background maintenance,
+     *  NOT a file op (ADR-0023): it charges flash time but never bumps fileOpCount. */
     runGcStep() { return timed('gc()', () => runner.gcStep()); },
 
     /** Run one atomic COMMAND (ADR-0019) — `fn` is `async (api) => any`, `seed` is
@@ -413,8 +447,10 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
       });
     },
 
-    /** Fresh, empty chip. Churn-model reset is the manager's job, not the session's. */
-    freshFormat() { runner.format(); runner.mount(); },
+    /** Fresh, empty chip. Churn-model reset is the manager's job, not the session's.
+     *  A fresh chip has done no file ops, so the file-op count resets too (ADR-0023);
+     *  this is silent internal setup, not a tape entry, so it does not itself count. */
+    freshFormat() { runner.format(); runner.mount(); fileOpCount = 0; },
 
     barrier: () => viz.barrier(), pending: () => viz.pending(),
     /** Log + pace primitive, exposed so the coordinator's pace hooks (and any

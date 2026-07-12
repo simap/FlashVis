@@ -207,16 +207,15 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
   }
   function ensure(n) { while (sequence.length < n) sequence.push(genStep()); }
 
-  // ---- opsPerSec sampling (ADR-0020): EMA of WORKLOAD ops/sec per FS —
-  // "ops" here is the paced/raced unit: sequence steps consumed (each a churn
-  // event, a GC step, or an issued command), i.e. stepCursor. NOT flash ops
-  // (reads+programs+erases): a chatty FS doing thousands of tiny reads would
-  // post a huge flash-ops/sec while getting *less* real work done, the wrong
-  // signal for a throughput/efficiency comparison. Flash ops are the cost view
-  // (the die + Flash Stats), never the "ops" the compare modes measure.
-  // Resampled every coordinator tick (~16ms) so the rate is stable and decays
-  // to 0 when the dies fall idle. ----
-  const opsOf = (s) => cursors.get(s) ?? 0;
+  // ---- opsPerSec sampling (ADR-0020, refined by ADR-0023): EMA of WORKLOAD
+  // ops/sec per FS — "ops" here is the FILE-op count (session.fileOpCount: whole-
+  // file + lifecycle + churn file-events), NOT the sequence cursor and NOT flash
+  // ops. The cursor conflates a whole console loop into one step and credits GC
+  // no-ops as ops (ADR-0023); fileOpCount measures useful file work. Flash ops
+  // (reads+programs+erases) stay the cost view (the die + Flash Stats), never the
+  // "ops" the compare modes measure. Resampled every coordinator tick (~16ms) so
+  // the rate is stable and decays to 0 when the dies fall idle. ----
+  const opsOf = (s) => s.fileOpCount ?? 0;
   function sampleRates(now) {
     if (!lastSampleNow) { lastSampleNow = now; for (const s of sessions) lastOps.set(s, opsOf(s)); return; }
     const dt = now - lastSampleNow;
@@ -725,10 +724,12 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
         const programmed = c.live + c.obsolete + c.metadata;
         const garbagePct = programmed ? c.obsolete / programmed : 0;
         const cursor = cursors.get(s) ?? 0;
-        // opsPerSec: EMA of WORKLOAD ops/sec (sequence steps consumed), sampled
-        // on the tick; ≥ 0 always, 0 when idle (ADR-0020). The Race throughput
-        // bar rates this; "ops done" is stepCursor, the cumulative same unit.
+        // opsPerSec: EMA of FILE ops/sec (ADR-0023), sampled on the tick; ≥ 0
+        // always, 0 when idle. The Race throughput bar rates this; "ops done" is
+        // fileOpCount, the cumulative same unit. stepCursor is still surfaced as
+        // the sequence position (Pace rendezvous / present-gap), NOT the op count.
         const opsPerSec = Math.max(0, opsEma.get(s) ?? 0);
+        const fileOpCount = s.fileOpCount ?? 0;
         // holding: this FS reached the Pace frontier and is blocked on the
         // laggard — either its cursor leads the shared min (a Race→Pace catch-up
         // leftover: nothing queued for it, sitting in the round's barrier) or it
@@ -747,7 +748,7 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
         // waiting: instantaneous "the FS sim is paused" (see isWaiting), the
         // per-frame counterpart to holding/stalled, IN ADDITION to them (unchanged).
         const waiting = isWaiting(s);
-        return { fsId: s.fsId, name: s.name, stepCursor: cursor, simNs: stats.simNs, wa, files: info.files, garbagePct, opsPerSec, holding, stalled, waiting };
+        return { fsId: s.fsId, name: s.name, stepCursor: cursor, fileOpCount, simNs: stats.simNs, wa, files: info.files, garbagePct, opsPerSec, holding, stalled, waiting };
       });
     },
     /** Cheap per-fsId `waiting` map (the same signal snapshots().waiting carries),

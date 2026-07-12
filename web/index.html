@@ -470,6 +470,7 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 .line.churn{color:var(--txt-dim)}        /* auto-workload op — "what the workload did" */
 .line.err{color:var(--err)}
 .line.sys{color:var(--txt-faint)}
+.line.gc{color:var(--txt-faint)}         /* GC — background maintenance, not a workload op (ADR-0023): grayed but still shows its flash-time cost */
 /* lifecycle (ADR-0018): queued dimmed to --queued; live lit to accent — applied
    in place as the coordinator advances an entry queued → live → done. */
 .line[data-state="queued"]{color:var(--queued)}

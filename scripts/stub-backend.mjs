@@ -30,10 +30,14 @@ function buildLocalApi(session) {
   let n = 0;
   const autoName = () => `f${(n++).toString(36).padStart(3, '0')}`;
   const pick = () => { const k = [...session._files.keys()]; if (!k.length) throw new Error('no files yet'); return k[Math.floor(Math.random() * k.length)]; };
+  // ADR-0023: file-granular op count, mirrored here so the stub matches the real
+  // contract playground.js reads (snapshots().fileOpCount, the Race "ops done"
+  // vital). Bumped once per high-level file op; NOT on gc.
   return {
     writeFile: async (name, size) => {
       const nm = name ?? autoName();
       const sz = size ?? (256 + Math.floor(Math.random() * 4096));
+      session._bumpFileOp();
       session._files.set(nm, sz);
       session._bumpSim(sz);
       session._journalOp(`write(${nm}, ${sz} B) → ${fmtMs(sz * 80)}`, 'out');
@@ -42,6 +46,7 @@ function buildLocalApi(session) {
     readFile: async (name) => {
       const nm = name ?? pick();
       const sz = session._files.get(nm) ?? 0;
+      session._bumpFileOp();
       session._bumpSim(sz / 4);
       session._journalOp(`read(${nm}) → ${fmtMs(sz * 20)}`, 'out');
       return { name: nm, size: sz };
@@ -49,23 +54,25 @@ function buildLocalApi(session) {
     deleteFile: async (arg) => {
       const nm = (arg && arg.name) || arg || pick();
       const sz = session._files.get(nm) ?? 0;
+      session._bumpFileOp();
       session._files.delete(nm);
       session._journalOp(`delete(${nm})`, 'out');
       return { name: nm, size: sz };
     },
-    mkdir: async (path) => { session._journalOp(`mkdir(${path})`, 'out'); return 'ok'; },
+    mkdir: async (path) => { session._bumpFileOp(); session._journalOp(`mkdir(${path})`, 'out'); return 'ok'; },
     ls: async (prefix = '') => {
+      session._bumpFileOp();
       const list = [...session._files.keys()].filter((k) => k.startsWith(prefix)).sort()
         .map((name) => ({ name, size: session._files.get(name) }));
       for (const f of list) session._journalOp(`  ${f.name}  ${f.size} B`, 'out');
       if (!list.length) session._journalOp('  (empty)', 'out');
       return list;
     },
-    getFiles: async (prefix = '') => [...session._files.keys()].filter((k) => k.startsWith(prefix)).sort()
-      .map((name) => ({ name, size: session._files.get(name) })),
-    stat: async (name) => (session._files.has(name) ? { name, size: session._files.get(name) } : null),
+    getFiles: async (prefix = '') => { session._bumpFileOp(); return [...session._files.keys()].filter((k) => k.startsWith(prefix)).sort()
+      .map((name) => ({ name, size: session._files.get(name) })); },
+    stat: async (name) => { session._bumpFileOp(); return (session._files.has(name) ? { name, size: session._files.get(name) } : null); },
     fs: {
-      format: async () => { session._files.clear(); session._journalOp('format() → mounted, empty', 'out'); },
+      format: async () => { session._bumpFileOp(); session._files.clear(); session._journalOp('format() → mounted, empty', 'out'); },
       gcStep: async () => { session._journalOp('gc() → 0 reclaimed', 'out'); return null; },
     },
   };
@@ -80,6 +87,7 @@ export async function createSession(fsId, { geometry, container, name }) {
   const journal = [];
   const subs = [];
   let seq = 0;
+  let fileOps = 0;   // ADR-0023 file-op count (see buildLocalApi / runChurnEvent)
   const notify = (c) => { for (const cb of subs) cb(c); };
   const files = new Map();
   const device = {
@@ -90,6 +98,8 @@ export async function createSession(fsId, { geometry, container, name }) {
 
   const session = {
     fsId, name: name || fsId, caps: 0b111, geometry, device,
+    get fileOpCount() { return fileOps; },
+    _bumpFileOp() { fileOps += 1; },
     journal,
     onJournal(cb) { subs.push(cb); return () => { const i = subs.indexOf(cb); if (i >= 0) subs.splice(i, 1); }; },
     appendJournal(text, cls = 'out', state = 'done') {
@@ -110,11 +120,11 @@ export async function createSession(fsId, { geometry, container, name }) {
     _bumpSim(n) { device.stats.simNs += Math.max(1000, n * 80); device.stats.programs++; device.stats.programBytes += n; },
 
     runChurnEvent(ev) {
-      if (ev.type === 'write') { files.set(ev.name, ev.size); session._bumpSim(ev.size); session.appendJournal(`write(${ev.name}, ${ev.size} B)`, 'sys', 'done'); }
-      else if (ev.type === 'delete') { files.delete(ev.name); session.appendJournal(`delete(${ev.name})`, 'sys', 'done'); }
+      if (ev.type === 'write') { session._bumpFileOp(); files.set(ev.name, ev.size); session._bumpSim(ev.size); session.appendJournal(`write(${ev.name}, ${ev.size} B)`, 'sys', 'done'); }
+      else if (ev.type === 'delete') { session._bumpFileOp(); files.delete(ev.name); session.appendJournal(`delete(${ev.name})`, 'sys', 'done'); }
     },
-    runGcStep() { session.appendJournal('gc()', 'sys', 'done'); },
-    freshFormat() { files.clear(); device.stats.simNs = 0; },
+    runGcStep() { session.appendJournal('gc()', 'sys', 'done'); },   // gc is NOT a file op (ADR-0023)
+    freshFormat() { files.clear(); device.stats.simNs = 0; fileOps = 0; },
 
     refreshHUD($) {
       const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
@@ -281,7 +291,7 @@ export function createLockstep({ churn, gcRatio = 0.5 } = {}) {
       const cursorVals = sessions.map((s) => cursors.get(s) ?? 0);
       const minCursor = cursorVals.length ? Math.min(...cursorVals) : 0;
       return sessions.map((s) => ({
-        fsId: s.fsId, name: s.name, stepCursor: cursors.get(s) ?? 0, simNs: s.device.stats.simNs,
+        fsId: s.fsId, name: s.name, stepCursor: cursors.get(s) ?? 0, fileOpCount: s.fileOpCount ?? 0, simNs: s.device.stats.simNs,
         wa: 1 + (s.device.stats.programBytes || 0) / 1e6, files: s._files.size, garbagePct: 0,
         opsPerSec: opsEma.get(s) ?? 0,
         holding: mode === 'pace' && (cursors.get(s) ?? 0) > minCursor,

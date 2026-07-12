@@ -164,6 +164,18 @@ if (!caughtUp) fail('present-gap header never cleared after Catch-up → Pace co
 if (!sawHolding) fail('fastffs (the Race leader) never showed the Pace "holding" state (.fs.waiting) while littlefs caught up');
 dom.dispatch('btnRun');   // pause again
 
+// ---- ADR-0023 display: the Race "ops done" vital reads fileOpCount (a whole
+// console loop counts each inner op; GC no-ops never count), and GC console
+// lines render GRAY ("there, but in the background") while file-op lines do not.
+// The sim has run plenty of churn by now, so the focused tape holds both. ----
+const tapeEls = dom.getEl('tape').children;
+const gcLines = tapeEls.filter((el) => /^gc\(/.test(el.textContent || ''));
+const fileLines = tapeEls.filter((el) => /^(write|read|delete)\(/.test(el.textContent || ''));
+if (!gcLines.length) fail('expected some GC lines on the tape after churn (BG-GC ratio > 0)');
+if (!fileLines.length) fail('expected some file-op lines on the tape after churn');
+for (const el of gcLines) if (!/(^|\s)gc(\s|$)/.test(el.className || '')) fail(`a GC tape line was not grayed (missing 'gc' class): "${el.textContent}" class="${el.className}"`);
+for (const el of fileLines) if (/(^|\s)gc(\s|$)/.test(el.className || '')) fail(`a file-op tape line was wrongly grayed as GC: "${el.textContent}" class="${el.className}"`);
+
 // ---- header Reset: returns the WHOLE sim to a clean boot state without a
 // page reload — stop, re-format every FS (files back to 0), wipe the tape,
 // then replay the boot log (help()/format()) exactly like boot() does. ----
@@ -185,6 +197,7 @@ console.log('  Write button injects a real writeFile() command onto the tape, an
 console.log(`  a typed multi-statement command with an undeclared loop var ran atomically with no global 'i' leak (files ${before} → ${filesAfterScript}),`);
 console.log('  the compare-mode wheel (A1a) switches pace<->race,');
 console.log('  the Pace "holding" state (A8) shows on the leader while the laggard catches up,');
+console.log('  the Race "ops done" vital reads fileOpCount and GC tape lines render gray (ADR-0023),');
 console.log('  and the header Reset control stops the sim, wipes the tape, and replays the boot log with every FS back to empty.');
 dom.uninstall();
 process.exit(0);
