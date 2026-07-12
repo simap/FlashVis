@@ -315,10 +315,10 @@ async function boot() {
   }
   $('btnCatchup').addEventListener('click', () => { coordinator.setMode('pace'); markMode('pace'); });
 
-  // ---- the set-notation header (A1/ADR-0018): per-FS standings AND the
-  // focus control, collapsed into the `{ [FASTFFS], [LittleFS] }` sentence.
-  // One `.fs` card per participating FS (both, always — A2), built into
-  // #fsSet with a `.setsep` comma between cards; click a card to focus it.
+  // ---- the standings rail (A1/ADR-0018): per-FS standings AND the focus
+  // control, one `.fs` card per participating FS (all registered, always —
+  // A2), built into the full-width #fsSet grid under the title sentence;
+  // click a card to focus it.
   function fsCard(fsId) {
     const btn = document.createElement('button');
     btn.className = 'fs'; btn.id = 'fsCard-' + fsId; btn.dataset.fs = fsId;
@@ -347,7 +347,6 @@ async function boot() {
     const leaderGood = snaps.reduce((m, s) => Math.max(m, goodOf(s)), 0);
     for (const snap of snaps) {
       if (!fsSetBuilt.has(snap.fsId)) {
-        if (fsSetBuilt.size) wrap.appendChild(Object.assign(document.createElement('span'), { className: 'setsep', textContent: ',' }));
         wrap.appendChild(fsCard(snap.fsId));
         fsSetBuilt.add(snap.fsId);
       }

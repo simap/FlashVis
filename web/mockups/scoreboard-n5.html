@@ -1,0 +1,526 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLASHVIS — scoreboard at N=5 (mockup)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* ============================================================================
+   STATIC MOCKUP — five filesystems in the current layout. No WASM, no live app
+   JS: a small inline script fabricates a plausible mid-run device + fake
+   standings so proportions are honest. Aurora theme only. Reuses the live
+   index.html CSS verbatim where it matters (header cards, die, panel, tape),
+   then ADDS three candidate header treatments switchable at the very top.
+   Nothing here restyles the live page — it is a throwaway comparison surface.
+   ========================================================================== */
+:root{
+  --line:#20313c; --line-soft:#182530;
+  --txt:#cdd9e0; --txt-dim:#86a0b0; --txt-faint:#6d818d;
+  --err:#e5686d; --queued:#7d8fa6; --lead:#8fe6a0;
+  --pkg-a:#17191c; --pkg-b:#0e1012; --pkg-line:#2b2f34; --pin:#7b8085; --pin-b:#43474b;
+  --sector-gap:6px; --cell-gap:2px; --radius:3px;
+  /* Aurora Signal */
+  --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a; --chrome:#16212b;
+  --glow-a:#12202b; --glow-b:#131a26;
+  --erased:#132029; --erased-edge:#2b4a57;
+  --prog:#f2b23a; --prog-edge:#ffd472;
+  --stale:#5c646d; --stale-edge:#7c848d; --index:#3fa0e0;
+  --read:#4de3ff; --program:#ff6a1a; --erase:#b06bff; --mix:#3dffb0;
+  --accent:#45d6c0; --accent-dim:#2f5d57; --hold:#f2b23a;
+  --sector-bg:#0c1013;
+  /* PROPOSED new state class for FAT's wear-levelling FTL sector map. Placeholder
+     hue only — a final value must be assigned per-palette by the color-themes
+     owner so it stays distinct from the op glows (erase is already violet). */
+  --wl:#7a86c9; --wl-edge:#9aa6e0;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{
+  background:
+    radial-gradient(1200px 700px at 78% -8%, var(--glow-a) 0%, transparent 60%),
+    radial-gradient(900px 600px at -6% 108%, var(--glow-b) 0%, transparent 55%),
+    var(--bg);
+  color:var(--txt);font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;display:flex;flex-direction:column;min-height:100%;
+}
+h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
+::selection{background:var(--accent-dim);color:#eafffb}
+.hidden{display:none!important}
+
+/* ---- mock chrome: treatment switcher (not part of the product) ---- */
+.mockbar{position:sticky;top:0;z-index:40;display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;
+  padding:8px 16px;background:#05080b;border-bottom:1px solid var(--line);font-size:11px;color:var(--txt-faint)}
+.mockbar .tag{font-family:"Space Grotesk";font-weight:700;letter-spacing:.18em;color:var(--accent);font-size:10px}
+.mockbar .seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.mockbar .seg button{font-family:inherit;font-size:11px;color:var(--txt-dim);background:var(--panel-2);border:none;
+  border-right:1px solid var(--line);padding:5px 11px;cursor:pointer}
+.mockbar .seg button:last-child{border-right:none}
+.mockbar .seg button.on{background:color-mix(in srgb,var(--accent) 20%,var(--chrome));color:var(--txt)}
+.mockbar .note{color:var(--txt-faint)}
+.mockbar .note b{color:var(--txt-dim);font-weight:500}
+
+/* ============================ signature header (set-notation) ============== */
+.sig{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:6px 11px;
+  padding:14px 22px 22px;border-bottom:1px solid var(--line-soft);
+  background:linear-gradient(180deg,var(--panel),var(--bg));
+  font-size:15px;letter-spacing:.005em}
+.logo{font-family:"Space Grotesk";font-weight:700;font-size:20px;letter-spacing:.15em;color:var(--txt)}
+.logo b{color:var(--prog);font-weight:700}
+.hdsep{color:var(--txt-faint);margin:0 1px}
+.word,.tail{color:var(--txt-dim)}
+.tail .k{color:var(--txt);font-weight:500}
+.setwrap{display:inline-flex;align-items:stretch;gap:8px;margin:0 2px}
+.brace{display:flex;align-items:center;font-size:34px;font-weight:200;line-height:0;
+  color:var(--txt-faint);user-select:none;transform:scaleY(1.9);transform-origin:center}
+.fsset{display:inline-flex;align-items:stretch;gap:8px}
+.setsep{align-self:center;color:var(--txt-faint);font-size:16px;margin:0 -3px}
+
+.fs{font-family:inherit;cursor:pointer;text-align:left;
+  display:flex;flex-direction:column;gap:2px;min-width:118px;
+  padding:6px 12px 7px;border:1px solid var(--line);border-radius:7px;
+  background:linear-gradient(180deg,var(--chrome),var(--panel-2));color:var(--txt-dim);transition:.14s;position:relative}
+.fs:hover{border-color:var(--accent-dim);color:var(--txt)}
+.fs:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.fs-top{display:flex;align-items:center;gap:8px}
+.fs-name{font-family:"Space Grotesk";font-weight:700;font-size:14.5px;letter-spacing:.05em;color:var(--txt);line-height:1.1;transition:.14s}
+.fs-run{width:6px;height:6px;border-radius:50%;background:var(--txt-faint);margin-left:auto;flex:none}
+.fs-vital{display:flex;align-items:baseline;gap:6px}
+.fs-v{font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--txt-dim)}
+.fs-l{font-size:8.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--txt-faint)}
+.fs-bar{display:flex;align-items:center;gap:6px;margin-top:2px}
+.fs-bar .track{flex:1;height:3px;border-radius:2px;background:#ffffff0d;overflow:hidden}
+.fs-bar .track i{display:block;height:100%;width:0;border-radius:2px;background:var(--accent-dim);transition:width .3s ease}
+.fs-bar .tag{font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:var(--txt-faint)}
+.fs.on{border-color:var(--accent);color:var(--txt);
+  background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 14%,var(--chrome)),var(--panel-2));box-shadow:0 0 0 1px var(--accent),0 0 22px -9px var(--accent)}
+.fs.on .fs-name{color:var(--accent)}
+.fs.on .fs-v{color:var(--txt)}
+.fs.leader .fs-bar .track i{background:var(--lead);box-shadow:0 0 8px -2px var(--lead)}
+.fs:not(.on) .fs-run{animation:live 2.4s ease-in-out infinite}
+@keyframes live{0%,100%{background:var(--accent-dim)}50%{background:var(--lead)}}
+.fs.waiting .fs-run{background:var(--hold);animation:hold 1.1s ease-in-out infinite}
+@keyframes hold{0%,100%{opacity:.35}50%{opacity:1}}
+.fs-hold{display:none;align-items:center;gap:4px;font-size:8.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--hold)}
+.fs.waiting .fs-hold{display:inline-flex}
+.fs.waiting .fs-l{display:none}
+
+.sig-speed{display:inline-flex;align-items:center;gap:7px;color:var(--txt-dim)}
+.sig-speed .hintk{font-size:15px;letter-spacing:.005em;color:inherit}
+.modewheel{position:relative;display:inline-block;vertical-align:baseline;
+  background:none;border:none;padding:0;margin:0;cursor:pointer;font-family:inherit;text-align:left;perspective:280px}
+.mghost{visibility:hidden;white-space:nowrap;font-size:15px;line-height:1.5;font-weight:500;letter-spacing:.005em}
+.mopt{position:absolute;left:0;top:0;white-space:nowrap;font-size:15px;line-height:1.5;font-weight:500;letter-spacing:.005em;
+  transform-origin:center bottom;backface-visibility:hidden;color:var(--accent);opacity:1}
+
+/* ===================== TREATMENT B — standings rail ======================= */
+.railhead{flex:none;padding:12px 22px 16px;border-bottom:1px solid var(--line-soft);
+  background:linear-gradient(180deg,var(--panel),var(--bg))}
+.railtop{display:flex;align-items:center;flex-wrap:wrap;gap:6px 11px;font-size:15px;letter-spacing:.005em;margin-bottom:12px}
+.rail{display:flex;align-items:stretch;gap:9px}
+.rail-cap{flex:none;display:flex;flex-direction:column;justify-content:center;gap:3px;padding-right:4px;
+  border-right:1px solid var(--line-soft)}
+.rail-cap .rc-lbl{font-size:8px;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-faint)}
+.rail-cap .rc-count{font-family:"Space Grotesk";font-weight:700;font-size:17px;color:var(--txt-dim);line-height:1}
+.rail-cap .rc-count b{color:var(--accent)}
+.rail-cards{flex:1;min-width:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}
+/* rail card = the same switcher card, laid out to breathe horizontally and stay
+   uniform in a grid — name row, one vital, throughput spar. */
+.rail .fs{min-width:0}
+.rail .fs-picker{position:absolute;top:7px;right:8px;width:13px;height:13px;border-radius:3px;
+  border:1px solid var(--line);background:var(--panel-2);cursor:pointer;display:flex;align-items:center;justify-content:center}
+.rail .fs-picker.sel{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 30%,var(--panel-2))}
+.rail .fs-picker.sel::after{content:"";width:5px;height:5px;border-radius:1px;background:var(--accent)}
+.rail .fs .fs-run{margin-left:0}
+.rail .fs .fs-top{padding-right:18px}
+.rail .fs.off{opacity:.42;filter:grayscale(.5)}
+.rail-manage{flex:none;align-self:stretch;display:flex;flex-direction:column;justify-content:center;gap:5px;
+  padding-left:6px;border-left:1px solid var(--line-soft)}
+.rail-manage .rm-btn{font-family:inherit;font-size:10px;letter-spacing:.04em;color:var(--txt-dim);
+  background:var(--chrome);border:1px solid var(--line);border-radius:6px;padding:6px 9px;cursor:pointer;white-space:nowrap}
+.rail-manage .rm-btn:hover{border-color:var(--accent-dim)}
+
+/* ===================== TREATMENT C — one-line scroll ====================== */
+.sig.scrollset .setwrap{max-width:100%;overflow:hidden}
+.sig.scrollset .fsset{overflow-x:auto;flex-wrap:nowrap;padding-bottom:6px;scrollbar-width:thin}
+.sig.scrollset .fsset::-webkit-scrollbar{height:6px}
+.sig.scrollset .fsset::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+.sig.scrollset .fs{flex:none}
+
+/* treatment visibility */
+body[data-treat="a"] .treat-b,body[data-treat="a"] .treat-c{display:none}
+body[data-treat="b"] .treat-a,body[data-treat="b"] .treat-c{display:none}
+body[data-treat="c"] .treat-a,body[data-treat="c"] .treat-b{display:none}
+
+/* ============================ main split ================================== */
+.main{flex:1 1 auto;min-height:0;display:grid;
+  grid-template-columns:minmax(0,1fr) 292px minmax(348px,432px);gap:22px;
+  padding:18px 22px 16px;max-width:1440px;width:100%;margin:0 auto;align-items:stretch}
+.stage{display:flex;flex-direction:column;gap:12px;min-width:0;min-height:0}
+.chip-pkg{align-self:center;display:flex;align-items:stretch;width:100%;max-width:560px}
+.diewrap{position:relative;z-index:1;flex:1;aspect-ratio:1;padding:14px;border-radius:8px;
+  background:linear-gradient(180deg,var(--pkg-a),var(--pkg-b));border:1px solid var(--pkg-line);
+  box-shadow:inset 0 0 0 1px #ffffff05,inset 0 22px 40px -30px #fff2,0 24px 60px -30px #000}
+.diewrap::before{content:"";position:absolute;top:8px;left:8px;width:9px;height:9px;border-top:2px solid var(--accent-dim);border-left:2px solid var(--accent-dim)}
+.die-stack{width:100%;height:100%}
+.die{display:grid;grid-template-columns:repeat(8,1fr);gap:var(--sector-gap);width:100%;height:100%}
+.sector{position:relative;display:grid;grid-template-columns:repeat(4,1fr);gap:var(--cell-gap);padding:3px;border-radius:var(--radius);
+  background:var(--sector-bg);border:1px solid #1b1f23;cursor:pointer}
+.sector:hover{border-color:var(--accent-dim)}
+.sector.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent),0 0 16px -4px var(--accent)}
+.cell{position:relative;aspect-ratio:1;border-radius:1.5px;background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge);overflow:hidden}
+.cell .fill{position:absolute;left:0;right:0;bottom:0;height:0;background:var(--prog)}
+.cell[data-live="live"] .fill{background:var(--prog)}
+.cell[data-live="obsolete"] .fill{background:var(--stale)}
+.cell[data-live="obsolete"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
+.cell[data-live="meta"] .fill{background:var(--index)}
+.cell[data-live="wl"] .fill{background:var(--wl)}
+.cell[data-live="wl"]{box-shadow:inset 0 0 0 1px var(--wl-edge)}
+
+.pins{display:flex;flex-direction:column;justify-content:space-evenly;padding:16px 0;flex:none;z-index:0}
+.pins i{width:22px;height:32px;position:relative;
+  box-shadow:0 2px 4px #000a,inset 0 2px 1px -1px #ffffff85,inset 0 -4px 4px -3px #000a}
+.pins-l{margin-right:-5px}
+.pins-l i{border-radius:3px 0 0 3px;background:linear-gradient(90deg,#eef1f3 0%,#c6cbcf 32%,#888d92 72%,#565b60 100%)}
+.pins-r{margin-left:-5px}
+.pins-r i{border-radius:0 3px 3px 0;background:linear-gradient(90deg,#565b60 0%,#888d92 28%,#c6cbcf 68%,#eef1f3 100%)}
+.pin-cs{position:relative}
+.cs-label{position:absolute;top:50%;right:calc(100% + 5px);transform:translateY(-50%) rotate(180deg);
+  writing-mode:vertical-rl;text-orientation:mixed;font-size:11px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--txt-faint);pointer-events:none;user-select:none}
+
+.geo{display:flex;gap:16px;color:var(--txt-faint);font-size:11px;letter-spacing:.04em;flex-wrap:wrap;justify-content:center}
+.geo b{color:var(--txt-dim);font-weight:500}
+
+.diebar{display:flex;align-items:center;gap:10px 12px;flex-wrap:wrap;justify-content:center}
+.legend{display:flex;flex-direction:column;gap:5px}
+.legend-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.legrow-label{flex:none;width:3.4em;font-size:8px;letter-spacing:.14em;text-transform:uppercase;color:var(--txt-faint);text-align:right}
+.chip{position:relative;display:inline-flex;align-items:center;gap:6px;cursor:default;
+  font-size:11px;color:var(--txt-dim);padding:4px 8px;border-radius:5px;border:1px solid var(--line-soft);background:var(--panel-2)}
+.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.chip .sw{width:11px;height:11px;border-radius:2px;flex:none;box-shadow:inset 0 0 0 1px #fff2}
+.chip.new::after{content:"NEW";position:absolute;top:-6px;right:-6px;font-size:6.5px;letter-spacing:.1em;
+  color:var(--bg);background:var(--accent);border-radius:3px;padding:1px 3px;font-weight:700}
+.sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
+.sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
+.sw.wl{background:var(--wl);box-shadow:inset 0 0 0 1px var(--wl-edge)}
+.sw.glow{width:11px;height:11px;border-radius:50%;background:transparent}
+.sw.read.glow{box-shadow:inset 0 0 0 1.5px var(--read),0 0 6px 0 var(--read)}
+.sw.program.glow{box-shadow:inset 0 0 0 1.5px var(--program),0 0 6px 0 var(--program)}
+.sw.erase.glow{box-shadow:inset 0 0 0 1.5px var(--erase),0 0 6px 0 var(--erase)}
+.sw.mix.glow{box-shadow:inset 0 0 0 1.5px var(--mix),0 0 6px 0 var(--mix)}
+.theme-pick{display:inline-flex;align-items:center;gap:8px;color:var(--txt-dim);padding:3px 9px;border:1px solid var(--line-soft);border-radius:6px;background:var(--panel-2)}
+.tp-label{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint)}
+.tp-name{font-size:10.5px;color:var(--txt-dim)}
+.toggle{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:10.5px;letter-spacing:.05em;cursor:pointer;user-select:none}
+.tswitch{width:32px;height:17px;border-radius:10px;background:var(--chrome);border:1px solid var(--line);position:relative}
+.tswitch::after{content:"";position:absolute;top:2px;left:2px;width:11px;height:11px;border-radius:50%;background:var(--txt-faint)}
+
+.panel{display:flex;flex-direction:column;gap:14px;min-height:0}
+.card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line-soft);border-radius:8px;padding:13px 14px}
+.card h3{margin:0 0 10px;font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim);display:flex;justify-content:space-between}
+.card h3 .hintk{letter-spacing:0;text-transform:none;color:var(--txt-faint);font-weight:400}
+.util{height:9px;border-radius:5px;overflow:hidden;display:flex;background:var(--panel-2);border:1px solid var(--line-soft);margin-bottom:11px}
+.util i{display:block;height:100%}
+.util .u-live{background:var(--prog)} .util .u-obs{background:var(--stale)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+.stat{display:flex;flex-direction:column;gap:1px}
+.stat .n{font-size:16px;font-weight:500;font-variant-numeric:tabular-nums}
+.stat .n.amp{color:var(--prog)} .stat .n.ok{color:var(--accent)}
+.stat .l{font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--txt-faint)}
+.insp{font-size:12px;color:var(--txt-dim);min-height:48px}
+.insp .addr{font-size:15px;color:var(--txt)}
+.insp .row{display:flex;justify-content:space-between;margin-top:6px}
+.insp .row span:last-child{color:var(--txt)}
+
+.pane{display:flex;flex-direction:column;min-height:0;gap:11px}
+.workload{flex:none;display:flex;align-items:center;gap:9px 12px;flex-wrap:wrap;
+  padding:9px 11px;border:1px solid var(--line-soft);border-radius:8px;background:linear-gradient(180deg,var(--chrome),var(--panel-2))}
+.workload::before{content:"WORKLOAD";font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint);align-self:center;writing-mode:vertical-rl;transform:rotate(180deg);margin-right:2px}
+.egrp{display:flex;align-items:center;gap:7px}
+.sep{width:1px;height:22px;background:var(--line)}
+.ctl{display:flex;align-items:center;gap:7px;color:var(--txt-dim);font-size:10.5px;letter-spacing:.05em}
+.hintk{color:var(--txt-faint);font-size:10px}
+input[type=range]{-webkit-appearance:none;appearance:none;width:74px;height:3px;border-radius:2px;background:var(--line);outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;border-radius:50%;background:var(--accent);box-shadow:0 0 8px -1px var(--accent);cursor:pointer}
+.btn{font-family:inherit;font-size:12px;color:var(--txt);background:var(--chrome);border:1px solid var(--line);border-radius:6px;padding:6px 11px;cursor:pointer;transition:.13s;display:inline-flex;align-items:center;gap:7px}
+.btn:hover{border-color:var(--accent-dim);background:color-mix(in srgb,var(--accent) 14%,var(--chrome))}
+.btn.primary{background:var(--prog);color:#241a06;border-color:var(--prog);font-weight:600}
+.btn .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.tape{flex:1 1 auto;min-height:260px;display:flex;flex-direction:column;background:var(--panel-2);border:1px solid var(--line-soft);border-radius:8px;overflow:hidden}
+.tape-scroll{flex:1;min-height:0;overflow:auto;padding:9px 13px;font-size:12px;line-height:1.55}
+.line{white-space:pre-wrap;word-break:break-word;padding-left:12px;text-indent:-12px}
+.line.in{color:var(--accent)}
+.line.out{color:var(--txt)}
+.line.churn{color:var(--txt-dim)}
+.line.gc{color:var(--txt-faint)}
+.line.sys{color:var(--txt-faint)}
+.pokes{flex:none;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.pokes .reg{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint);margin-right:2px}
+.prompt{flex:none;display:flex;align-items:center;gap:8px;border:1px solid var(--line-soft);border-radius:8px;background:var(--panel-2);padding:8px 12px}
+.prompt .p{color:var(--accent);font-weight:700}
+.prompt input{flex:1;background:none;border:none;outline:none;color:var(--txt);font-family:inherit;font-size:12.5px;min-width:0}
+.prompt input::placeholder{color:var(--txt-faint)}
+.about-btn{flex:none;width:19px;height:19px;margin-left:2px;border-radius:50%;border:1px solid var(--line);background:var(--chrome);color:var(--txt-dim);
+  font-family:"Space Grotesk",system-ui,sans-serif;font-size:12px;font-weight:700;font-style:italic;line-height:1;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:0}
+
+@media (max-width:1040px){
+  .main{grid-template-columns:1fr}
+  .rail-cards{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="mockbar">
+  <span class="tag">MOCKUP · N=5</span>
+  <span class="note">Scoreboard header treatment:</span>
+  <span class="seg" id="treatSeg">
+    <button data-t="a">A · Current (wraps)</button>
+    <button data-t="b" class="on">B · Standings rail</button>
+    <button data-t="c">C · One-line scroll</button>
+  </span>
+  <span class="note">Static data · focus = <b>FatFs&nbsp;+&nbsp;WL</b> · mode = <b>Race</b> · leader = <b>FASTFFS</b></span>
+</div>
+
+<!-- ===================== TREATMENT A — current, unchanged ==================== -->
+<header class="sig treat-a" aria-label="flashvis status and controls">
+  <span class="logo">FLASH<b>VIS</b></span>
+  <button class="about-btn" type="button">i</button>
+  <span class="hdsep">·</span>
+  <span class="word">real</span>
+  <span class="setwrap">
+    <span class="brace" aria-hidden="true">{</span>
+    <span class="fsset" id="fsSetA" role="group" aria-label="filesystem standings"></span>
+    <span class="brace" aria-hidden="true">}</span>
+  </span>
+  <span class="tail">running on an emulated <span class="k">NOR flash</span> at</span>
+  <label class="sig-speed"><input type="range" min="0" max="100" value="40"><span class="hintk">1×</span></label>
+  <span class="tail">measuring</span>
+  <button class="modewheel"><span class="mghost">most ops in equal time</span><span class="mopt">most ops in equal time</span></button>
+  <button class="btn">Reset</button>
+</header>
+
+<!-- ===================== TREATMENT B — standings rail (recommended) ========= -->
+<header class="railhead treat-b" aria-label="flashvis status and controls">
+  <div class="railtop">
+    <span class="logo">FLASH<b>VIS</b></span>
+    <button class="about-btn" type="button">i</button>
+    <span class="hdsep">·</span>
+    <span class="tail">real filesystems on emulated <span class="k">NOR flash</span> at</span>
+    <label class="sig-speed"><input type="range" min="0" max="100" value="40"><span class="hintk">1×</span></label>
+    <span class="tail">measuring</span>
+    <button class="modewheel"><span class="mghost">most ops in equal time</span><span class="mopt">most ops in equal time</span></button>
+    <button class="btn" style="margin-left:auto">Reset</button>
+  </div>
+  <div class="rail">
+    <div class="rail-cap"><span class="rc-lbl">standings</span><span class="rc-count"><b>5</b>&thinsp;fs</span></div>
+    <div class="rail-cards" id="railCards" role="group" aria-label="filesystem standings — select one to focus"></div>
+    <div class="rail-manage">
+      <button class="rm-btn" aria-haspopup="dialog">Participants 5/5</button>
+      <button class="rm-btn">＋ Add FS</button>
+    </div>
+  </div>
+</header>
+
+<!-- ===================== TREATMENT C — one-line scroll ====================== -->
+<header class="sig scrollset treat-c" aria-label="flashvis status and controls">
+  <span class="logo">FLASH<b>VIS</b></span>
+  <button class="about-btn" type="button">i</button>
+  <span class="hdsep">·</span>
+  <span class="word">real</span>
+  <span class="setwrap">
+    <span class="brace" aria-hidden="true">{</span>
+    <span class="fsset" id="fsSetC" role="group" aria-label="filesystem standings"></span>
+    <span class="brace" aria-hidden="true">}</span>
+  </span>
+  <span class="tail">on <span class="k">NOR</span> at</span>
+  <label class="sig-speed"><input type="range" min="0" max="100" value="40"><span class="hintk">1×</span></label>
+  <button class="modewheel"><span class="mghost">most ops</span><span class="mopt">most ops</span></button>
+  <button class="btn">Reset</button>
+</header>
+
+<div class="main">
+  <div class="stage">
+    <div class="chip-pkg">
+      <div class="pins pins-l"><i class="pin-cs"><span class="cs-label" aria-hidden="true">CS</span></i><i></i><i></i><i></i></div>
+      <div class="diewrap"><div class="die-stack" id="dieStack"></div></div>
+      <div class="pins pins-r"><i></i><i></i><i></i><i></i></div>
+    </div>
+    <div class="geo" id="geoLine"></div>
+    <div class="diebar">
+      <div class="legend" id="legendChips" role="group" aria-label="cell states and operations"></div>
+      <label class="toggle"><span class="tswitch"></span>WEAR HEATMAP</label>
+      <div class="theme-pick"><span class="tp-label">PALETTE</span><span class="tp-name">Aurora Signal</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="card">
+      <h3>Flash Stats <span class="hintk">FatFs + WL</span></h3>
+      <div class="util" title="live · garbage · free"><i class="u-live" style="width:47%"></i><i class="u-obs" style="width:22%"></i></div>
+      <div class="grid2">
+        <div class="stat"><span class="n amp">3.6×</span><span class="l">Write amp</span></div>
+        <div class="stat"><span class="n">22%</span><span class="l">Garbage</span></div>
+        <div class="stat"><span class="n">69%</span><span class="l">Programmed</span></div>
+        <div class="stat"><span class="n">318</span><span class="l">Pages blank</span></div>
+        <div class="stat"><span class="n">18420 ms</span><span class="l">Flash time</span></div>
+        <div class="stat"><span class="n">1104</span><span class="l">Erases</span></div>
+        <div class="stat"><span class="n">37</span><span class="l">Files</span></div>
+        <div class="stat"><span class="n">116 KB</span><span class="l">Live data</span></div>
+        <div class="stat"><span class="n ok">30</span><span class="l">Live sectors</span></div>
+        <div class="stat"><span class="n">8123</span><span class="l">Reads</span></div>
+        <div class="stat"><span class="n">214</span><span class="l">Peak wear</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Sector inspector</h3>
+      <div class="insp">
+        <div class="addr">sector 12 · 0x0C000</div>
+        <div class="row"><span>role</span><span>WL sector-map</span></div>
+        <div class="row"><span>erase cycles</span><span>214</span></div>
+        <div class="row"><span>live · obsolete · meta pages</span><span>0 · 2 · 14</span></div>
+        <div class="row"><span>bytes programmed</span><span>3584 / 4096</span></div>
+      </div>
+    </div>
+  </div>
+
+  <section class="pane" aria-label="console tape">
+    <div class="workload" role="group" aria-label="workload strip">
+      <div class="egrp">
+        <button class="btn primary"><span class="dot"></span>Pause</button>
+        <button class="btn">Step</button>
+      </div>
+      <div class="sep"></div>
+      <label class="ctl">BG&nbsp;GC <input type="range" min="0" max="100" value="50"><span class="hintk">50%</span></label>
+    </div>
+    <div class="tape">
+      <div class="tape-scroll" id="tape"></div>
+    </div>
+    <div class="pokes" role="group" aria-label="manual pokes">
+      <span class="reg">POKE</span>
+      <button class="btn">write</button><button class="btn">read</button><button class="btn">ls</button>
+      <button class="btn">delete</button><button class="btn">gc</button><button class="btn">format</button>
+    </div>
+    <div class="prompt">
+      <span class="p">›</span>
+      <input placeholder="writeFile('cfg.bin')  ·  ls()  ·  gc(3)  ·  help()">
+      <span class="hintk">↑ history · enter</span>
+    </div>
+  </section>
+</div>
+
+<script>
+// ---- fake standings, mid-run, Race mode (ops done + ops/s) --------------------
+const FSES = [
+  { id:'fastffs',  name:'FASTFFS',   ops:1243, opsSec:4180, sel:true,  leader:true },
+  { id:'jesfs',    name:'JesFS',     ops:1090, opsSec:3620, sel:true },
+  { id:'littlefs', name:'LittleFS',  ops:968,  opsSec:3140, sel:true },
+  { id:'spiffs',   name:'SPIFFS',    ops:602,  opsSec:1920, sel:true, waiting:true }, // known GC cliff
+  { id:'fatfs',    name:'FatFs + WL', ops:540, opsSec:1610, sel:true, focus:true },   // FatFs over ESP-IDF wear_levelling
+];
+const LEAD = Math.max(...FSES.map(f=>f.opsSec));
+const fmt = n => n.toLocaleString('en-US');
+
+// A: current set-notation cards (full detail) ---------------------------------
+function fullCard(f){
+  const cls = ['fs', f.focus?'on':'', f.leader?'leader':'', f.waiting?'waiting':''].join(' ').trim();
+  const pct = Math.round(f.opsSec/LEAD*100);
+  return `<button class="${cls}" aria-pressed="${!!f.focus}">
+    <span class="fs-top"><span class="fs-name">${f.name}</span><span class="fs-run"></span></span>
+    <span class="fs-vital"><b class="fs-v">${fmt(f.ops)}</b><i class="fs-l">ops done</i><span class="fs-hold">◷ waiting</span></span>
+    <span class="fs-bar"><span class="track"><i style="width:${pct}%"></i></span><span class="tag">${(f.opsSec/1000).toFixed(1)}k ops/s</span></span>
+  </button>`;
+}
+function renderSet(hostId){
+  document.getElementById(hostId).innerHTML =
+    FSES.map(fullCard).join('<span class="setsep">,</span>');
+}
+renderSet('fsSetA'); renderSet('fsSetC');
+
+// B: rail cards (compact + picker checkbox) -----------------------------------
+document.getElementById('railCards').innerHTML = FSES.map(f=>{
+  const cls = ['fs', f.focus?'on':'', f.leader?'leader':'', f.waiting?'waiting':'', f.sel?'':'off'].join(' ').trim();
+  const pct = Math.round(f.opsSec/LEAD*100);
+  return `<button class="${cls}" aria-pressed="${!!f.focus}">
+    <span class="fs-picker ${f.sel?'sel':''}" role="checkbox" aria-checked="${!!f.sel}" title="participating"></span>
+    <span class="fs-top"><span class="fs-name">${f.name}</span><span class="fs-run"></span></span>
+    <span class="fs-vital"><b class="fs-v">${fmt(f.ops)}</b><i class="fs-l">ops done</i><span class="fs-hold">◷ waiting</span></span>
+    <span class="fs-bar"><span class="track"><i style="width:${pct}%"></i></span><span class="tag">${(f.opsSec/1000).toFixed(1)}k ops/s</span></span>
+  </button>`;
+}).join('');
+
+// ---- geometry line ----------------------------------------------------------
+document.getElementById('geoLine').innerHTML =
+  `<span><b>256 KB</b> device</span><span><b>64 × 16</b> pages</span><span><b>4 KB</b> sectors</span><span><b>256 B</b> pages</span>`;
+
+// ---- legend: FatFs+WL focused → adds the proposed WL sector-map class --------
+const legend = [
+  { label:'States', items:[
+    { cls:'erased', word:'Erased' }, { cls:'prog', word:'Live' },
+    { cls:'obsolete', word:'Obsolete' }, { cls:'index', word:'Metadata' },
+    { cls:'wl', word:'WL sectors', isNew:true },
+  ]},
+  { label:'Ops', items:[
+    { cls:'read', word:'Reading', glow:true }, { cls:'program', word:'Programming', glow:true },
+    { cls:'mix', word:'Read + prog', glow:true }, { cls:'erase', word:'Erasing', glow:true },
+  ]},
+];
+document.getElementById('legendChips').innerHTML = legend.map(g=>
+  `<div class="legend-row" role="list" aria-label="${g.label}"><span class="legrow-label" aria-hidden="true">${g.label}</span>` +
+  g.items.map(c=>`<div class="chip ${c.isNew?'new':''}" tabindex="0" role="listitem"><span class="sw ${c.cls}${c.glow?' glow':''}"></span>${c.word}</div>`).join('') +
+  `</div>`
+).join('');
+
+// ---- die: deterministic mid-run device --------------------------------------
+let seed = 20260712;
+const rnd = () => (seed = (seed*1103515245+12345) & 0x7fffffff) / 0x7fffffff;
+const die = document.createElement('div'); die.className = 'die';
+for(let s=0;s<64;s++){
+  const sec = document.createElement('div'); sec.className='sector';
+  if(s===12) sec.classList.add('sel');
+  // sectors 8-13 act as the FTL sector-map band (wl); rest are data/mixed/erased
+  const band = s>=8 && s<=13;
+  for(let p=0;p<16;p++){
+    const cell = document.createElement('div'); cell.className='cell';
+    const r = rnd();
+    let state='', h=0;
+    if(band){ state='wl'; h=60+rnd()*40; }
+    else if(r<0.30){ state=''; h=0; }                    // erased
+    else if(r<0.55){ state='live'; h=45+rnd()*55; }
+    else if(r<0.78){ state='obsolete'; h=40+rnd()*55; }
+    else if(r<0.90){ state='meta'; h=55+rnd()*45; }
+    else { state='live'; h=25+rnd()*40; }
+    if(state){ cell.dataset.live=state; const fi=document.createElement('i'); fi.className='fill'; fi.style.height=h+'%'; cell.appendChild(fi); }
+    sec.appendChild(cell);
+  }
+  die.appendChild(sec);
+}
+document.getElementById('dieStack').appendChild(die);
+
+// ---- tape: a plausible focused (FatFs+WL) journal, incl. gray GC -------------
+const tape = [
+  ['sys','— FatFs + WL · ChaN FatFs over ESP-IDF wear_levelling —'],
+  ['churn','writeFile(log-3f2a.bin, 18944 B) → 214 ms · 6 erase 74 prog 96 read'],
+  ['gc','wl_move(sector 41 → 12) → 44 ms · 1 erase 16 prog 16 read'],
+  ['churn','writeFile(cfg-8b10.bin, 4096 B) → 61 ms · 1 erase 16 prog 22 read'],
+  ['churn','deleteFile(asset-01c7.bin) → 9 ms · 0 erase 1 prog 4 read'],
+  ['in','› ls()'],
+  ['out','ls() → 12 ms · 0 erase 0 prog 31 read  ·  37 files'],
+  ['churn','writeFile(img-77de.bin, 40960 B) → 466 ms · 12 erase 160 prog 190 read'],
+  ['gc','wl_move(sector 58 → 13) → 43 ms · 1 erase 16 prog 16 read'],
+  ['churn','writeFile(log-4a90.bin, 12288 B) → 158 ms · 4 erase 48 prog 63 read'],
+];
+document.getElementById('tape').innerHTML = tape.map(([c,t])=>`<div class="line ${c}">${t}</div>`).join('');
+
+// ---- treatment switcher (mock chrome only) ----------------------------------
+const seg = document.getElementById('treatSeg');
+seg.addEventListener('click', e=>{
+  const b = e.target.closest('button'); if(!b) return;
+  document.body.dataset.treat = b.dataset.t;
+  [...seg.children].forEach(x=>x.classList.toggle('on', x===b));
+});
+// initial treatment: URL hash (#a/#b/#c) wins, else B
+const initT = (location.hash.replace('#','') || 'b');
+document.body.dataset.treat = ['a','b','c'].includes(initT) ? initT : 'b';
+[...seg.children].forEach(x=>x.classList.toggle('on', x.dataset.t===document.body.dataset.treat));
+</script>
