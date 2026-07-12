@@ -735,21 +735,29 @@ dialog.about[open]{animation:aboutIn .18s ease}
     </section>
 
     <section class="about-sec">
-      <h3>How FASTFFS and LittleFS cope</h3>
-      <p><span class="wordmark">FLASH<b>VIS</b></span> compares two filesystems today, <b>FASTFFS</b>
-      and <b>LittleFS</b>, with more planned.</p>
+      <h3>How the filesystems cope</h3>
+      <p><span class="wordmark">FLASH<b>VIS</b></span> compares five filesystems today &mdash;
+      <b>FASTFFS</b>, <b>LittleFS</b>, <b>SPIFFS</b>, <b>JesFS</b>, and ChaN <b>FatFs</b> over the
+      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT&nbsp;+&nbsp;WL</b>) &mdash; with more
+      planned. The first four are purpose-built for raw flash: they write new data into erased space
+      and let superseded copies linger as <b>garbage</b> to reclaim later, since flash cannot cheaply
+      overwrite in place. FatFs is the outlier &mdash; a classic <b>overwrite-in-place</b> FAT
+      filesystem that only runs on flash because a wear-levelling translation layer beneath it remaps
+      and rotates sectors to imitate a rewritable disk.</p>
 
       <h4>What they share</h4>
       <ul>
-        <li><b>Power-loss resilience.</b> Both filesystems are designed to handle random power
-        failures. All file operations have strong copy-on-write guarantees and if power is lost the
-        filesystem will fall back to the last known good state.</li>
-        <li><b>Dynamic wear leveling.</b> Both filesystems are designed with flash in mind, and
-        provide wear leveling over dynamic blocks.</li>
-        <li><b>Bounded RAM/ROM.</b> Both filesystems are designed to work with a small amount of
-        memory. RAM usage is strictly bounded, which means RAM consumption does not change as the
-        filesystem grows. The filesystem contains no unbounded recursion and dynamic memory is
-        limited to configurable buffers that can be provided statically.</li>
+        <li><b>Bounded RAM/ROM.</b> All five are built to run in a small, fixed amount of memory.
+        RAM usage is strictly bounded and can be backed by statically provided buffers, so
+        consumption does not grow as the volume fills.</li>
+        <li><b>Wear leveling.</b> All five spread erases across the die so no one sector wears out
+        early. The four flash-native designs rotate their own allocation (and GC) cursors; FatFs
+        leans entirely on the wear_levelling layer beneath it to remap and rotate physical sectors.</li>
+        <li><b>Power-loss behavior is where they diverge.</b> FASTFFS and LittleFS are fully
+        copy-on-write and fall back to the last known good state after an interrupted write. The
+        log-structured SPIFFS and chain-structured JesFS recover their committed files on remount.
+        FatFs overwrites in place, so a write cut short &mdash; for example by a full volume &mdash;
+        can leave a file truncated.</li>
       </ul>
 
       <h4>FASTFFS</h4>
@@ -786,7 +794,60 @@ dialog.about[open]{animation:aboutIn .18s ease}
       LittleFS is focused. It does have a GC function, but it does not reclaim space and is very
       expensive, so it is not used here out of fairness.</p>
 
-      <p>The two filesystem cards in the header switch the view: click one to focus its die and
+      <h4>SPIFFS</h4>
+      <p>SPIFFS is <b>log-structured</b> at a <b>256-byte page</b> granule &mdash; the same size as
+      one die cell, so its native map lines up one-to-one with the grid. Every 4&nbsp;KB block begins
+      with an <b>object-lookup table</b>: a compact array with one entry per data page in the block,
+      recording which object that page belongs to. That table is SPIFFS's <b>metadata</b> and its
+      liveness model in one.</p>
+      <p>Deleting or replacing a file erases nothing right away; it programs the page's lookup entry
+      to a <b>deleted</b> marker (<code>0x0000</code>, since programming only clears bits to
+      <code>0</code>), leaving the page as garbage that lingers until its whole block is dead. Like
+      FASTFFS, SPIFFS then reclaims in <b>bounded background steps</b>: a quick pass erases one block
+      whose pages are all deleted, moving nothing. Because that step is small and churn-safe, SPIFFS
+      is the <b>other</b> filesystem the <b>background GC control</b> drives &mdash; turn it up and
+      SPIFFS tidies more often between writes, just like FASTFFS. It also reclaims inline when free
+      space runs tight.</p>
+      <p>SPIFFS's format erases the whole chip up front (FASTFFS's touches two sectors) &mdash; a
+      visible sweep on the die, but a one-time cost, often paid at the factory. The behavior that
+      matters here is everything after.</p>
+
+      <h4>JesFS</h4>
+      <p>JesFS organizes the chip as <b>chains of 4&nbsp;KB sectors</b>. Sector&nbsp;0 holds a master
+      header plus the <b>file index</b>, an array of pointers to each file's start. A file's
+      <b>HEAD</b> sector co-locates its metadata (name, length, CRC) with the first ~4&nbsp;KB of its
+      data; longer files chain into further data sectors. Every sector carries a 4-byte <b>magic</b>
+      recording its state &mdash; which is exactly what the die coloring reads.</p>
+      <p>Deleting a file just rewrites those magics &mdash; the head to a <b>deleted</b> state, its
+      data sectors to a <b>to-delete</b> state &mdash; without erasing. Reclamation is entirely
+      <b>inline and just-in-time</b>: when a later write needs a fresh sector, the allocator sweeps
+      forward (a rotating cursor that also levels wear) and erases the next to-delete sector right
+      before reusing it. There is no separate GC pass, so the <b>background GC control</b> does
+      nothing when JesFS is focused.</p>
+      <p>JesFS has no native <b>seek</b>, so seeking is emulated by rewinding and re-reading forward
+      &mdash; visible extra read traffic on the die. Filenames are capped at <b>21 characters</b>.</p>
+
+      <h4>FAT + WL</h4>
+      <p>FatFs is the classic FAT filesystem &mdash; here, ChaN <b>FatFs</b> over the ESP-IDF
+      <b>wear_levelling</b> FTL. FAT expects to <b>overwrite sectors in place</b> and does no erasing
+      itself; it simply rewrites the FAT table and directory entries as files change. Flash cannot
+      overwrite, so the wear_levelling layer beneath it does the real work: it remaps each logical
+      sector to a physical one and rotates a spare <b>dummy</b> sector on every update, spreading
+      repeated overwrites (including the constant FAT-table rewrites) across the die instead of
+      hammering one spot.</p>
+      <p>That translation layer costs <b>4 of the 64 sectors</b> &mdash; its config, state, and dummy
+      sectors show up as <b>metadata</b> on the die &mdash; leaving a <b>240&nbsp;KB</b> logical
+      volume (about <b>224&nbsp;KB</b> usable as FAT12, 4&nbsp;KB clusters, two FAT copies). Deleting
+      a file frees its clusters in the FAT, but the old bytes stay on the die as <b>garbage</b> until
+      something reuses them; nothing reclaims proactively, so the <b>background GC control</b> is
+      inert here too.</p>
+      <p>The cost of overwrite-in-place is the headline. Driven through the same workload, FatFs
+      produces far more erasing than the log-structured designs &mdash; on one churn run about
+      <b>14,600</b> sector erases against roughly <b>1,000</b> for FASTFFS. And because FAT is not
+      copy-on-write, a write interrupted by a full volume can leave a file truncated, where the
+      log-structured filesystems fall back cleanly.</p>
+
+      <p>The filesystem cards in the header switch the view: click one to focus its die and
       compare the same workload on each.</p>
     </section>
   </div>

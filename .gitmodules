@@ -8,3 +8,7 @@
 [submodule "fs/spiffs"]
 	path = fs/spiffs
 	url = https://github.com/pellepl/spiffs.git
+[submodule "fs/jesfs"]
+	path = fs/jesfs
+	url = https://github.com/joembedded/JesFs.git
+	branch = master
