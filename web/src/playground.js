@@ -124,12 +124,18 @@ export function compileCommand(src, augment = (api) => api) {
 // out of the pure compiler above so compileCommand alone stays testable
 // against a bare stub.
 function buildConsoleApi(api) {
+  // print sink: the backend's per-session api provides one (session.js prints to
+  // that session's tape); a bare stub api without a sink degrades to a no-op so
+  // help()/print() never throw. help() RENDERS the reference through print (its
+  // return value alone goes nowhere — the command runner discards it), which is
+  // why a typed `help()` previously echoed `> help()` but printed nothing.
+  const print = api.print ?? (() => {});
   return {
     ...api,
     text: (s) => enc.encode(s),
     randomBytes,
-    help: api.help ?? (() => HELP_TEXT),
-    print: api.print ?? (() => {}),
+    print,
+    help: api.help ?? (() => { print(HELP_TEXT); return HELP_TEXT; }),
     format: api.format ?? (async () => { await api.fs?.format?.(); await api.fs?.mount?.(); }),
     // The real per-session api (session.js buildLocalApi) provides gc(n) directly,
     // paced/timed/journal-logged exactly like writeFile/readFile/etc — this

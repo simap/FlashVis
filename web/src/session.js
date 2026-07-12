@@ -382,7 +382,21 @@ export async function createSession(fsId, { geometry, container, onLog, name }) 
       openDir: async (prefix) => wrapDir(await runOp(`openDir(${prefix || ''})`, () => runner.openDir(prefix || '')), prefix || ''),
     };
 
-    return { writeFile, readFile, deleteFile, mkdir, ls, getFiles, stat, gc, fs };
+    // print(...args): write informational text straight to this session's tape,
+    // one journal line per '\n'. It is the sink the console `help()`/`print()`
+    // helpers render through (playground buildConsoleApi) — NOT a device op, so
+    // it is unpaced, charges no flash time, and never touches fileOpCount. Non-
+    // string args are JSON-stringified (falling back to String) so a bare query
+    // result can be surfaced too.
+    const print = (...args) => {
+      const text = args.map((a) => {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch { return String(a); }
+      }).join(' ');
+      for (const line of text.split('\n')) appendJournal(line, 'out');
+    };
+
+    return { writeFile, readFile, deleteFile, mkdir, ls, getFiles, stat, gc, print, fs };
   }
 
   let active = true;

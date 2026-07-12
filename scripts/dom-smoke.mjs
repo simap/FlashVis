@@ -89,6 +89,21 @@ dom.runIntervals();
 const filesAfterWrite = parseInt(dom.getEl('sFiles').textContent, 10);
 if (!(filesAfterWrite >= 1)) fail(`expected >=1 file after Write, HUD shows "${dom.getEl('sFiles').textContent}"`);
 
+// ---- help() renders its reference TEXT, not just the `> help()` echo. help()
+// returns HELP_TEXT and the command runner discards return values, so help must
+// render through the print sink; a regression here (print no-op) shows the echo
+// but no text — the "help() doesn't work" bug. ----
+const HELP_MARKER = 'ONE LINE = ONE ATOMIC COMMAND';
+dom.getEl('terminput').value = 'help()';
+dom.getEl('terminput').dispatch('keydown', { key: 'Enter' });
+let helpShown = false;
+for (let i = 0; i < 200 && !helpShown; i++) {
+  await new Promise((r) => setTimeout(r, 0));
+  dom.tick(1); dom.runIntervals();
+  helpShown = tapeText().includes(HELP_MARKER);
+}
+if (!helpShown) fail(`help() showed its '> help()' echo but never rendered the reference text ("${HELP_MARKER}") — the print sink is broken:\n${tapeText()}`);
+
 // ---- ops/s bar (A8): a live per-FS EMA fill, sourced from the coordinator's
 // new snapshots().opsPerSec. Sanity-check it actually rendered something. ----
 if (!/%$/.test(dom.getEl('fsBar-fastffs').style.width || '')) fail(`fsBar-fastffs never got a width style after activity: "${dom.getEl('fsBar-fastffs').style.width}"`);
@@ -193,7 +208,7 @@ console.log('PASS — booted the console/comparison UI against a stub backend (A
 console.log('  both FS live from load (no participation toggles — A2), fs-card focus-switch works,');
 console.log('  boot help()/format() broadcast to BOTH tapes (fix 1),');
 console.log('  present-gap chip stays hidden in steady Pace (fix 4) and appears/clears correctly around a Race→Catch-up cycle,');
-console.log('  Write button injects a real writeFile() command onto the tape, and the A8 ops/s bar renders,');
+console.log('  Write button injects a real writeFile() command onto the tape, help() renders its reference text (not just the echo), and the A8 ops/s bar renders,');
 console.log(`  a typed multi-statement command with an undeclared loop var ran atomically with no global 'i' leak (files ${before} → ${filesAfterScript}),`);
 console.log('  the compare-mode wheel (A1a) switches pace<->race,');
 console.log('  the Pace "holding" state (A8) shows on the leader while the laggard catches up,');

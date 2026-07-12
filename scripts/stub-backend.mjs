@@ -71,6 +71,9 @@ function buildLocalApi(session) {
     getFiles: async (prefix = '') => { session._bumpFileOp(); return [...session._files.keys()].filter((k) => k.startsWith(prefix)).sort()
       .map((name) => ({ name, size: session._files.get(name) })); },
     stat: async (name) => { session._bumpFileOp(); return (session._files.has(name) ? { name, size: session._files.get(name) } : null); },
+    // print sink (mirrors session.js): help()/print() render through this onto
+    // the tape. Not a file op; one journal line per '\n'.
+    print: (...args) => { for (const line of args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ').split('\n')) session._journalOp(line, 'out'); },
     fs: {
       format: async () => { session._bumpFileOp(); session._files.clear(); session._journalOp('format() → mounted, empty', 'out'); },
       gcStep: async () => { session._journalOp('gc() → 0 reclaimed', 'gc'); return null; },   // gc line tagged 'gc' structurally (ADR-0023)
