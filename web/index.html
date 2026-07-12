@@ -165,34 +165,35 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 ::selection{background:var(--accent-dim);color:#eafffb}
 .hidden{display:none!important}
 
-/* ============================ signature header (set-notation) ==============
-   The product stated as its own live type signature (ADR-0018's scoreboard,
-   restated): the whole sentence is mono, the FLASHVIS logotype is the one
-   sans flourish. { } is a tall CONTAINER around the set; the two FS cards
-   ARE the display switcher (click → focus/display that die). Compare mode
-   (A1a) and speed (A1b) live in the sentence — sim-global controls, not
-   per-op stimulus — so the WORKLOAD strip below holds only stimulus. */
-.sig{flex:none;display:flex;align-items:center;flex-wrap:wrap;gap:6px 11px;
-  padding:14px 22px 22px;border-bottom:1px solid var(--line-soft);
+/* ============================ signature header =============================
+   Two stacked rows (the N=5 "standings rail" — ADR-0018's scoreboard must stay
+   legible as N grows, and five cards no longer fit inside a sentence):
+   row 1 (.sig-line) is the title sentence — mono, the FLASHVIS logotype the one
+   sans flourish, with speed (A1b) and the compare-mode wheel (A1a) inline
+   (sim-global controls, not per-op stimulus — the WORKLOAD strip below holds
+   only stimulus). Row 2 (.fsset) is the full-width rail of FS cards; the cards
+   ARE the display switcher (click → focus/display that die). */
+.sig{flex:none;display:flex;flex-direction:column;gap:12px;
+  padding:12px 22px 16px;border-bottom:1px solid var(--line-soft);
   background:linear-gradient(180deg,var(--panel),var(--bg));
   font-size:15px;letter-spacing:.005em}
+.sig-line{display:flex;align-items:center;flex-wrap:wrap;gap:6px 11px}
+.sig-line .btn{margin-left:auto}
 .logo{font-family:"Space Grotesk";font-weight:700;font-size:20px;letter-spacing:.15em;color:var(--txt)}
 .logo b{color:var(--prog);font-weight:700}
 .hdsep{color:var(--txt-faint);margin:0 1px}
-.word,.tail{color:var(--txt-dim)}
+.tail{color:var(--txt-dim)}
 .tail .k{color:var(--txt);font-weight:500}
 
-/* the set: { [cards] } — braces stretch to card height, reading as a container.
-   The .fs cards are built DYNAMICALLY by playground.js into #fsSet, one per
-   participating FS (both, always — A2), separated by a .setsep comma. */
-.setwrap{display:inline-flex;align-items:stretch;gap:8px;margin:0 2px}
-.brace{display:flex;align-items:center;font-size:34px;font-weight:200;line-height:0;
-  color:var(--txt-faint);user-select:none;transform:scaleY(1.9);transform-origin:center}
-.fsset{display:inline-flex;align-items:stretch;gap:8px}
-.setsep{align-self:center;color:var(--txt-faint);font-size:16px;margin:0 -3px}
+/* the standings rail: .fs cards are built DYNAMICALLY by playground.js into
+   #fsSet, one per participating FS (all registered, always — A2). auto-fit +
+   minmax keeps every card visible at every width: cards compress, then wrap
+   to a second row — never a scroll row (standings you can't see aren't
+   standings). */
+.fsset{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}
 
 .fs{font-family:inherit;cursor:pointer;text-align:left;
-  display:flex;flex-direction:column;gap:2px;min-width:118px;
+  display:flex;flex-direction:column;gap:2px;min-width:0;
   padding:6px 12px 7px;border:1px solid var(--line);border-radius:7px;
   background:linear-gradient(180deg,var(--chrome),var(--panel-2));color:var(--txt-dim);transition:.14s;position:relative}
 .fs:hover{border-color:var(--accent-dim);color:var(--txt)}
@@ -300,6 +301,11 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .cell[data-live="obsolete"] .fill{background:var(--stale)}
 .cell[data-live="obsolete"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
 .cell[data-live="meta"] .fill{background:var(--index)}
+/* WL (class 4, FAT+WL): the wear-levelling FTL's own bookkeeping — conceptually
+   a layer of metadata, so it renders as a SHADE of the metadata color, not a
+   new hue. Derived from --index/--panel via color-mix so it tracks every
+   palette without per-theme declarations. */
+.cell[data-live="wl"] .fill{background:color-mix(in srgb,var(--index) 45%,var(--panel))}
 .die.heat .sector{background:var(--wc,var(--sector-bg,#0c141b));border-color:#0006}
 .die.heat .cell{opacity:.13}
 .die.heat .sector.sel{box-shadow:0 0 0 1px var(--accent)}
@@ -366,6 +372,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    (the chip background shows through, mirroring a glow riding over a cell). */
 .sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
+.sw.wl{background:color-mix(in srgb,var(--index) 45%,var(--panel))}  /* shade of metadata — see [data-live="wl"] */
 .sw.glow{width:11px;height:11px;border-radius:50%;background:transparent}
 .sw.read.glow{box-shadow:inset 0 0 0 1.5px var(--read),0 0 6px 0 var(--read)}
 .sw.program.glow{box-shadow:inset 0 0 0 1.5px var(--program),0 0 6px 0 var(--program)}
@@ -544,43 +551,39 @@ dialog.about[open]{animation:aboutIn .18s ease}
      pokes stay ~one viewport and the tape never grows the page unbounded (the
      reference's min-height:300 would; a max-height cap does not). */
   .tape{min-height:220px;max-height:52vh}
-  .fsset{width:100%}
-  .fs{flex:1 1 118px}
+  .fsset{grid-template-columns:repeat(auto-fit,minmax(140px,1fr))}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 
 <header class="sig" aria-label="flashvis status and controls">
-  <span class="logo">FLASH<b>VIS</b></span>
-  <button class="about-btn" id="aboutBtn" type="button" aria-haspopup="dialog"
-          aria-label="About flashvis and flash filesystems" title="About flashvis">i</button>
-  <span class="hdsep">·</span>
-  <span class="word">real</span>
-  <!-- The set-notation sentence (ADR-0018's scoreboard, restated, A1): the two
-       FS cards ARE the display switcher. Built dynamically by playground.js
-       into #fsSet — one .fs button per participating FS (both, always — A2),
-       separated by a .setsep comma. Click a card to focus it. -->
-  <span class="setwrap">
-    <span class="brace" aria-hidden="true">{</span>
-    <span class="fsset" id="fsSet" role="group" aria-label="filesystem standings — select one to focus"></span>
-    <span class="brace" aria-hidden="true">}</span>
-  </span>
-  <span class="tail">running on an emulated <span class="k">NOR flash</span> at</span>
-  <label class="sig-speed">
-    <input type="range" id="speed" min="0" max="100" value="40" aria-label="speed">
-    <span id="speedRead" class="hintk"></span>
-  </label>
-  <span class="tail">measuring</span>
-  <!-- Compare-mode wheel (A1a): a switch, not a link. The active phrase sits
-       on the sentence baseline; the other mode peeks below, faded/tilted.
-       Click rotates the peek up; wires to coordinator.setMode. -->
-  <button class="modewheel" id="modeWheel" role="switch" aria-checked="false"
-          title="switch compare mode" aria-label="compare mode; click to switch">
-    <span class="mghost" aria-hidden="true">least time for equal ops</span>
-    <span class="mopt" id="modeOpt-pace" data-mode="pace">least time for equal ops</span>
-    <span class="mopt" id="modeOpt-race" data-mode="race">most ops in equal time</span>
-  </button>
-  <button class="btn" id="btnReset" title="reset the simulation to a clean boot state">Reset</button>
+  <div class="sig-line">
+    <span class="logo">FLASH<b>VIS</b></span>
+    <button class="about-btn" id="aboutBtn" type="button" aria-haspopup="dialog"
+            aria-label="About flashvis and flash filesystems" title="About flashvis">i</button>
+    <span class="hdsep">·</span>
+    <span class="tail">real filesystems running on an emulated <span class="k">NOR flash</span> at</span>
+    <label class="sig-speed">
+      <input type="range" id="speed" min="0" max="100" value="40" aria-label="speed">
+      <span id="speedRead" class="hintk"></span>
+    </label>
+    <span class="tail">measuring</span>
+    <!-- Compare-mode wheel (A1a): a switch, not a link. The active phrase sits
+         on the sentence baseline; the other mode peeks below, faded/tilted.
+         Click rotates the peek up; wires to coordinator.setMode. -->
+    <button class="modewheel" id="modeWheel" role="switch" aria-checked="false"
+            title="switch compare mode" aria-label="compare mode; click to switch">
+      <span class="mghost" aria-hidden="true">least time for equal ops</span>
+      <span class="mopt" id="modeOpt-pace" data-mode="pace">least time for equal ops</span>
+      <span class="mopt" id="modeOpt-race" data-mode="race">most ops in equal time</span>
+    </button>
+    <button class="btn" id="btnReset" title="reset the simulation to a clean boot state">Reset</button>
+  </div>
+  <!-- The standings rail (ADR-0018's scoreboard, A1): the FS cards ARE the
+       display switcher. Built dynamically by playground.js into #fsSet — one
+       .fs button per participating FS (all registered, always — A2). Click a
+       card to focus it. -->
+  <div class="fsset" id="fsSet" role="group" aria-label="filesystem standings — select one to focus"></div>
 </header>
 
 <div class="main">
@@ -738,7 +741,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <h3>How the filesystems cope</h3>
       <p><span class="wordmark">FLASH<b>VIS</b></span> compares five filesystems today &mdash;
       <b>FASTFFS</b>, <b>LittleFS</b>, <b>SPIFFS</b>, <b>JesFS</b>, and ChaN <b>FatFs</b> over the
-      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT&nbsp;+&nbsp;WL</b>) &mdash; with more
+      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT+WL</b>) &mdash; with more
       planned. The first four are purpose-built for raw flash: they write new data into erased space
       and let superseded copies linger as <b>garbage</b> to reclaim later, since flash cannot cheaply
       overwrite in place. FatFs is the outlier &mdash; a classic <b>overwrite-in-place</b> FAT
@@ -827,7 +830,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <p>JesFS has no native <b>seek</b>, so seeking is emulated by rewinding and re-reading forward
       &mdash; visible extra read traffic on the die. Filenames are capped at <b>21 characters</b>.</p>
 
-      <h4>FAT + WL</h4>
+      <h4>FAT+WL</h4>
       <p>FatFs is the classic FAT filesystem &mdash; here, ChaN <b>FatFs</b> over the ESP-IDF
       <b>wear_levelling</b> FTL. FAT expects to <b>overwrite sectors in place</b> and does no erasing
       itself; it simply rewrites the FAT table and directory entries as files change. Flash cannot

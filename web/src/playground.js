@@ -33,7 +33,7 @@ import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 // (ADR-0017 — "every active filesystem runs the same workload at once").
 const FS_REGISTRY = {
   fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS', jesfs: 'JesFS',
-  fatfs: 'FAT + WL',   // ChaN FatFs over the ESP-IDF wear_levelling FTL — one logical FS entry
+  fatfs: 'FAT+WL',   // ChaN FatFs over the ESP-IDF wear_levelling FTL — one logical FS entry
 };
 const DEFAULT_FS = 'fastffs';
 
@@ -51,7 +51,12 @@ const churnProfile = () => ({
   classes: [
     { key: CHURN_CLASS.SMALL,  name: 'small',  weight: 800, minSize: 2 * 1024,  maxSize: 6 * 1024 },
     { key: CHURN_CLASS.MEDIUM, name: 'medium', weight: 150, minSize: 8 * 1024,  maxSize: 20 * 1024 },
-    { key: CHURN_CLASS.LARGE,  name: 'large',  weight: 50,  minSize: 40 * 1024, maxSize: 40 * 1024 },
+    // Over-capacity large writes are DISABLED (weight 0) for now: near the live
+    // ceiling they can ENOSPC, and the drivers diverge on what a failed write
+    // leaves behind (log-structured FSs fail atomically; FAT truncates), while
+    // the open-loop oracle (ADR-0010) must stay blind to per-FS outcomes.
+    // Revisit when the churn tuning knobs land (see ROADMAP).
+    { key: CHURN_CLASS.LARGE,  name: 'large',  weight: 0,   minSize: 40 * 1024, maxSize: 40 * 1024 },
   ],
 });
 
@@ -315,10 +320,10 @@ async function boot() {
   }
   $('btnCatchup').addEventListener('click', () => { coordinator.setMode('pace'); markMode('pace'); });
 
-  // ---- the set-notation header (A1/ADR-0018): per-FS standings AND the
-  // focus control, collapsed into the `{ [FASTFFS], [LittleFS] }` sentence.
-  // One `.fs` card per participating FS (both, always — A2), built into
-  // #fsSet with a `.setsep` comma between cards; click a card to focus it.
+  // ---- the standings rail (A1/ADR-0018): per-FS standings AND the focus
+  // control, one `.fs` card per participating FS (all registered, always —
+  // A2), built into the full-width #fsSet grid under the title sentence;
+  // click a card to focus it.
   function fsCard(fsId) {
     const btn = document.createElement('button');
     btn.className = 'fs'; btn.id = 'fsCard-' + fsId; btn.dataset.fs = fsId;
@@ -347,7 +352,6 @@ async function boot() {
     const leaderGood = snaps.reduce((m, s) => Math.max(m, goodOf(s)), 0);
     for (const snap of snaps) {
       if (!fsSetBuilt.has(snap.fsId)) {
-        if (fsSetBuilt.size) wrap.appendChild(Object.assign(document.createElement('span'), { className: 'setsep', textContent: ',' }));
         wrap.appendChild(fsCard(snap.fsId));
         fsSetBuilt.add(snap.fsId);
       }
@@ -376,20 +380,28 @@ async function boot() {
   }
 
   // ---- die-adjacent legend chip-row (ADR-0018): per-FS class descriptor —
-  // same baseline for both drivers today, a hook for future per-driver classes
-  // (LittleFS metadata-pair / CTZ) without reworking the row's structure. ----
+  // shared baseline plus per-driver extras (below), without reworking the
+  // row's structure. ----
   // Every color the die can display, in TWO groups. STATES are matte FILLS (a
   // cell's stored condition). OPS are GLOWS (marked `glow`) the die rides over a
   // cell, so their swatch renders as a hollow ring + halo, no fill; the group
   // includes the read+program MIX (--mix, the overlap color the dual-channel heat
   // renders when a cell is read and programmed at once).
-  function legendFor(_session) {
+  // Per-FS extra STATE classes (the descriptor's per-driver hook): fsId → chips
+  // appended to the shared baseline when that FS is focused. FAT+WL declares
+  // class 4 — the wear_levelling FTL's own sectors (config/state/dummy) — shown
+  // as a SHADE of the metadata color (a layer of metadata, not a new kind).
+  const FS_EXTRA_STATES = {
+    fatfs: [{ cls: 'wl', word: 'WL', title: "the FTL's own bookkeeping sectors — a shade of metadata" }],
+  };
+  function legendFor(session) {
     return [
       { label: 'States', items: [
         { cls: 'erased', word: 'Erased', title: '0xFF, nothing written' },
         { cls: 'prog', word: 'Live', title: 'fill = bytes programmed' },
         { cls: 'obsolete', word: 'Obsolete', title: 'reclaimable garbage' },
         { cls: 'index', word: 'Metadata', title: 'index + records' },
+        ...(FS_EXTRA_STATES[session.fsId] ?? []),
       ] },
       { label: 'Ops', items: [
         { cls: 'read', word: 'Reading', title: 'XIP, no wear', glow: true },
