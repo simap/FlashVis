@@ -146,20 +146,16 @@ function buildConsoleApi(api) {
 }
 
 const HELP_TEXT = [
-  'POKES  (friendly, optional args, all paced — prefix with await):',
-  '  writeFile(name?, size?) → {name,size}    random bytes; random name / random size when omitted',
-  '  readFile(name?) → {name,size}   ·   deleteFile(name?) → {name,size}   (no-arg lands on a tracked file;',
-  '    deleteFile also accepts the descriptor a prior call returned, e.g. deleteFile(last))',
-  '  mkdir(path)  mkdir -p (no-op on flat FASTFFS)   ·   getFiles(prefix?) → [{name,size}]   ·   ls(prefix?)',
-  'FILES  (raw fs. layer — await to pace to simulated flash time):',
-  '  fs.write(name, data)  ·  fs.read(name)  ·  fs.remove(name)  ·  fs.stat(name) → {name,size}|null',
-  '  fs.mkdir(name)  ·  fs.gcStep()  ·  fs.format() / fs.mount() / fs.unmount()',
-  'HANDLES  (partial / positioned I/O — every op paced):',
-  "  const f = await fs.open(name, 'r'|'w')   → f.read(n), f.write(bytes), f.seek(off, 'set'|'cur'|'end'), f.stat(), f.close()",
-  '  const d = await fs.openDir(prefix?)      → d.read() → {name,size}|null, d.close()',
-  'ONE LINE = ONE ATOMIC COMMAND: the whole line runs, per filesystem, as a single tape entry',
-  '  (queued → live → done); an undeclared loop var (for (i=0;…)) stays local to this line.',
-  'HELPERS:  randomBytes(n) → bytes   ·   text(s) → bytes   ·   gc(n=1)   ·   help()',
+  'POKES  (friendly, all paced — prefix with await):',
+  '  writeFile(name?, size?)  ·  readFile(name?)  ·  deleteFile(name?)  → {name,size}   ·   stat(name) → {name,size}|null',
+  '    (no-arg read/delete lands on a tracked file; deleteFile also takes a prior result, e.g. deleteFile(last))',
+  '  ls(prefix?)   ·   getFiles(prefix?) → [{name,size}]   ·   mkdir(path)  (mkdir -p; no-op on flat FASTFFS)',
+  'RAW fs.  (await to pace to simulated flash time):',
+  '  fs.write(name, data)  ·  fs.read(name)  ·  fs.remove(name)  ·  fs.stat(name)  ·  fs.mkdir(name)  ·  fs.format()/mount()/unmount()',
+  "HANDLES:  const f = await fs.open(name, 'r'|'w')  → f.read(n), f.write(bytes), f.seek(off, 'set'|'cur'|'end'), f.stat(), f.close()",
+  '          const d = await fs.openDir(prefix?)  → d.read() → {name,size}|null, d.close()',
+  'HELPERS:  gc(n=1)  ·  format()  ·  randomBytes(n)  ·  text(s) → bytes  ·  print(x)  ·  help()',
+  'ONE LINE = ONE ATOMIC COMMAND (queued → live → done); an undeclared loop var (for (i=0;…)) stays local to the line.',
   "example:  let f = await writeFile(); for (i=0;i<5;i++) await writeFile('n'+i, 64); await deleteFile(f)",
 ].join('\n');
 
