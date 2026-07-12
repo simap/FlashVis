@@ -1,9 +1,13 @@
 /*
  * flashvis <-> FatFs/wear_levelling native liveness hook (ADR-0012).
  *
- * Exports ff_live_map: a per-page classification of the die, the shared
- * baseline every flashvis driver produces so the dies compare directly:
- *     0 erased · 1 metadata · 2 obsolete · 3 live-data
+ * Exports ff_live_map: a per-page classification of the die — the shared
+ * baseline every flashvis driver produces (0-3), plus one FAT+WL-specific
+ * class (the ADR-0011/0012 per-FS taxonomy in action; 0-3 semantics unchanged):
+ *     0 erased · 1 metadata (FAT-side) · 2 obsolete · 3 live-data · 4 WL
+ * Class 4 marks the wear_levelling FTL's OWN sectors (cfg + 2 state copies +
+ * the rotating dummy spare) so the UI can tint the FTL's overhead distinctly
+ * from the filesystem's metadata.
  *
  * FAT is a two-layer stack, so the hook composes the FAT *logical* view through
  * the wear_levelling *physical* mapping (the brief's core requirement):
@@ -18,10 +22,11 @@
  *   2. Map every logical sector to its current PHYSICAL sector via WL's own
  *      logical->physical function (WL_Flash::calcAddr, reached through the
  *      WL_Flash_Inspect subclass — the WL core stays unmodified).
- *   3. WL's own cfg/state sectors (fixed physical addresses) -> metadata; the
- *      WL "dummy" spare sector and any physically-unmapped or FAT-free sector
- *      is split by a blank scan: all-0xFF -> erased, else -> obsolete (stale
- *      data the FTL has not yet reclaimed).
+ *   3. WL's own sectors -> class 4 "WL": cfg/state at fixed physical
+ *      addresses, the dummy spare at state.wl_dummy_sec_pos (both reached via
+ *      WL_Flash_Inspect). Any remaining FAT-free sector is split by a blank
+ *      scan: all-0xFF -> erased, else -> obsolete (stale data the FTL has not
+ *      yet reclaimed).
  *
  * Sub-directory reclassification is single-level (the console's mkdir is
  * single-level, ADR-0014); clusters of any deeper nesting would read as live —
@@ -35,7 +40,9 @@
 
 extern "C" int js_flash_read_quiet(uint32_t off, void *buffer, uint32_t size);
 
-enum { CLS_ERASED = 0, CLS_META = 1, CLS_OBSOLETE = 2, CLS_LIVE = 3, CLS_FREE = 0xFE };
+enum { CLS_ERASED = 0, CLS_META = 1, CLS_OBSOLETE = 2, CLS_LIVE = 3,
+       CLS_WL = 4,   /* FAT+WL-specific: the FTL's own cfg/state/dummy sectors */
+       CLS_FREE = 0xFE };
 
 /* Direct PHYSICAL sector read (bypasses WL remapping) for the blank scan of the
  * dummy/overhead sectors — those are addressed by absolute device position. */
@@ -149,13 +156,17 @@ extern "C" int ff_live_map(uint8_t *out, uint32_t page_size) {
         }
     }
 
-    /* --- 4. WL overhead sectors (fixed physical addresses) -> metadata --- */
+    /* --- 4. WL-owned sectors -> class 4 "WL": cfg/state at fixed physical
+     * addresses, plus the rotating dummy spare (its position comes from WL's
+     * own state, not a heuristic — no logical sector ever maps onto it). --- */
     uint32_t s1 = (uint32_t)(g_wl_inspect->inspect_addr_state1() / ss);
     uint32_t s2 = (uint32_t)(g_wl_inspect->inspect_addr_state2() / ss);
     uint32_t cf = (uint32_t)(g_wl_inspect->inspect_addr_cfg() / ss);
-    if (s1 < ndev) phys[s1] = CLS_META;
-    if (s2 < ndev) phys[s2] = CLS_META;
-    if (cf < ndev) phys[cf] = CLS_META;
+    uint32_t du = g_wl_inspect->inspect_dummy_sec_pos();
+    if (s1 < ndev) phys[s1] = CLS_WL;
+    if (s2 < ndev) phys[s2] = CLS_WL;
+    if (cf < ndev) phys[cf] = CLS_WL;
+    if (du < ndev) phys[du] = CLS_WL;
 
     /* --- 5. map each logical sector to its physical sector --- */
     for (uint32_t L = 0; L < nlog; L++) {
@@ -164,7 +175,9 @@ extern "C" int ff_live_map(uint8_t *out, uint32_t page_size) {
         if (ps < ndev) phys[ps] = logcls[L];
     }
 
-    /* --- 6. resolve free / dummy / unmapped physical sectors by blank scan --- */
+    /* --- 6. resolve FAT-free (and any unmapped) physical sectors by blank
+     * scan. The WL sectors are already class 4, so with cfg/state/dummy pinned
+     * this normally only sees free data clusters. --- */
     for (uint32_t p = 0; p < ndev; p++) {
         if (phys[p] != CLS_FREE) continue;
         if (read_phys(p, ss, sec) != 0) { phys[p] = CLS_OBSOLETE; continue; }
