@@ -680,9 +680,9 @@ dialog.about[open]{animation:aboutIn .18s ease}
   </div>
   <div class="about-body">
     <section class="about-sec">
-      <p><span class="wordmark">FLASH<b>VIS</b></span> runs real embedded filesystems, compiled to
-      WebAssembly, against an emulation of an SPI NOR flash chip. Every read, program, and
-      erase lights up the die under real NOR flash rules, so you can watch and compare how
+      <p><span class="wordmark">FLASH<b>VIS</b></span> runs <span class="k">real embedded filesystems</span>, compiled to
+      <b>WebAssembly</b>, against an emulation of an SPI NOR flash chip. Every read, program, and
+      erase lights up the <b>die</b> under real NOR flash rules, so you can watch and compare how
       filesystems behave. It exists to show how
       <a href="https://github.com/simap/FASTFFS" target="_blank" rel="noopener">FASTFFS</a>, a new
       NOR flash filesystem, works next to others like LittleFS.</p>
@@ -692,32 +692,32 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <h3>You are looking at a SPI NOR flash chip</h3>
       <p>The chip die visualization grid shows <b>256 KB</b> of NOR flash: <b>64 sectors</b> of <b>4 KB</b>, each <b>16 pages</b>
       of <b>256 bytes</b>.</p> 
-      <p>Each die cell is one 256 byte page, and its fill height is the bytes programmed. Past that
+      <p>Each die cell is one 256 byte page, and its <b>fill height</b> is the bytes programmed. Past that
       physical fill, the die can also tint pages by <b>logical</b> roles the filesystem assigns: live
       versus obsolete (which copy it still treats as current, not a physical byte state) and data
-      versus metadata (file bytes versus the filesystem's own bookkeeping). The wear heatmap adds a
+      versus metadata (file bytes versus the filesystem's own bookkeeping). The <b>wear heatmap</b> adds a
       third view, tinting each sector by how many times it has been erased, so you can watch wear pool
       into hotspots.</p>
       <p>NOR flash has a few peculiarities:</p>
       <ul>
         <li>Erased data reads as <code>0xFF</code>.</li>
-        <li>Programming only clears bits from <span class="k">1 to 0</span>, down to a byte at a time. You can keep
+        <li>Programming only clears bits from <code>1</code> to <code>0</code>, down to a byte at a time. You can keep
         programming <code>1</code> bits into <code>0s</code> without erasing.</li>
-        <li>Setting bits back to <span class="k">1</span> takes an <b>erase</b>, and erase only works
+        <li>Setting bits back to <code>1</code> takes an <span class="k">erase</span>, and erase only works
         on a whole <b>4 KB sector</b>. It is the slowest operation, and wears out the flash over time.</li>
       </ul>
-      <p>Timing is based on measured performance using an <b>ESP32-S3</b>, and is used both for flash
-      time accounting and relative visual animation speeds: a 256 byte read is about <b>0.1 ms</b>, a
-      page program is about <b>1.5 ms</b>, and a sector erase is about <b>21 ms</b>. The speed control scales this
+      <p>Timing is based on measured performance using an <b>ESP32-S3</b>, and is used both for <b>flash
+      time</b> accounting and relative visual animation speeds: a 256 byte read is about <b>0.1 ms</b>, a
+      page program is about <b>1.5 ms</b>, and a sector erase is about <b>21 ms</b>. The <b>speed control</b> scales this
       simulated flash time so you can watch it in super slomo, or speed it up to see how it behaves over time.</p>
     </section>
 
     <section class="about-sec">
       <h3>Two ways to drive it</h3>
-      <p><b>Run</b>, in the header, starts the automated workload generator: it creates, replaces,
-      and deletes files continuously to a roughly steady state of storage capacity, so you watch the 
+      <p><b>Run</b>, in the header, starts the <b>automated workload generator</b>: it creates, replaces,
+      and deletes files continuously to a roughly <b>steady state</b> of storage capacity, so you watch the 
       die under a write heavy load. This is where most of the intersting action happens and where most
-      of the divergent filesystem behavior occurs.</p>
+      of the <b>divergent filesystem behavior</b> occurs.</p>
       <p>The console and the poke buttons (<b>write</b>, <b>read</b>, <b>ls</b>, <b>delete</b>,
       <b>gc</b>, <b>format</b>) drive one action at a time, so you can watch a single operation on the
       die. Or put in a one liner to run a micro-benchmark. Type <code>help()</code> for the full command list.</p>
@@ -760,7 +760,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <p>Within a sector, file <b>metadata</b> is appended to the tail, growing backwards, while file
       <b>data</b> (including the name) grows from the start of the sector down. This allows many
       smaller files to share a sector efficiently. When a file is deleted/overwritten it is marked
-      <b>obsolete</b>, leaving any other live files in place and intact.</p>
+      obsolete, leaving any other live files in place and intact.</p>
       <p>Its garbage collector is <b>incremental</b>, reclaiming in small cheap background steps that
       keep garbage low for a small, steady cost. The <b>background GC control</b> sets how often this
       runs during the automatic workload, but typically this would happen in the background while the
