@@ -4,6 +4,9 @@
 - **Date:** 2026-07-12
 - **Deciders:** —
 
+Amends ADR-0019: retires the Pace op-level phaser (rendezvous coarsens to the step boundary);
+the command-atomic broadcast, quiescence model, and tape lifecycle stand.
+
 ## Context
 
 Five filesystems now run in lockstep, and the workers spike measured the main thread as the
@@ -17,8 +20,9 @@ Two structural facts shape the split. First, a session's device emulator shares 
 with its WASM module (the HAL writes into `HEAPU8` synchronously mid-call), so the only clean cut
 moves the **whole session — runner + device — into the worker**; ADR-0005's "JS owns the device"
 survives as JS-in-a-worker. Second, the naive alternative — stream every device event to the main
-thread as it happens — costs ~0.33 µs/event to marshal, so a 36.5 k-event burst spends ~13.7 ms
-serializing: **as much as executing it**. Fine-grained streaming merely relocates the stall.
+thread as it happens — costs ~0.33 µs/event to marshal, so a compaction-scale burst spends ~12–14 ms
+serializing (measured: 40.5 k events structured-clone in 13.7 ms): **as much as executing it**.
+Fine-grained streaming merely relocates the stall.
 
 The decision is **worker per session** (not one shared worker): each filesystem gets its own core,
 so one driver's compaction never delays another's progress, and the layout matches the product's
@@ -35,45 +39,66 @@ sized so that synchronization and marshalling stay off the per-op path.
   every worker, joining on completion acks (the rendezvous moves from the per-op animation
   barrier to the step boundary); in Race, "run until your simNs reaches R" — a released batch of
   race-clock ns — re-granted per tick. The hot `simNs < raceClock` read disappears as a
-  cross-thread query; the worker self-meters inside its grant and reports simNs in the ack. No
-  SharedArrayBuffer required (kept as an optimization option, accepting COOP/COEP if ever taken).
-- **Commands stay atomic at the command level** (ADR-0019): a console line ships as **source**,
-  compiles and runs worker-side against the local inner API, returns its result and per-op log
-  lines in one reply. Quiescence detection moves inside the worker, where the call chain lives.
+  cross-thread query; the worker self-meters inside its grant (Race semantics are unchanged —
+  "run while simNs < R" is today's `raceGateOpen`, evaluated worker-side; overshoot stays one op)
+  and reports `simNs`/`fileOpCount` in the ack, so the 16 ms rate sampler and the per-frame
+  waiting/stalled pins read main-side grant bookkeeping and mirrored counters, never a cross-thread
+  query on a hot path. A Pace ack fires when the entry has executed AND its metered playback
+  drained — ADR-0009's drain-to-zero, now worker-side. No SharedArrayBuffer required (kept as an
+  optimization option, accepting COOP/COEP if ever taken).
+- **Commands stay atomic at the command level** (ADR-0019): a console line ships as **source**
+  (closures don't cross postMessage), compiles and runs worker-side against the local inner API,
+  returns its result and per-op log lines in one reply. Quiescence detection moves inside the
+  worker unchanged — `session.runCommand`'s in-flight counter + macrotask-boundary re-check
+  relocates with session.js, and the command's ack IS its quiescence.
 - **The heat field moves into the worker; the main thread pulls, it is not pushed.** Each worker
   runs its session's glow accumulation (`readHeat`/`progHeat` bump + decay — the ADR-0022
   representation) against granted time. The main thread renders the **focused** die by pulling the
-  heat arrays once per frame (two Float32Arrays, ~8 KB each at current geometry — trivially
-  cheaper than event streams, and O(geometry), not O(ops)). Unfocused dies stream nothing;
-  their heat state stays warm worker-side and is simply pulled again on focus. This **complies
-  with the ADR-0022 veto by construction**: every op still contributes its full glow — what
-  changed is where the accumulation runs, not what is counted. Low-frequency theatrical events
-  (the erase sweep, tape op-lines, command lifecycle) still stream individually — they are rare
-  and carry meaning per event.
+  heat arrays once per frame: two Float32Arrays over 1024 pages = ~4 KB each, ~8 KB/frame
+  (~0.5 MB/s at 60 fps); the die's fill/wear state (`shown` + `wear`, ~2.3 KB) rides the same pull.
+  The pull is O(geometry), never O(ops) — it costs the same whether the frame covered 10 ops or a
+  36.5 k-event compaction. Unfocused dies stream nothing and cost nothing — an improvement over
+  today, where a hidden die keeps its full rAF loop running (`setActive` only toggles a CSS class);
+  their heat stays warm worker-side and a focus switch pulls full state for a snap repaint. This
+  **complies with the ADR-0022 veto by construction**: every op still contributes its full glow —
+  what changed is where the accumulation runs, not what is counted. The erase sweep and command
+  lifecycle transitions still stream individually — rare, meaningful per event. Tape op-lines are
+  NOT rare (thousands/second at no-delay): the journal lives worker-side, only the **focused**
+  session streams appends (the UI already ignores unfocused journal events — `onSessionJournal`
+  returns early for them), batched onto grant acks, and a focus switch bulk-pulls the last 400
+  lines (all the tape ever renders).
 - **Timed playback (ADR-0009) becomes worker-side metering.** The SPEED scale ships to workers;
   a worker spends real-time budget × scale advancing its sim, so pacing/`await fs.op()` resolves
   against the worker's own clock instead of a main-thread animation queue drain. The main thread
   keeps only rendering.
 - **Telemetry is a periodic push** (~250 ms: fsinfo, livenessCounts, fileOpCount, simNs), matching
-  the scoreboard's existing cadence; the live map crosses only when the inspector is open and dirty.
+  the scoreboard's existing cadence; the live map (1 KB at current geometry) crosses only for the
+  FOCUSED session when dirty — the die's liveness tint needs it at its existing 250 ms
+  `refreshLiveness` cadence, not just the inspector.
 - **Staged behind a flag.** The backend selects via the existing `globalThis.__flashvisBackend`
-  seam; the in-process implementation remains the fallback until the worker backend passes the
-  extended concurrency suite.
+  seam; the in-process implementation remains the fallback. **Acceptance gate:** the flag does not
+  default on until `scripts/lockstep-concurrency-test.mjs` — every scenario: exactly-once dispatch,
+  busy-locks, abort/reject recovery, the Pace→Race reseat, holding/stalled/waiting, teardown —
+  runs green against the worker backend, including its cross-FS byte-identity assertions. The
+  suite already parameterizes its coordinator (`FV_LOCKSTEP`) and the UI its backend
+  (`__flashvisBackend`); extending it to the worker backend is part of this work, not follow-up.
 
 ## Consequences
 
 - The 13.5 ms compaction stall leaves the main thread entirely, and five drivers use five cores;
   main-thread cost becomes rendering the focused die + pulled snapshots, independent of op rate.
-- Race/Pace correctness now rests on grant/ack protocols across threads. The invariants guarded by
-  `scripts/lockstep-concurrency-test.mjs` (exactly-once, busy-locks, teardown, mode switches) must
-  be re-proven against the worker backend — extending that suite is part of the work, not optional.
-- Teardown becomes a two-sided handshake (resolve main-side waiters, then terminate the worker) —
-  the ADR-0016 hang risk in cross-thread form.
-- Pace's rendezvous coarsens from per-op to per-step: sessions within one step are no longer
-  op-interleaved in real time. Die images at step boundaries — the comparison the product makes —
-  are unaffected.
-- The tape's `queued → live → done` lifecycle (ADR-0018) keys off grant/ack + command replies
-  instead of main-thread execution observation.
+- Race/Pace correctness now rests on grant/ack protocols across threads; the concurrency suite is
+  the safety net (see the acceptance gate above), and every stop/abort/reject path must be re-proven
+  with an op in flight on another thread.
+- Teardown becomes a two-sided handshake: a `setSessions` removal must settle that session's
+  outstanding grant acks (else a Pace round's `Promise.all` hangs and wedges the coordinator —
+  ADR-0016's barrier-hang in grant form) before terminating the worker.
+- Pace's rendezvous coarsens from per-op to per-step — **this amends ADR-0019**: the
+  dynamic-membership op-level phaser is retired, and sessions within one step are no longer
+  op-interleaved in real time. Step-boundary state — the comparison the product makes — is
+  unaffected, and the tape's command-granular `queued → live → done` lifecycle (ADR-0018) survives
+  untouched: it keys off broadcast ('queued'), grant ('live'), and ack ('done') — the same
+  boundaries it already used, observed over the wire instead of in-process.
 - Determinism is preserved by construction: one coordinator-owned sequence, events shipped whole,
   command source compiled per-worker with the per-command seed (ADR-0019).
 
