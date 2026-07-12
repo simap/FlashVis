@@ -380,20 +380,28 @@ async function boot() {
   }
 
   // ---- die-adjacent legend chip-row (ADR-0018): per-FS class descriptor —
-  // same baseline for both drivers today, a hook for future per-driver classes
-  // (LittleFS metadata-pair / CTZ) without reworking the row's structure. ----
+  // shared baseline plus per-driver extras (below), without reworking the
+  // row's structure. ----
   // Every color the die can display, in TWO groups. STATES are matte FILLS (a
   // cell's stored condition). OPS are GLOWS (marked `glow`) the die rides over a
   // cell, so their swatch renders as a hollow ring + halo, no fill; the group
   // includes the read+program MIX (--mix, the overlap color the dual-channel heat
   // renders when a cell is read and programmed at once).
-  function legendFor(_session) {
+  // Per-FS extra STATE classes (the descriptor's per-driver hook): fsId → chips
+  // appended to the shared baseline when that FS is focused. FAT+WL declares
+  // class 4 — the wear_levelling FTL's own sectors (config/state/dummy) — shown
+  // as a SHADE of the metadata color (a layer of metadata, not a new kind).
+  const FS_EXTRA_STATES = {
+    fatfs: [{ cls: 'wl', word: 'WL', title: "the FTL's own bookkeeping sectors — a shade of metadata" }],
+  };
+  function legendFor(session) {
     return [
       { label: 'States', items: [
         { cls: 'erased', word: 'Erased', title: '0xFF, nothing written' },
         { cls: 'prog', word: 'Live', title: 'fill = bytes programmed' },
         { cls: 'obsolete', word: 'Obsolete', title: 'reclaimable garbage' },
         { cls: 'index', word: 'Metadata', title: 'index + records' },
+        ...(FS_EXTRA_STATES[session.fsId] ?? []),
       ] },
       { label: 'Ops', items: [
         { cls: 'read', word: 'Reading', title: 'XIP, no wear', glow: true },

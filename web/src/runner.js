@@ -258,8 +258,10 @@ export async function createRunner(geometry = {}, fsId = 'fastffs') {
     },
 
     /** Per-page liveness (reachability walk): 0 erased, 1 metadata, 2 obsolete,
-     *  3 live-data. Silent. Null when the driver doesn't advertise FF_CAP_LIVE_MAP
-     *  / export ff_live_map. */
+     *  3 live-data; drivers may emit higher classes (4 = WL/FTL bookkeeping,
+     *  FAT+WL). Values pass through unclamped — the viz layer degrades unknown
+     *  classes to metadata rather than throwing. Silent. Null when the driver
+     *  doesn't advertise FF_CAP_LIVE_MAP / export ff_live_map. */
     liveMap() {
       if (!canLiveMap) return null;
       const pages = (sectorSize * sectorCount) / pageSize;
