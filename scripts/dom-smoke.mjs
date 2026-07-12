@@ -44,7 +44,7 @@ dom.runIntervals();
 // participation toggles are gone (redesign manifest A2). Count tracks FS_REGISTRY
 // (playground.js) on purpose: a new driver must actually boot in this harness. ----
 const dieStack = dom.getEl('dieStack');
-if (dieStack.children.length !== 3) fail(`dieStack has ${dieStack.children.length} mounted dies, expected 3 (every registered FS live from load)`);
+if (dieStack.children.length !== 4) fail(`dieStack has ${dieStack.children.length} mounted dies, expected 4 (every registered FS live from load)`);
 
 // ---- set-notation header (A1): one `.fs` card per participant, built into
 // #fsSet, replacing the old scoreboard's `.lane`/sbSeg-* build. ----
