@@ -40,10 +40,11 @@ if (dom.getEl('specLive').textContent.includes('boot failed')) fail(`boot failed
 
 dom.runIntervals();
 
-// ---- both filesystems are live from page load (ADR-0017) — always both,
-// participation toggles are gone (redesign manifest A2). ----
+// ---- every registered filesystem is live from page load (ADR-0017) — always all,
+// participation toggles are gone (redesign manifest A2). Count tracks FS_REGISTRY
+// (playground.js) on purpose: a new driver must actually boot in this harness. ----
 const dieStack = dom.getEl('dieStack');
-if (dieStack.children.length !== 2) fail(`dieStack has ${dieStack.children.length} mounted dies, expected 2 (both FS live from load)`);
+if (dieStack.children.length !== 3) fail(`dieStack has ${dieStack.children.length} mounted dies, expected 3 (every registered FS live from load)`);
 
 // ---- set-notation header (A1): one `.fs` card per participant, built into
 // #fsSet, replacing the old scoreboard's `.lane`/sbSeg-* build. ----

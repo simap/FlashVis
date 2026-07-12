@@ -6,22 +6,25 @@
   "description": "Watch real flash filesystems work: FS-to-WASM over an emulated NOR chip.",
   "scripts": {
     "dev": "node scripts/dev-server.mjs",
-    "build": "npm run build:fastffs && npm run build:littlefs",
+    "build": "npm run build:fastffs && npm run build:littlefs && npm run build:spiffs",
     "build:fastffs": "bash build/build-fastffs.sh",
     "build:littlefs": "bash build/build-littlefs.sh",
+    "build:spiffs": "bash build/build-spiffs.sh",
     "test:fastffs": "node scripts/fastffs-test.mjs",
     "test:integrity": "node scripts/integrity-test.mjs",
     "test:console": "node scripts/console-api-test.mjs",
     "test:domsmoke": "node scripts/dom-smoke.mjs",
     "test:littlefs": "node scripts/littlefs-test.mjs",
     "test:littlefs-integrity": "node scripts/littlefs-integrity.mjs",
+    "test:spiffs": "node scripts/spiffs-test.mjs",
+    "test:spiffs-integrity": "node scripts/spiffs-integrity.mjs",
     "test:realsmoke": "node scripts/real-smoke.mjs",
     "test:concurrency": "node scripts/lockstep-concurrency-test.mjs",
     "test:commanderror": "node scripts/command-error-test.mjs",
     "test:tapeleak": "node scripts/tape-leak-test.mjs",
     "test:vizheat": "node scripts/viz-heat-test.mjs",
     "test:opcount": "node scripts/opcount-test.mjs",
-    "test": "npm run test:fastffs && npm run test:integrity && npm run test:console && npm run test:domsmoke && npm run test:littlefs && npm run test:littlefs-integrity && npm run test:realsmoke && npm run test:concurrency && npm run test:commanderror && npm run test:tapeleak && npm run test:vizheat && npm run test:opcount",
-    "ci": "npm run build:fastffs && npm run build:littlefs && npm test"
+    "test": "npm run test:fastffs && npm run test:integrity && npm run test:console && npm run test:domsmoke && npm run test:littlefs && npm run test:littlefs-integrity && npm run test:spiffs && npm run test:spiffs-integrity && npm run test:realsmoke && npm run test:concurrency && npm run test:commanderror && npm run test:tapeleak && npm run test:vizheat && npm run test:opcount",
+    "ci": "npm run build && npm test"
   }
 }

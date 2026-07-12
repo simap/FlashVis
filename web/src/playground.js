@@ -29,9 +29,9 @@
 import { createChurnModel, CHURN_CLASS } from './churn.js';
 import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 
-// FS registry (ADR-0015): fsId → display name. Both are live from page load
+// FS registry (ADR-0015): fsId → display name. All are live from page load
 // (ADR-0017 — "every active filesystem runs the same workload at once").
-const FS_REGISTRY = { fastffs: 'FASTFFS', littlefs: 'LittleFS' };
+const FS_REGISTRY = { fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS' };
 const DEFAULT_FS = 'fastffs';
 
 // Auto-workload churn config, scaled to the 256 KiB (4096×64) device. The model
