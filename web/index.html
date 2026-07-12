@@ -752,37 +752,38 @@ dialog.about[open]{animation:aboutIn .18s ease}
       </ul>
 
       <h4>FASTFFS</h4>
-      <p>The core idea is simple: file data is written copy-on-write into flash sectors, then a
-      compact append-only index record commits the namespace update. On remount, the index is
-      replayed to recover the current set of names and where they start. Old file versions and
-      interrupted writes are left as obsolete or orphaned data for later cleanup.</p>
-      <p>Within a sector, file metadata is appended to the tail, growing backwards, while file data
-      (including the name) grows from the start of the sector down. This allows many smaller files to
-      share a sector efficiently. When a file is deleted/overwritten it is marked obsolete, leaving
-      any other live files in place and intact.</p>
-      <p>Its garbage collector is incremental, reclaiming in small cheap background steps that keep
-      garbage low for a small, steady cost. The background GC control sets how often this runs during
-      the automatic workload, but typically this would happen in the background while the application
-      using FASTFFS is idle. It has dynamic wear-leveling through two round-robin cursors: one for GC
-      and one for alloc.</p>
-      <p>Compaction triggers on write allocation pressure when there is nowhere free/erased to write
-      to, and no sector can be erased because they still have live data. It copies out live files (or
-      parts of them) that are trapping the most obsolete/reclaimable space, so that sectors can be
-      erased and reused. This is only done when necessary, since it is expensive and causes write
-      amplification.</p>
+      <p>The core idea is simple: file data is written <span class="k">copy-on-write</span> into flash
+      sectors, then a compact <b>append-only index record</b> commits the namespace update. On
+      remount, the index is replayed to recover the current set of names and where they start. Old
+      file versions and interrupted writes are left as <b>obsolete</b> or orphaned data for later
+      cleanup.</p>
+      <p>Within a sector, file <b>metadata</b> is appended to the tail, growing backwards, while file
+      <b>data</b> (including the name) grows from the start of the sector down. This allows many
+      smaller files to share a sector efficiently. When a file is deleted/overwritten it is marked
+      <b>obsolete</b>, leaving any other live files in place and intact.</p>
+      <p>Its garbage collector is <b>incremental</b>, reclaiming in small cheap background steps that
+      keep garbage low for a small, steady cost. The <b>background GC control</b> sets how often this
+      runs during the automatic workload, but typically this would happen in the background while the
+      application using FASTFFS is idle. It has <b>dynamic wear-leveling</b> through two round-robin
+      cursors: one for GC and one for alloc.</p>
+      <p><b>Compaction</b> triggers on write allocation pressure when there is nowhere free/erased to
+      write to, and no sector can be erased because they still have live data. It copies out live
+      files (or parts of them) that are trapping the most obsolete/reclaimable space, so that sectors
+      can be erased and reused. This is only done when necessary, since it is expensive and causes
+      <b>write amplification</b>.</p>
 
       <h4>LittleFS</h4>
-      <p>At a high level, LittleFS is a block based filesystem that uses small logs to store metadata
-      and larger copy-on-write (COW) structures to store file data.</p>
+      <p>At a high level, LittleFS is a block based filesystem that uses <b>small logs</b> to store
+      metadata and larger <b>copy-on-write (COW) structures</b> to store file data.</p>
       <p>In LittleFS, these ingredients form a sort of two-layered cake, with the small logs (called
-      metadata pairs) providing fast updates to metadata anywhere on storage, while the COW structures
-      store file data compactly.</p>
-      <p>Small files (under 1/4th of a sector, or 1KB) are stored directly in the metadata pairs.
-      Files over that threshold are stored in one or more whole sectors.</p>
-      <p>It reclaims space as part of its writes rather than in a background operation. It has no
-      incremental GC step to drive, so the background GC control does not appear when LittleFS is
-      focused. It does have a GC function, but it does not reclaim space and is very expensive, so it
-      is not used here out of fairness.</p>
+      <b>metadata pairs</b>) providing fast updates to metadata anywhere on storage, while the COW
+      structures store file data compactly.</p>
+      <p>Small files (under 1/4th of a sector, or <b>1KB</b>) are stored directly in the metadata
+      pairs. Files over that threshold are stored in one or more whole sectors.</p>
+      <p>It reclaims space as part of its writes rather than in a background operation. It has
+      <b>no incremental GC step</b> to drive, so the <b>background GC control</b> does not appear when
+      LittleFS is focused. It does have a GC function, but it does not reclaim space and is very
+      expensive, so it is not used here out of fairness.</p>
 
       <p>The two filesystem cards in the header switch the view: click one to focus its die and
       compare the same workload on each.</p>
