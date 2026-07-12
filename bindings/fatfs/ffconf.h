@@ -81,5 +81,19 @@
 #define FF_FS_NOFSINFO	0
 #define FF_FS_LOCK		0		/* CONFIG_FATFS_FS_LOCK default 0 */
 #define FF_FS_REENTRANT	0		/* deviation: single-threaded, no RTOS mutex */
-#define FF_FS_TIMEOUT	1000
-#define FF_SYNC_t		void*
+/* Note: R0.15 references neither FF_FS_TIMEOUT nor FF_SYNC_t anywhere in
+ * ff.c/ff.h (it uses the ff_mutex_* API, compiled out at FF_FS_REENTRANT 0),
+ * so no timeout/sync defines are needed here. */
+
+/* IDF patch knob (not upstream ChaN): heap-allocated FATFS::win / FIL::buf
+ * sized to the runtime sector size instead of static BYTE[FF_MAX_SS] arrays.
+ * 0 matches the benchmark's effective build: at IDF v5.3.2 the Kconfig option
+ * FATFS_USE_DYN_BUFFERS `depends on CONFIG_WL_SECTOR_SIZE_4096` — a CONFIG_-
+ * prefixed symbol that doesn't exist in Kconfig namespace, so the dependency
+ * never satisfies and the option resolves n (v5.5 dropped the broken depends
+ * and made it plain `default n`). Even if it were 1, the only difference is
+ * heap-vs-static buffers of identical size (sector size == FF_MAX_SS == 4096)
+ * — zero on-flash or device-traffic effect — and static is what ADR-0013/0014
+ * want anyway. Defined explicitly so `#if FF_USE_DYN_BUFFER` in the vendored
+ * (IDF-patched) ff.c/ff.h never rides on undefined-macro semantics. */
+#define FF_USE_DYN_BUFFER	0
