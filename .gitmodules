@@ -5,3 +5,6 @@
 [submodule "fs/littlefs"]
 	path = fs/littlefs
 	url = https://github.com/littlefs-project/littlefs.git
+[submodule "fs/spiffs"]
+	path = fs/spiffs
+	url = https://github.com/pellepl/spiffs.git
