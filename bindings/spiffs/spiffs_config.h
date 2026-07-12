@@ -22,10 +22,22 @@
  * layout fidelity but do not write mtime (there is no meaningful wall clock in the WASM
  * sandbox, and the brief marks mtime replication optional).
  *
- * Deviations from IDF, both layout-neutral (cosmetic HAL/feature toggles, not tuning):
- *   - SPIFFS_HAL_CALLBACK_EXTRA 0: our HAL callbacks map 1:1 onto the flash imports and
- *     don't need the fs pointer (IDF passes it). Does not affect the on-disk format.
- *   - Stats/visualisation/ix-map compiled out to keep the WASM small; none change layout.
+ * Values IDF hardcodes in components/spiffs/include/spiffs_config.h (not Kconfig-driven),
+ * mirrored here so the compiled fs behaves like the benchmark's:
+ *   SPIFFS_COPY_BUFFER_STACK 256, SPIFFS_TEMPORAL_FD_CACHE 1 (+HIT_SCORE 4),
+ *   SPIFFS_IX_MAP 1, GC_HEUR_W_DELET/USED/ERASE_AGE 5/-1/50, SINGLETON 0,
+ *   ALIGNED_OBJECT_INDEX_TABLES 0, FILEHDL_OFFSET 0, READ_ONLY 0, BUFFER_HELP 0,
+ *   u16 block/page/obj/span types. With TEMPORAL_FD_CACHE+IX_MAP on, sizeof(spiffs_fd)
+ *   is 48 B on a 32-bit target — matching the 8x48 B fd budget the FASTFFS research
+ *   doc measured for the benchmark build.
+ *
+ * Deviations from IDF, all layout- and traffic-neutral:
+ *   - SPIFFS_HAL_CALLBACK_EXTRA 0 (IDF: 1): IDF threads the fs pointer through the HAL
+ *     to dispatch among multiple partitions; our single instance maps 1:1 onto the flash
+ *     imports. Changes only the callback signature, not the on-disk format or traffic.
+ *   - Stats/visualisation/debug compiled out (0) — same as the benchmark's Kconfig
+ *     defaults (CACHE_STATS n, GC_STATS n, TEST_VISUALISATION n); note upstream's
+ *     default config would have turned these ON.
  */
 #ifndef SPIFFS_CONFIG_H_
 #define SPIFFS_CONFIG_H_
@@ -103,7 +115,10 @@ typedef uint8_t   u8_t;
 
 #define SPIFFS_OBJ_NAME_LEN             (32) // CONFIG_SPIFFS_OBJ_NAME_LEN=32
 #define SPIFFS_OBJ_META_LEN             (4)  // CONFIG_SPIFFS_META_LENGTH=4
-#define SPIFFS_COPY_BUFFER_STACK        (64)
+// IDF hardcodes 256 (upstream default is 64). Perf-relevant: this is the stack copy
+// chunk for data moves, so a smaller value would issue more, smaller flash ops than
+// the benchmark did — visibly different device traffic.
+#define SPIFFS_COPY_BUFFER_STACK        (256)
 
 #define SPIFFS_USE_MAGIC                (1)  // CONFIG_SPIFFS_USE_MAGIC=y
 #define SPIFFS_USE_MAGIC_LENGTH         (1)  // CONFIG_SPIFFS_USE_MAGIC_LENGTH=y
@@ -117,9 +132,14 @@ typedef uint8_t   u8_t;
 #define SPIFFS_HAL_CALLBACK_EXTRA       0    // HAL callbacks take (addr,size,buf) — see header note
 #define SPIFFS_FILEHDL_OFFSET           0
 #define SPIFFS_READ_ONLY                0
-#define SPIFFS_TEMPORAL_FD_CACHE        0    // off: keeps sizeof(spiffs_fd) minimal, layout-neutral
-#define SPIFFS_TEMPORAL_CACHE_HIT_SCORE 4
-#define SPIFFS_IX_MAP                   0    // not used by the shim
+#define SPIFFS_TEMPORAL_FD_CACHE        1    // IDF hardcodes 1: closed fds remember file
+                                             // locations, so repeated opens skip the flash
+                                             // scan — open perf the benchmark measured
+#define SPIFFS_TEMPORAL_CACHE_HIT_SCORE 4    // IDF hardcodes 4
+#define SPIFFS_IX_MAP                   1    // IDF hardcodes 1; runtime-inert unless
+                                             // SPIFFS_ix_map() is called (neither IDF's VFS
+                                             // nor our shim does) but grows spiffs_fd to the
+                                             // benchmark's measured 48 B
 #define SPIFFS_NO_BLIND_WRITES          0    // NOR: blind (all-1s except reset bits) writes are fine
 #define SPIFFS_TEST_VISUALISATION       0    // no SPIFFS_vis / printf dependency
 #define SPIFFS_SECURE_ERASE             0
