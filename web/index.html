@@ -753,7 +753,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
 
       <h4>FASTFFS</h4>
       <p>The core idea is simple: file data is written <span class="k">copy-on-write</span> into flash
-      sectors, then a compact <b>append-only index record</b> commits the namespace update. On
+      sectors, then a compact <b>append-only index record</b> (<b>4 bytes</b>) commits the namespace update. On
       remount, the index is replayed to recover the current set of names and where they start. Old
       file versions and interrupted writes are left as <b>obsolete</b> or orphaned data for later
       cleanup.</p>
@@ -764,8 +764,8 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <p>Its garbage collector is <b>incremental</b>, reclaiming in small cheap background steps that
       keep garbage low for a small, steady cost. The <b>background GC control</b> sets how often this
       runs during the automatic workload, but typically this would happen in the background while the
-      application using FASTFFS is idle. It has <b>dynamic wear-leveling</b> through two round-robin
-      cursors: one for GC and one for alloc.</p>
+      application using FASTFFS is idle. It will still reclaim <b>inline</b> when free (erased, usable)
+      space runs tight. It levels wear through <b>two round-robin cursors</b>: one for GC and one for alloc.</p>
       <p><b>Compaction</b> triggers on write allocation pressure when there is nowhere free/erased to
       write to, and no sector can be erased because they still have live data. It copies out live
       files (or parts of them) that are trapping the most obsolete/reclaimable space, so that sectors
