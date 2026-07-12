@@ -33,7 +33,7 @@ import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 // (ADR-0017 — "every active filesystem runs the same workload at once").
 const FS_REGISTRY = {
   fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS', jesfs: 'JesFS',
-  fatfs: 'FAT + WL',   // ChaN FatFs over the ESP-IDF wear_levelling FTL — one logical FS entry
+  fatfs: 'FAT+WL',   // ChaN FatFs over the ESP-IDF wear_levelling FTL — one logical FS entry
 };
 const DEFAULT_FS = 'fastffs';
 
@@ -51,7 +51,12 @@ const churnProfile = () => ({
   classes: [
     { key: CHURN_CLASS.SMALL,  name: 'small',  weight: 800, minSize: 2 * 1024,  maxSize: 6 * 1024 },
     { key: CHURN_CLASS.MEDIUM, name: 'medium', weight: 150, minSize: 8 * 1024,  maxSize: 20 * 1024 },
-    { key: CHURN_CLASS.LARGE,  name: 'large',  weight: 50,  minSize: 40 * 1024, maxSize: 40 * 1024 },
+    // Over-capacity large writes are DISABLED (weight 0) for now: near the live
+    // ceiling they can ENOSPC, and the drivers diverge on what a failed write
+    // leaves behind (log-structured FSs fail atomically; FAT truncates), while
+    // the open-loop oracle (ADR-0010) must stay blind to per-FS outcomes.
+    // Revisit when the churn tuning knobs land (see ROADMAP).
+    { key: CHURN_CLASS.LARGE,  name: 'large',  weight: 0,   minSize: 40 * 1024, maxSize: 40 * 1024 },
   ],
 });
 

@@ -735,7 +735,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <h3>How the filesystems cope</h3>
       <p><span class="wordmark">FLASH<b>VIS</b></span> compares five filesystems today &mdash;
       <b>FASTFFS</b>, <b>LittleFS</b>, <b>SPIFFS</b>, <b>JesFS</b>, and ChaN <b>FatFs</b> over the
-      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT&nbsp;+&nbsp;WL</b>) &mdash; with more
+      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT+WL</b>) &mdash; with more
       planned. The first four are purpose-built for raw flash: they write new data into erased space
       and let superseded copies linger as <b>garbage</b> to reclaim later, since flash cannot cheaply
       overwrite in place. FatFs is the outlier &mdash; a classic <b>overwrite-in-place</b> FAT
@@ -824,7 +824,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <p>JesFS has no native <b>seek</b>, so seeking is emulated by rewinding and re-reading forward
       &mdash; visible extra read traffic on the die. Filenames are capped at <b>21 characters</b>.</p>
 
-      <h4>FAT + WL</h4>
+      <h4>FAT+WL</h4>
       <p>FatFs is the classic FAT filesystem &mdash; here, ChaN <b>FatFs</b> over the ESP-IDF
       <b>wear_levelling</b> FTL. FAT expects to <b>overwrite sectors in place</b> and does no erasing
       itself; it simply rewrites the FAT table and directory entries as files change. Flash cannot
