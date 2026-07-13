@@ -25,6 +25,25 @@ console.log('caps      -> 0x' + runner.caps.toString(16));
 console.log('format    ->', runner.format());
 console.log('mount     ->', runner.mount());
 
+// --- EMPTY-VOLUME census (the first-page-load state; spec/ui.md) ---
+// With zero files, NOTHING may read as live data: everything is metadata of
+// one kind or another, or not-yet-used space. Physical layout at 7 erases
+// (no WL rotation yet): sector 0 = the clean dummy (erased), 1 = VBR (2 meta
+// pages for the 512-B boot record + 14 slack), 2/3 = the two FAT copies
+// (1 meta page each — FAT12 uses 87 bytes — + 15 slack), 4 = root dir (1 meta
+// page: just the end-of-dir marker + 15 slack), 5..60 erased free clusters,
+// 61/62/63 = the FTL-written state/cfg sectors (WL).
+//   erased 912 = dummy 16 + 56 untouched clusters x 16
+//   meta 5, slack 59 = 14+15+15+15, WL 48, live 0, obsolete 0
+const censusEmpty = (() => {
+  const m = runner.liveMap();
+  const c = [0, 0, 0, 0, 0, 0];
+  for (const v of m) c[v]++;
+  return c;
+})();
+const okEmptyCensus = JSON.stringify(censusEmpty) === JSON.stringify([912, 5, 0, 0, 48, 59]);
+const okEmptyNoLive = censusEmpty[3] === 0;
+
 const enc = new TextEncoder();
 
 const payload = 'Hello from real ChaN FatFs over ESP-IDF wear_levelling, running as WASM over a JS-emulated NOR chip.';
@@ -135,7 +154,7 @@ const okContent = got === payload;
 const okList = list.some((e) => e.name === 'hello.txt' && e.size === enc.encode(payload).length)
   && list.some((e) => e.name === lfnName && e.size === big.length);
 
-const checks = { okAbi, okCaps, okGcNoop, okSectorClasses, okLiveMap, okCensus, okGranular, okWlClass, okObsolete, okRotPlacement, okRotBoot, okContent, okList };
+const checks = { okAbi, okCaps, okGcNoop, okSectorClasses, okEmptyCensus, okEmptyNoLive, okLiveMap, okCensus, okGranular, okWlClass, okObsolete, okRotPlacement, okRotBoot, okContent, okList };
 const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([k]) => k);
 
 if (failed.length) {
