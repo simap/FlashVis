@@ -460,8 +460,38 @@ async function boot() {
   // ---- FIX: boot logs (ADR-0018) — run help() then format() as BROADCAST
   // commands (not a one-off print to a single shared log) so every
   // participating session's OWN tape shows both, not just the focused one. ----
+  //
+  // ---- Fast-forward the page-load boot (UI spec: the load-triggered reset/
+  // boot animation and delay must not stand between load and a usable page).
+  // Turn on PREP mode (ADR-0014) on every session before injecting the boot
+  // log: ops still execute for real and still log their true simulated cost
+  // (ADR-0018's tape stays a journal of truth — asserted by
+  // scripts/real-smoke.mjs), but run full-speed with no animation and no
+  // await-pacing, so the die lands on its settled post-format state with zero
+  // frames of blur instead of visibly sweeping through it. This is
+  // deliberately SCOPED to the page-load boot only — the header Reset button
+  // (below) never touches prep, so its replayed format() keeps its full
+  // animated sweep (and the holding/waiting showcase that depends on it).
+  //
+  // Turned back off PER SESSION, the instant that session's own format()
+  // command reaches quiescence ('done' on its tape line) — not gated on every
+  // session finishing, and that's fine: a command a user types mid-boot is
+  // appended AFTER format() in the canonical sequence, so per-session cursor
+  // order alone guarantees it can only run on a given session once THAT
+  // session's format() (and so its prep-off) has already happened. No
+  // cross-session coordination needed.
+  for (const s of sessions.values()) s.setPrep(true);
   injectCommand('help()');
-  injectCommand('format()');
+  const { entry: bootFormat } = injectCommand('format()');
+  for (const s of sessions.values()) {
+    const line = bootFormat.journalEntries.get(s);
+    const unsub = s.onJournal((change) => {
+      if (change.type === 'update' && change.entry === line && line.state === 'done') {
+        s.setPrep(false);
+        unsub();
+      }
+    });
+  }
 
   setInterval(() => activeSession.refreshHUD($), 160);
   setInterval(() => activeSession.refreshLiveness($), 250);
@@ -553,9 +583,19 @@ async function boot() {
   // the ONE real format each chip gets (no silent pre-format — the
   // double-format bug); its runner.format() → device.reset() clears die
   // glow/fills/wear and the flash-time/op stats for free, since viz.js treats
-  // the 'reset' event as a full repaint. ----
+  // the 'reset' event as a full repaint.
+  //
+  // Reset's replay is NEVER fast-forwarded — only page-load boot is (see
+  // above) — so it keeps the full animated format sweep and the holding/
+  // waiting indicators that go with it. `setPrep(false)` here is a belt-and-
+  // suspenders guard, not the normal path: prep is already off by the time a
+  // human can click anything (boot's own per-session prep-off fires at that
+  // session's format quiescence, well before this is reachable), but a Reset
+  // landing in the sub-frame window before that fire would otherwise replay
+  // its format with prep still on for that one session. ----
   $('btnReset')?.addEventListener('click', () => {
     setRunning(false);
+    for (const s of sessions.values()) s.setPrep(false);
     coordinator.reset({ format: false });
     for (const s of sessions.values()) s.clearJournal();
     renderFsSet();
