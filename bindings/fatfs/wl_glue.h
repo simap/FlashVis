@@ -29,10 +29,10 @@ public:
     // Usable logical size and page (== flash sector) size.
     size_t inspect_flash_size()  { return this->flash_size; }
     uint32_t inspect_page_size() { return this->cfg.wl_page_size; }
-    // Current dummy (spare) sector position — a physical sector index within
-    // the partition (dummy addr = start + pos * wl_page_size, see updateWL).
-    // Rotates through [0, wl_part_max_sec_pos) as WL levels wear.
-    uint32_t inspect_dummy_sec_pos() { return this->state.wl_dummy_sec_pos; }
+    // Note: the dummy (spare) sector position is deliberately NOT exposed.
+    // The live map classifies only FTL-WRITTEN sectors (cfg/state) as WL
+    // metadata (spec/ui.md); the dummy is found implicitly as the physical
+    // sector no logical address maps onto, and blank-scans like free space.
 };
 
 /* The single mounted instance, owned by wl_hal.cpp; NULL when down. */

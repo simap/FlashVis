@@ -12,12 +12,21 @@
  *   2 obsolete  page of a FAT-free cluster that is physically programmed —
  *               deleted/replaced file remnants the FS will overwrite blindly
  *   3 live      pages covering real file content (offset < filesize)
- *   4 WL        the wear_levelling FTL's own sectors (cfg + 2 state copies +
- *               rotating dummy spare), whole-sector by nature
+ *   4 WL        metadata the FTL itself WRITES: the cfg sector + 2 state
+ *               copies, nothing else (spec/ui.md: sectors handed to the FS
+ *               layer are decorated by the FS layer alone). The rotating
+ *               dummy spare is deliberately NOT class 4 — it is a parking
+ *               spot, not FTL metadata: it blank-scans to erased, or to
+ *               obsolete while it still holds the stale copy of the sector
+ *               the FTL last vacated (truthful: dead bytes awaiting the next
+ *               rotation's erase).
  *   5 slack     allocated but carrying no data: a live cluster's tail past
  *               EOF, and the unused padding of metadata regions (FAT table
- *               tail, root-dir tail, boot-sector remainder) — makes the cost
- *               of 4096-byte allocation units visible per page
+ *               tail, root-dir tail, boot-sector remainder). Kept as its own
+ *               class so the map stays information-complete, but the UI
+ *               renders it BLANK (spec/ui.md: unused pages in a file's
+ *               clusters read as erased/blank — never metadata) and it must
+ *               not fold into any metadata counter.
  *
  * Resolution: classification is per page *within* each 4096-B logical sector,
  * by parsing real FAT12 structure (BPB, FAT table, directory entries, file
@@ -46,7 +55,7 @@
 extern "C" int js_flash_read_quiet(uint32_t off, void *buffer, uint32_t size);
 
 enum { CLS_ERASED = 0, CLS_META = 1, CLS_OBSOLETE = 2, CLS_LIVE = 3,
-       CLS_WL = 4,     /* FAT+WL-specific: the FTL's own cfg/state/dummy sectors */
+       CLS_WL = 4,     /* FAT+WL-specific: metadata the FTL writes (cfg + state x2) */
        CLS_SLACK = 5,  /* FAT+WL-specific: allocated-but-unused (EOF slack, padding) */
        /* internal sentinels, never emitted */
        PG_ALLOC = 0xFD,   /* cluster allocated in FAT, not yet claimed by a walk */
@@ -122,14 +131,17 @@ static void mark_file(uint32_t start_clus, uint32_t size) {
 /* Scan one directory sector's 32-B entries (already in s_sec):
  *  - marks regular files' chains (LIVE + SLACK per page),
  *  - collects subdirectory start clusters into subs[] (subs_cap 0 = ignore),
- *  - reports the in-use extent: bytes up to the end-of-dir marker (0x00 first
- *    name byte), or ss when the marker isn't in this sector.
+ *  - reports the in-use extent: bytes up to AND INCLUDING the end-of-dir
+ *    marker (0x00 first name byte) — the terminator is structure too, so an
+ *    empty directory still shows its one metadata page instead of flipping
+ *    from padding to metadata when the first file lands; ss when the marker
+ *    isn't in this sector.
  * Returns 1 when the end marker was found (the directory ends here), else 0. */
 static int scan_dir_sector(uint32_t *extent, uint32_t *subs, uint32_t subs_cap,
                            uint32_t *nsubs) {
     for (uint32_t off = 0; off + 32 <= s_ss; off += 32) {
         const uint8_t *ent = s_sec + off;
-        if (ent[0] == 0x00) { *extent = off; return 1; }   /* end of directory */
+        if (ent[0] == 0x00) { *extent = off + 32; return 1; }   /* end of dir; marker included */
         if (ent[0] == 0xE5) continue;                      /* deleted entry */
         uint8_t attr = ent[11];
         if (attr == 0x0F) continue;                        /* LFN part */
@@ -265,16 +277,21 @@ extern "C" int ff_live_map(uint8_t *out, uint32_t page_size) {
         }
     }
 
-    /* --- 6. physical placement through the WL mapping --- */
+    /* --- 6. physical placement through the WL mapping ---
+     * Class 4 pins ONLY what the FTL writes: cfg + the two state sectors. The
+     * rotating dummy spare is deliberately not pinned — no logical sector
+     * maps onto it, so it falls to the physical blank scan below: erased when
+     * clean, obsolete while it still holds the stale copy of the sector the
+     * FTL last vacated. That renders rotation truthfully (data moved; the old
+     * copy is garbage) instead of painting FS data positions as FTL metadata
+     * one sector at a time as the dummy walks the device. */
     memset(out, PG_FREE, ndev * ppp);
     uint32_t s1 = (uint32_t)(g_wl_inspect->inspect_addr_state1() / ss);
     uint32_t s2 = (uint32_t)(g_wl_inspect->inspect_addr_state2() / ss);
     uint32_t cf = (uint32_t)(g_wl_inspect->inspect_addr_cfg() / ss);
-    uint32_t du = g_wl_inspect->inspect_dummy_sec_pos();
     if (s1 < ndev) memset(out + s1 * ppp, CLS_WL, ppp);
     if (s2 < ndev) memset(out + s2 * ppp, CLS_WL, ppp);
     if (cf < ndev) memset(out + cf * ppp, CLS_WL, ppp);
-    if (du < ndev) memset(out + du * ppp, CLS_WL, ppp);
 
     for (uint32_t L = 0; L < nlog; L++) {
         uint32_t ps = (uint32_t)(g_wl_inspect->phys_addr_of((size_t)L * ss) / ss);
