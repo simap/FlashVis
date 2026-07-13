@@ -399,9 +399,16 @@ async function boot() {
   // Per-FS extra STATE classes (the descriptor's per-driver hook): fsId → chips
   // appended to the shared baseline when that FS is focused. FAT+WL declares
   // class 4 — the wear_levelling FTL's own sectors (config/state/dummy) — shown
-  // as a SHADE of the metadata color (a layer of metadata, not a new kind).
+  // as a SHADE of the metadata color (a layer of metadata, not a new kind) —
+  // and class 5 "slack" — pages allocated but carrying no data (a live
+  // cluster's tail past EOF, metadata-region padding) — shown as a FAINT shade
+  // of the live color: claimed by data, holding none. Both are tints of
+  // existing colors, never new hues (standing decision from the WL tint work).
   const FS_EXTRA_STATES = {
-    fatfs: [{ cls: 'wl', word: 'WL', title: "the FTL's own bookkeeping sectors — a shade of metadata" }],
+    fatfs: [
+      { cls: 'wl', word: 'WL', title: "the FTL's own bookkeeping sectors — a shade of metadata" },
+      { cls: 'slack', word: 'Slack', title: 'allocated but empty — cluster tails past end-of-file, and metadata-region padding' },
+    ],
   };
   function legendFor(session) {
     return [

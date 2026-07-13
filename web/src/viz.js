@@ -499,17 +499,20 @@ export function createViz(device) {
 
     applyLiveMap(states) {
       lastMap = states;
-      // Class 4 = driver-declared WL/FTL bookkeeping (FAT+WL), rendered as a
-      // shade of metadata. Any class beyond the table degrades to plain 'meta'
-      // — never an unstyled name, never a throw — so an FS emitting a class
-      // this UI doesn't know about stays legible.
-      const NAME = ['', 'meta', 'obsolete', 'live', 'wl'];
+      // Driver-declared extra classes (FAT+WL): 4 = WL/FTL bookkeeping (shade
+      // of metadata), 5 = slack — allocated but carrying no data (faint shade
+      // of live). Any class beyond the table degrades to plain 'meta' — never
+      // an unstyled name, never a throw — so an FS emitting a class this UI
+      // doesn't know about stays legible.
+      const NAME = ['', 'meta', 'obsolete', 'live', 'wl', 'slack'];
       for (let p = 0; p < npages; p++) cellEls[p].dataset.live = shown[p] > 0 ? (NAME[states[p]] ?? 'meta') : '';
     },
     liveCounts() {
       const t = [0, 0, 0, 0, 0];
       if (lastMap) for (let p = 0; p < npages; p++) if (shown[p] > 0) t[Math.min(lastMap[p], 4)]++;
-      // WL (class 4) is a species of metadata for every counter that predates it.
+      // WL (4) and slack (5) are overhead, not reclaimable debt: both fold into
+      // the metadata bucket for every counter that predates them, keeping slack
+      // OUT of garbage%. (Math.min clamps 5 into t[4].)
       return { erased: t[0], metadata: t[1] + t[4], obsolete: t[2], live: t[3] };
     },
 
