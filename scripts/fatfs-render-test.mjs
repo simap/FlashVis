@@ -111,6 +111,39 @@ ok(counts.erased === 3, `slack counts as erased-equivalent (erased=${counts.eras
 ok(counts.metadata === 3, `metadata counts meta+wl+unknown only (metadata=${counts.metadata}: classes 1, 4, 6)`);
 ok(counts.obsolete === 1 && counts.live === 1, `obsolete/live unaffected (${counts.obsolete}/${counts.live})`);
 
+// ---- REGRESSION: apply-before-animation ordering (the live-page "slack tail
+// renders as full gold data" bug). refreshLiveness applies the map at most once
+// per flash change, and that change is signalled synchronously at op EXECUTION —
+// BEFORE the timed animation has drawn the op's pages. So the single
+// applyLiveMap lands while the freshly-written pages are still unshown; every
+// page the animation programs AFTER it must still take its class from the map,
+// or a slack tail (map says 5) keeps data-live='' and renders as the default
+// full-height gold fill — pixel-identical to live data. The checks above program
+// pages FIRST then apply, so they never caught this; this reproduces the real
+// ordering: apply while the pages are unshown, THEN drain the animation.
+{
+  const base = 3 * pps;                          // sector 3 (pages 48..63), still erased here
+  // Queue one whole-sector program (as diskio issues — a single 4096-B write over
+  // the sector), but DO NOT drain the frame yet: shown[base..] stays 0.
+  for (const fn of listeners) fn({ op: 'prog', off: base * pageSize, len: sectorSize, ns: 1600 });
+  // A file's tail cluster: 10 live + 6 slack. Apply the map NOW, while those pages
+  // are still unshown (exactly what the 250 ms refreshLiveness tick does mid-write).
+  const tailMap = new Uint8Array(npages);
+  for (let k = 0; k < pps; k++) tailMap[base + k] = k < 10 ? 3 : 5;
+  viz.applyLiveMap(tailMap);
+  ok(cells[base].dataset.live === '',
+    'apply-before-draw: a not-yet-animated page tags blank at apply time (the map alone paints nothing)');
+  // Drain the queued program: paint() runs per page as the animation reveals each
+  // one, all AFTER the single applyLiveMap above.
+  stepFrame(32);
+  let liveOK = true, slackOK = true;
+  for (let k = 0; k < 10; k++) if (cells[base + k].dataset.live !== 'live') liveOK = false;
+  for (let k = 10; k < pps; k++) if (cells[base + k].dataset.live !== 'slack') slackOK = false;
+  ok(liveOK, 'pages drawn AFTER applyLiveMap take the map\'s live class (not a stale blank)');
+  ok(slackOK,
+    "the slack tail drawn AFTER applyLiveMap reads 'slack', not the default live-gold fill (spec/ui.md: unused cluster pages read as erased)");
+}
+
 console.log(failed === 0
   ? `\nPASS - FAT+WL extra classes render per spec/ui.md: slack blank + uncounted, WL a metadata shade (${pass} checks).`
   : `\nFAIL - ${failed} of ${pass + failed} render-pin checks failed`);

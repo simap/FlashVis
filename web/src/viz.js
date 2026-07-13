@@ -93,6 +93,13 @@ const DEFAULT_ERASE_RGB = [185, 120, 255]; // --erase sweep
 const DEFAULT_MIX_RGB = [61, 255, 176];    // --mix: the designed read+program overlap color (Aurora mint)
 const DEFAULT_SECTOR_BG = '#0c141b';       // sector resting background the sweep restores to (theme --sector-bg)
 
+// Live-map class → cell dataset.live tag. Index is the page class the driver
+// emits (0 erased, 1 metadata, 2 obsolete, 3 live-data, 4 WL/FTL bookkeeping,
+// 5 slack — allocated-but-empty, rendered blank per spec/ui.md). '' means "no
+// live tag" so the cell reads as the erased/live default. A class beyond the
+// table degrades to plain 'meta' (see liveTag) — never an unstyled name.
+const LIVE_NAME = ['', 'meta', 'obsolete', 'live', 'wl', 'slack'];
+
 // Component-wise linear interpolation between two [r,g,b] at t (0..1).
 const lerp3 = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 
@@ -195,10 +202,26 @@ export function createViz(device) {
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
   // ---- rendering primitives ----
+  // A cell's live-map tag is a pure function of the last map AND its animated
+  // fill state: a page not yet programmed (shown 0), or one with no map yet,
+  // carries NO tag so it reads as erased substrate; once programmed it takes
+  // its class from the last map. Deriving it here (not only in applyLiveMap)
+  // is what keeps the tint honest: applyLiveMap runs at most once per flash
+  // change — fired synchronously at op-execution, BEFORE the timed animation
+  // has drawn the op's pages — so any page the animation programs after that
+  // single application would otherwise keep dataset.live='' and render as a
+  // full gold live-data bar (the default .cell .fill), even where the map says
+  // slack/metadata. paint() runs on every prog/erase step, so re-deriving the
+  // tag here stamps the correct class the instant the animation reveals a page.
+  function liveTag(p) {
+    if (!lastMap || shown[p] === 0) return '';
+    return LIVE_NAME[lastMap[p]] ?? 'meta';
+  }
   function paint(p) {
     const has = shown[p] > 0;
     cellEls[p].dataset.s = has ? 'prog' : 'erased';
     fillEls[p].style.height = has ? (shown[p] / pageSize * 100) + '%' : '0';
+    cellEls[p].dataset.live = liveTag(p);
   }
   // Read/prog glow: coalesce, don't animate. Each op just BUMPS this cell's heat
   // (O(1), no object allocated) and marks it live; the frame() loop decays and
@@ -334,6 +357,7 @@ export function createViz(device) {
       for (const q of queue) if (q.op === 'barrier') q.resolve();   // don't leave awaiters hanging
       queue.length = 0; cur = null; shown.fill(0);
       readHeat.fill(0); progHeat.fill(0); glowHot.clear();
+      lastMap = null;   // drop the stale map so paint() can't re-tag from it before the next applyLiveMap
       for (let p = 0; p < npages; p++) { paint(p); cellEls[p].dataset.live = ''; cellEls[p].style.boxShadow = ''; glowEls[p].style.boxShadow = ''; }
       if (heat) refreshHeat(); return;
     }
@@ -503,19 +527,17 @@ export function createViz(device) {
     flush() { flushQueue(); },
 
     applyLiveMap(states) {
+      // Store the map, then re-tag every currently-programmed cell from it (a
+      // page not yet shown stays untagged — the animation stamps it via paint()
+      // as it reveals it; see liveTag). Driver-declared extra classes (FAT+WL):
+      // 4 = WL/FTL bookkeeping (a shade of metadata), 5 = slack — allocated but
+      // carrying no data, which must READ as erased/blank (spec/ui.md). Slack
+      // pages are physically programmed (shown > 0), so an untagged cell would
+      // keep the default full-height gold fill — pixel-identical to live data;
+      // the 'slack' tag + index.html's [data-live="slack"] rules suppress the
+      // fill + hot edge so the cell shows the erased substrate instead.
       lastMap = states;
-      // Driver-declared extra classes (FAT+WL): 4 = WL/FTL bookkeeping (shade
-      // of metadata), 5 = slack — allocated but carrying no data, which must
-      // READ as erased/blank (spec/ui.md). Slack pages are physically
-      // programmed (shown > 0), so an EMPTY name would leave the default
-      // full-height fill in the live gold — pixel-identical to live data. It
-      // therefore gets its own 'slack' name, and index.html's
-      // [data-live="slack"] rules suppress the fill + hot edge so the cell
-      // shows the erased substrate. Any class beyond the table degrades to
-      // plain 'meta' — never an unstyled name, never a throw — so an FS
-      // emitting a class this UI doesn't know about stays legible.
-      const NAME = ['', 'meta', 'obsolete', 'live', 'wl', 'slack'];
-      for (let p = 0; p < npages; p++) cellEls[p].dataset.live = shown[p] > 0 ? (NAME[states[p]] ?? 'meta') : '';
+      for (let p = 0; p < npages; p++) cellEls[p].dataset.live = liveTag(p);
     },
     liveCounts() {
       const t = [0, 0, 0, 0, 0];
