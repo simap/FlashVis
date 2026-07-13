@@ -69,7 +69,9 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
 - [ ] **Churn workload tuning knobs.** Expose the churn model's parameters in the UI — target
       live size, file-size distribution, create/replace/delete mix, seed — so the workload can be
       shaped (and reproduced) instead of hardcoded. (Later — the hardcoded model is fine for
-      testing as is; this is more an exploration nicety.)
+      testing as is; this is more an exploration nicety.) Note: the over-capacity LARGE class
+      (350 KiB writes on a 256 KiB chip) is disabled (`weight: 0` in `playground.js`) until these
+      knobs land — re-enable it as a knob then.
 - [x] **About-filesystems explainer.** An in-app primer: how NOR flash works (erase-before-write,
       sector/page granularity, wear, `0xFF` as the erased state), and how each filesystem copes with
       those limits (log-structured writes, wear-leveling, garbage collection). The garbage% story
