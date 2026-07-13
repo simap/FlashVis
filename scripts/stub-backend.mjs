@@ -187,8 +187,21 @@ export function createLockstep({ churn, gcRatio = 0.5 } = {}) {
     opsEma.set(session, prev + 0.3 * (inst - prev));
   }
 
+  // Seeded gc/event coin (mulberry32 — the real coordinator's idiom, ADR-0016):
+  // Math.random() here made dom-smoke FLAKY — its "expected some GC lines on
+  // the tape after churn" assertion samples a bounded window of steps, and an
+  // unlucky unseeded run occasionally drew no gc step inside it (a real ~1-in-N
+  // full-suite failure). The stub must be deterministic like the backend it
+  // stands in for.
+  let coinState = 0x5eed0001 >>> 0;
+  const coin = () => {
+    coinState = (coinState + 0x6d2b79f5) | 0;
+    let t = Math.imul(coinState ^ (coinState >>> 15), 1 | coinState);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
   function genChurnStep() {
-    if (Math.random() < ratio) return { kind: 'gc' };
+    if (coin() < ratio) return { kind: 'gc' };
     let ev;
     try { ev = churn?.next?.(); if (ev && churn?.apply && (ev.type === 'write' || ev.type === 'delete')) churn.apply(ev); }
     catch { ev = null; }
