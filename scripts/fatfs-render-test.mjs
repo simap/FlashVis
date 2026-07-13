@@ -3,15 +3,24 @@
  * fake DOM (same harness pattern as viz-heat-test.mjs) and asserts how the
  * driver's extra classes decorate cells:
  *
- *   - class 5 "slack" (allocated but carrying no data) renders BLANK — an
- *     empty data-live, exactly like erased: never metadata, never a live tint
- *     ("unused pages in a file's clusters read as erased/blank").
+ *   - class 5 "slack" (allocated but carrying no data) must READ as
+ *     erased/blank ("unused pages in a file's clusters read as erased/blank").
+ *     That is a VISUAL contract, not a dataset-string contract: a slack page
+ *     is physically programmed (shown > 0), so an empty data-live would leave
+ *     the default full-height fill in the LIVE gold — pixel-identical to live
+ *     data (the exact misreading the spec exists to fix). So the pin is:
+ *       (a) class 5 gets its own nonempty data-live name 'slack', and
+ *       (b) web/index.html carries CSS that SUPPRESSES the fill for it
+ *           (transparent fill + erased-edge ring, placed after the
+ *           [data-s="prog"] rule it must override at equal specificity).
  *   - class 4 "WL" renders as the 'wl' shade — FTL-written metadata only.
  *   - liveCounts() folds slack into the ERASED bucket, never metadata (slack
  *     must not inflate the metadata counter) and never obsolete/garbage.
  *   - unknown higher classes still degrade to 'meta' (no throw, no unstyled
  *     name) — the ADR-0011 graceful-degradation contract.
  */
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { createViz } from '../web/src/viz.js';
 
 let pass = 0, failed = 0;
@@ -74,9 +83,24 @@ ok(live(1) === 'meta', 'class 1 renders meta');
 ok(live(2) === 'obsolete', 'class 2 renders obsolete');
 ok(live(3) === 'live', 'class 3 renders live');
 ok(live(4) === 'wl', 'class 4 (FTL-written metadata) renders wl');
-ok(live(5) === '', 'class 5 (slack) renders BLANK — never metadata, never a live tint (spec/ui.md)');
+ok(live(5) === 'slack', 'class 5 (slack) carries its own data-live name — an empty name would leave the default live-gold fill (spec/ui.md)');
 ok(live(6) === 'meta', 'unknown class 6 degrades to meta (no throw, no unstyled name)');
 ok(live(8) === '', 'an unprogrammed page renders blank regardless of class');
+
+// ---- the VISUAL half of the slack contract: web/index.html must suppress the
+// fill for [data-live="slack"] so the cell reads as erased substrate, and must
+// neutralize the [data-s="prog"] hot edge. Equal specificity means source
+// order decides, so the slack rules must come AFTER the data-s="prog" rule.
+const html = readFileSync(fileURLToPath(new URL('../web/index.html', import.meta.url)), 'utf8');
+const fillRule = html.match(/\.cell\[data-live="slack"\]\s+\.fill\s*\{([^}]*)\}/);
+ok(!!fillRule && /background:\s*transparent/.test(fillRule[1]),
+  'CSS suppresses the slack fill (.cell[data-live="slack"] .fill → background:transparent) — slack READS blank, not live gold');
+const bodyRule = html.match(/\.cell\[data-live="slack"\]\s*\{([^}]*)\}/);
+ok(!!bodyRule && /box-shadow:[^;}]*--erased-edge/.test(bodyRule[1]),
+  'CSS resets the slack cell ring to the erased edge (overriding [data-s="prog"]\'s hot edge)');
+const progRuleAt = html.indexOf('.cell[data-s="prog"]');
+ok(progRuleAt >= 0 && !!bodyRule && html.indexOf(bodyRule[0]) > progRuleAt,
+  'slack rules come after the [data-s="prog"] rule (equal specificity — source order is the override)');
 
 // Counters: slack folds into erased, WL into metadata; slack inflates neither
 // metadata nor obsolete.

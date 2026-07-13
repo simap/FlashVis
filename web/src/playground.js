@@ -401,18 +401,24 @@ async function boot() {
   // class 4 — the metadata the wear_levelling FTL itself WRITES (config/state
   // sectors only; the rotating dummy spare is not class 4, spec/ui.md) — shown
   // as a SHADE of the metadata color (a layer of metadata, not a new kind).
-  // Its class 5 "slack" (allocated but carrying no data) renders BLANK per
-  // spec/ui.md — no tint, no legend chip, no metadata counting: unused pages
-  // in a file's clusters read as erased.
+  // Its class 5 "slack" (allocated but carrying no data) READS as erased per
+  // spec/ui.md — fill suppressed by the [data-live="slack"] CSS, no legend
+  // chip, no metadata counting: unused pages in a file's clusters read as
+  // erased. The one wording nuance: on FAT+WL the erased LOOK also covers
+  // those slack pages (which are not 0xFF), so the Erased chip's explainer
+  // says so there — everywhere else it keeps the plain physical truth.
   const FS_EXTRA_STATES = {
     fatfs: [
       { cls: 'wl', word: 'WL', title: "metadata the FTL itself writes (config/state) — a shade of metadata" },
     ],
   };
   function legendFor(session) {
+    const erasedTitle = session.fsId === 'fatfs'
+      ? '0xFF, nothing written — or slack: allocated but carrying no data'
+      : '0xFF, nothing written';
     return [
       { label: 'States', items: [
-        { cls: 'erased', word: 'Erased', title: '0xFF, nothing written' },
+        { cls: 'erased', word: 'Erased', title: erasedTitle },
         { cls: 'prog', word: 'Live', title: 'fill = bytes programmed' },
         { cls: 'obsolete', word: 'Obsolete', title: 'reclaimable garbage' },
         { cls: 'index', word: 'Metadata', title: 'index + records' },

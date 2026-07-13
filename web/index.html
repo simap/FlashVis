@@ -306,9 +306,16 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    new hue. Derived from --index/--panel via color-mix so it tracks every
    palette without per-theme declarations. */
 .cell[data-live="wl"] .fill{background:color-mix(in srgb,var(--index) 45%,var(--panel))}
-/* Slack (class 5, FAT+WL) deliberately has NO rule: spec/ui.md — unused pages
-   in a file's clusters read as erased/blank, so the viz maps class 5 to an
-   empty data-live and the cell shows only its programmed fill, no tint. */
+/* Slack (class 5, FAT+WL): allocated but carrying no data — must READ as
+   erased/blank (spec/ui.md). Slack pages ARE physically programmed, so without
+   these rules the default fill would render them in the live gold at full
+   height (pixel-identical to live data — the misreading the spec exists to
+   fix). Suppress the fill and reset the [data-s="prog"] hot edge back to the
+   erased ring; equal specificity, so these must stay AFTER that rule (source
+   order is the override — pinned by scripts/fatfs-render-test.mjs). Palette-
+   independent by construction: it re-uses the erased vars. */
+.cell[data-live="slack"]{box-shadow:inset 0 0 0 1px var(--erased-edge)}
+.cell[data-live="slack"] .fill{background:transparent}
 .die.heat .sector{background:var(--wc,var(--sector-bg,#0c141b));border-color:#0006}
 .die.heat .cell{opacity:.13}
 .die.heat .sector.sel{box-shadow:0 0 0 1px var(--accent)}

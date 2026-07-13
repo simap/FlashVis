@@ -407,18 +407,20 @@ export function createViz(device) {
   // ---- inspector ----
   function sectorInfo(s) {
     const base = s * pagesPerSector;
-    let progPages = 0, bytes = 0, live = 0, obs = 0, meta = 0;
+    let progPages = 0, bytes = 0, live = 0, obs = 0, meta = 0, slack = 0;
     for (let k = 0; k < pagesPerSector; k++) {
       const p = base + k;
       if (shown[p] > 0) { progPages++; bytes += shown[p]; }
       // WL (class 4) and any unknown higher class count as metadata here, same
       // as applyLiveMap's rendering fallback — EXCEPT slack (5), allocated but
-      // empty, which counts toward nothing (spec/ui.md).
-      if (lastMap) { const c = lastMap[p]; if (c === 3) live++; else if (c === 2) obs++; else if (c === 1 || (c >= 4 && c !== 5)) meta++; }
+      // empty, which is tracked separately (never metadata, spec/ui.md).
+      if (lastMap) { const c = lastMap[p]; if (c === 3) live++; else if (c === 2) obs++; else if (c === 5) slack++; else if (c === 1 || c >= 4) meta++; }
     }
+    // Slack outranks 'in-flight' in the role fallback: a sector that is
+    // programmed but all-slack is "allocated, empty", not mid-operation.
     const role = meta > live + obs ? 'index / metadata' : obs > live ? 'obsolete' :
-      live > 0 ? 'live data' : progPages > 0 ? 'in-flight' : 'erased';
-    return { progPages, bytes, live, obs, meta, role, wear: device.wear[s] };
+      live > 0 ? 'live data' : slack > 0 ? 'allocated, empty' : progPages > 0 ? 'in-flight' : 'erased';
+    return { progPages, bytes, live, obs, meta, slack, role, wear: device.wear[s] };
   }
   function renderInspector(s) {
     if (!inspectorEl) return;
@@ -429,6 +431,8 @@ export function createViz(device) {
       `<div class="row"><span>role</span><span>${i.role}</span></div>` +
       `<div class="row"><span>erase cycles</span><span>${i.wear}</span></div>` +
       `<div class="row"><span>live · obsolete · meta pages</span><span>${i.live} · ${i.obs} · ${i.meta}</span></div>` +
+      // Only when present (FAT+WL): otherwise the row is noise for every other FS.
+      (i.slack > 0 ? `<div class="row"><span>slack pages (allocated, empty)</span><span>${i.slack}</span></div>` : '') +
       `<div class="row"><span>bytes programmed</span><span>${i.bytes} / ${sectorSize}</span></div>`;
   }
 
@@ -501,13 +505,16 @@ export function createViz(device) {
     applyLiveMap(states) {
       lastMap = states;
       // Driver-declared extra classes (FAT+WL): 4 = WL/FTL bookkeeping (shade
-      // of metadata), 5 = slack — allocated but carrying no data, rendered
-      // BLANK (spec/ui.md: unused pages in a file's clusters read as
-      // erased/blank, never metadata and never a live tint). Any class beyond
-      // the table degrades to plain 'meta' — never an unstyled name, never a
-      // throw — so an FS emitting a class this UI doesn't know about stays
-      // legible.
-      const NAME = ['', 'meta', 'obsolete', 'live', 'wl', ''];
+      // of metadata), 5 = slack — allocated but carrying no data, which must
+      // READ as erased/blank (spec/ui.md). Slack pages are physically
+      // programmed (shown > 0), so an EMPTY name would leave the default
+      // full-height fill in the live gold — pixel-identical to live data. It
+      // therefore gets its own 'slack' name, and index.html's
+      // [data-live="slack"] rules suppress the fill + hot edge so the cell
+      // shows the erased substrate. Any class beyond the table degrades to
+      // plain 'meta' — never an unstyled name, never a throw — so an FS
+      // emitting a class this UI doesn't know about stays legible.
+      const NAME = ['', 'meta', 'obsolete', 'live', 'wl', 'slack'];
       for (let p = 0; p < npages; p++) cellEls[p].dataset.live = shown[p] > 0 ? (NAME[states[p]] ?? 'meta') : '';
     },
     liveCounts() {
