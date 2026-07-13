@@ -41,6 +41,7 @@ const card = (fs) => ({
   v: g('fsV-' + fs)?.textContent ?? '', tag: g('fsTag-' + fs)?.textContent ?? '',
   bar: g('fsBar-' + fs)?.style.width ?? '', waiting: !!g('fsCard-' + fs)?.classList.contains('waiting'),
 });
+const tapeText = () => g('tape').children.map((c) => c.textContent).join('\n');
 const FS = ['fastffs', 'littlefs', 'spiffs', 'jesfs', 'fatfs'];
 
 // ---- all FS live, cards + geometry built (redesign A1/A5) ----
@@ -50,22 +51,54 @@ const geo = g('geoLine').innerHTML || g('geoLine').textContent || '';
 if (!geo.includes('NOR')) fail(`geometry line looks wrong: "${geo}"`);
 if (/SOP-8/.test(geo)) fail('geometry line still says "SOP-8" (should be scrubbed)');
 
-// ---- Boot "holding on the wrong FS" guard: while the boot format() command's
-// animation drains, SPIFFS's 64-erase sweep far outlasts the other formats, so
-// the FAST FSs go idle waiting on it — THEY may show holding — but SPIFFS
-// itself (the laggard, actively draining) must NEVER flag. This was the
-// user-visible bug: the slow-formatting FS's own card read "◷ holding". ----
-let bootSawWaiter = false, bootSpiffsFlagged = false, bootDrained = false;
-for (let i = 0; i < 800 && !bootDrained; i++) {
+// ---- Page-load boot fast-forward (UI spec: the load-triggered reset/boot
+// animation and delay must not stand between load and a usable page). Boot
+// runs help()/format() in PREP mode (ADR-0014) — full speed, no animation, no
+// await-pacing, still logged with real simulated cost — so there is no boot
+// drain left for anyone to hold behind; that showcase moved to the header-
+// Reset replay below, which stays fully animated. Assert the fast-forward
+// actually happened: format() lands on the tape with a real cost within a
+// SMALL bound of frames after "ready" (proving speed, not just eventual
+// completion), and no FS card ever shows "waiting" along the way — nothing
+// should ever stall behind a page-load boot again. ----
+const BOOT_FRAME_BOUND = 30;   // generous but small — a fast-forwarded boot should settle in a handful of frames
+let bootFormatDone = false, bootSawWaiterFF = false, bootFrames = 0;
+for (; bootFrames < BOOT_FRAME_BOUND && !bootFormatDone; bootFrames++) {
+  await tick(1);
+  if (FS.some((fs) => card(fs).waiting)) bootSawWaiterFF = true;
+  bootFormatDone = /format\(\)\s*→/.test(tapeText());
+}
+if (!bootFormatDone) fail(`boot's format() never landed on the tape within ${BOOT_FRAME_BOUND} frames of "ready" — the page-load fast-forward isn't working:\n${tapeText()}`);
+if (bootSawWaiterFF) fail('an FS card showed "waiting" during page-load boot — nothing should ever hold behind a fast-forwarded boot replay');
+for (const fs of FS) if (card(fs).waiting) fail(`${fs} still shows "waiting" right after boot settled — players should already be fully drained`);
+if (Number(g('sFiles').textContent) !== 0) fail(`boot should land on an empty, formatted, usable chip; HUD shows sFiles="${g('sFiles').textContent}"`);
+
+// ---- Header Reset, exercised right after boot: the "holding on the wrong FS"
+// showcase now lives HERE instead of at page-load boot — Reset's replayed
+// format() is NEVER fast-forwarded (only page-load boot is; see the UI spec),
+// so it keeps the full animated sweep. While it drains, SPIFFS's 64-erase
+// sweep far outlasts every other FS's format, so the fast FSs go idle waiting
+// on it and may flag holding — but SPIFFS itself, the laggard actively
+// draining its own animation, must NEVER flag (the original user-visible
+// bug). Also re-asserts format() lands with a real (non-fast-forwarded) cost
+// and the chip is usable (0 files) afterwards. ----
+dom.dispatch('btnReset');
+if (g('runLabel').textContent !== 'Run') fail('Reset should leave the sim paused (runLabel "Run")');
+if (!/help\(\)/.test(tapeText())) fail(`Reset should replay the boot log (help()) on the tape:\n${tapeText()}`);
+let resetSawWaiter = false, resetSpiffsFlagged = false, resetDrained = false, resetFormatSettled = false;
+for (let i = 0; i < 800 && !(resetFormatSettled && resetDrained); i++) {
   await tick(1);
   const w = FS.filter((fs) => card(fs).waiting);
-  if (w.length) bootSawWaiter = true;
-  if (w.includes('spiffs')) bootSpiffsFlagged = true;
-  bootDrained = bootSawWaiter && w.length === 0;   // waiters appeared, then all cleared = round done
+  if (w.length) resetSawWaiter = true;
+  if (w.includes('spiffs')) resetSpiffsFlagged = true;
+  resetDrained = resetSawWaiter && w.length === 0;   // waiters appeared, then all cleared = round done
+  resetFormatSettled = /format\(\)\s*→/.test(tapeText());
 }
-if (!bootSawWaiter) fail('no FS ever showed holding during the boot format drain (the fast FSs idle on SPIFFS\'s 64-erase sweep and should flag)');
-if (bootSpiffsFlagged) fail('SPIFFS (the boot-format laggard, actively draining its own animation) flagged holding — the wrong-FS bug');
-if (!bootDrained) fail('the boot format round never drained to all-clear within the poll bound');
+if (!resetFormatSettled) fail(`Reset's replayed format() never completed on the tape:\n${tapeText()}`);
+if (!resetSawWaiter) fail('no FS ever showed holding during the Reset replay\'s format drain (the fast FSs idle on SPIFFS\'s 64-erase sweep and should flag — Reset stays fully animated, unlike page-load boot)');
+if (resetSpiffsFlagged) fail('SPIFFS (the Reset-replay format laggard, actively draining its own animation) flagged holding — the wrong-FS bug');
+if (!resetDrained) fail('the Reset replay\'s format round never drained to all-clear within the poll bound');
+if (Number(g('sFiles').textContent) !== 0) fail(`Reset should land on an empty, formatted chip; HUD shows sFiles="${g('sFiles').textContent}"`);
 
 // ---- Pace: running advances real flash time; readouts are sane (no NaN) ----
 // Poll rather than fixed-wait: Pace's first churn round starts only after every
@@ -122,7 +155,6 @@ if (sawFrontierWaiting) fail(`Race stall indicator flagged the FRONTIER FS (${fr
 // route through the undefined api.fs.gcStep and silently do nothing). Pause
 // first so churn/gc auto-workload lines don't drown out the assertion. ----
 if (g('runLabel').textContent === 'Pause') dom.dispatch('btnRun');
-const tapeText = () => g('tape').children.map((c) => c.textContent).join('\n');
 const preGcLen = g('tape').children.length;
 const input = g('terminput');
 input.value = 'gc()';
@@ -135,8 +167,15 @@ for (let i = 0; i < 200 && !gcReported; i++) {
 if (!gcReported) fail(`typed gc() never produced a timed "gc() → …" result line on the tape:\n${tapeText().split('\n').slice(-8).join('\n')}`);
 if (g('tape').children.length <= preGcLen) fail('typed gc() did not grow the tape at all');
 
-// ---- header Reset: stop, re-format both FS (files/stats back to 0), wipe the
-// tape, and replay the boot log (help()/format()) — no page reload. ----
+// ---- header Reset again, this time after a long Pace/Race/gc() session: stop,
+// re-format every FS (files/stats back to 0), wipe the tape, and replay the
+// boot log (help()/format()) — no page reload. The holding showcase is
+// exercised above, right after boot, in a clean coordinator state; this
+// second Reset is deliberately the simpler smoke check (tape wipe + replay +
+// files back to 0) — a fuller assertion here would need to reach quiescence
+// after substantial prior Pace/Race churn, which is its own can of worms
+// (see the note in the report about a Reset-after-heavy-Race-activity
+// coordinator issue found but left alone as out of scope for this change). ----
 if (g('runLabel').textContent !== 'Pause') dom.dispatch('btnRun');   // get something running again
 await tick(60);
 dom.dispatch('btnReset');
@@ -152,10 +191,13 @@ if (!formatSettled) fail(`Reset's replayed format() never completed on the tape:
 if (Number(g('sFiles').textContent) !== 0) fail(`Reset should return the focused FS to 0 files, HUD shows sFiles="${g('sFiles').textContent}"`);
 if (/NaN|undefined/.test(card('fastffs').v)) fail(`fastffs vital looks wrong after Reset: "${card('fastffs').v}"`);
 
-console.log('PASS — real backend: all FS boot on real WASM; during the boot-format drain the fast');
-console.log('       FSs show holding while SPIFFS (the draining laggard) never does; Pace advances');
-console.log('       flash time; Race shows workload "ops done" + ops/s; geometry has no "SOP-8";');
-console.log('       after a Pace->Race divergence the stall indicator fires for ahead FSs only —');
-console.log('       never all at once, never the frontier (min flash time) FS; typed gc() reports');
-console.log('       timing/op-stats on the tape like churn-driven GC; and the header Reset control');
-console.log('       stops the sim, wipes+replays the tape, landing exactly one replayed format.');
+console.log('PASS — real backend: all FS boot on real WASM; page-load boot fast-forwards past the');
+console.log('       reset/boot animation (format() lands on the tape within a small frame bound,');
+console.log('       nothing ever shows "waiting"); the header Reset control — which stays FULLY');
+console.log('       animated, unlike page-load boot — replays the holding showcase (fast FSs may');
+console.log('       flag while SPIFFS drains, SPIFFS itself never does); Pace advances flash time;');
+console.log('       Race shows workload "ops done" + ops/s; geometry has no "SOP-8"; after a');
+console.log('       Pace->Race divergence the stall indicator fires for ahead FSs only — never all');
+console.log('       at once, never the frontier (min flash time) FS; typed gc() reports timing/op-');
+console.log('       stats on the tape like churn-driven GC; and a second Reset after that activity');
+console.log('       still wipes+replays the tape, landing one replayed format with files back to 0.');
