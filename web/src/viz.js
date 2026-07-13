@@ -357,8 +357,8 @@ export function createViz(device) {
       for (const q of queue) if (q.op === 'barrier') q.resolve();   // don't leave awaiters hanging
       queue.length = 0; cur = null; shown.fill(0);
       readHeat.fill(0); progHeat.fill(0); glowHot.clear();
-      lastMap = null;   // drop the stale map so paint() can't re-tag from it before the next applyLiveMap
-      for (let p = 0; p < npages; p++) { paint(p); cellEls[p].dataset.live = ''; cellEls[p].style.boxShadow = ''; glowEls[p].style.boxShadow = ''; }
+      lastMap = null;   // drop the stale map BEFORE the repaint: paint() derives the tag via liveTag(), so with no map every cell tags '' — no separate dataset.live writer needed
+      for (let p = 0; p < npages; p++) { paint(p); cellEls[p].style.boxShadow = ''; glowEls[p].style.boxShadow = ''; }
       if (heat) refreshHeat(); return;
     }
     queue.push(ev);

@@ -142,6 +142,26 @@ ok(counts.obsolete === 1 && counts.live === 1, `obsolete/live unaffected (${coun
   ok(liveOK, 'pages drawn AFTER applyLiveMap take the map\'s live class (not a stale blank)');
   ok(slackOK,
     "the slack tail drawn AFTER applyLiveMap reads 'slack', not the default live-gold fill (spec/ui.md: unused cluster pages read as erased)");
+
+  // ---- belt-and-braces on the same sector, both liveTag paths: ----
+  // (b) a NEW walk re-tags already-shown pages via the applyLiveMap loop —
+  // sector 3 is fully shown now, so flipping its classes (file deleted: the
+  // whole cluster goes obsolete) must repaint synchronously, no frame needed.
+  const flipMap = new Uint8Array(npages);
+  for (let k = 0; k < pps; k++) flipMap[base + k] = 2;
+  viz.applyLiveMap(flipMap);
+  let obsOK = true;
+  for (let k = 0; k < pps; k++) if (cells[base + k].dataset.live !== 'obsolete') obsOK = false;
+  ok(obsOK, 'a new walk re-tags already-shown pages at apply time (live/slack -> obsolete, the applyLiveMap loop path)');
+  // (a) erase clears the tag: the erase animation zeroes shown[] and repaints
+  // per page, and a page at shown=0 must read '' even though the STALE stored
+  // map (flipMap) still says class 2 for it — liveTag's shown-gate, not the map,
+  // decides an erased cell.
+  for (const fn of listeners) fn({ op: 'erase', sector: 3, ns: 1600 });
+  stepFrame(48);
+  let erasedOK = true;
+  for (let k = 0; k < pps; k++) if (cells[base + k].dataset.live !== '') erasedOK = false;
+  ok(erasedOK, "erase clears the tag: a page back at shown=0 reads '' even with a stale nonzero lastMap class");
 }
 
 console.log(failed === 0
