@@ -58,48 +58,84 @@ const okSectorClasses = runner.sectorClasses() === null;
 // PAGE granularity — it parses real FAT12 structure (BPB, FAT table, dir
 // entries, file sizes + chains), so classes vary *within* sectors instead of
 // whole-sectors-always-full. Classes: shared 0-3 baseline plus FAT+WL-specific
-// 4 = "WL" (the FTL's own cfg/state/dummy sectors) and 5 = "slack" (allocated
-// but carrying no data: cluster tails past EOF, metadata-region padding).
-// Per-FS taxonomy, ADR-0011/0012.
+// 4 = "WL" (metadata the FTL itself writes: cfg + state x2 ONLY — spec/ui.md)
+// and 5 = "slack" (allocated but carrying no data: cluster tails past EOF,
+// metadata-region padding; rendered blank by the UI). Per-FS taxonomy,
+// ADR-0011/0012.
 const npages = (SECTOR_SIZE * SECTOR_COUNT) / PAGE_SIZE;
 const lm = runner.liveMap();
 const okLiveMap = lm !== null && lm.length === npages && [...lm].every((v) => v >= 0 && v <= 5);
 // Exact page census for this deterministic scene (256-B pages, 4096-B
-// clusters, hello.txt = 100 B, f000-... = 9000 B):
-//   live 37    = 100 B -> 1 page; 9000 B -> 16 + 16 + 4 pages
-//   meta 5     = boot record 2 (512 B) + 1 used FAT page x2 copies (FAT12
-//                uses ceil(58*1.5) = 87 B) + root dir 1 (4 entries: hello.txt
-//                SFN + f000's 2 LFN + 1 SFN = 128 B)
-//   slack 86   = boot pad 14 + FAT pad 15x2 + root pad 15 + EOF slack 15 + 12
-//   WL 64      = 4 whole sectors x 16 (cfg + state x2 + dummy)
-//   erased 832 = 52 never-touched free clusters x 16
+// clusters, hello.txt = 100 B, f000-... = 9000 B, 20 erases so the WL dummy
+// has rotated exactly once — updaterate 16):
+//   live 37     = 100 B -> 1 page; 9000 B -> 16 + 16 + 4 pages
+//   meta 5      = boot record 2 (512 B) + 1 used FAT page x2 copies (FAT12
+//                 uses ceil(58*1.5) = 87 B) + root dir 1 (4 entries: hello.txt
+//                 SFN + f000's 2 LFN + 1 SFN, plus the end-of-dir marker)
+//   slack 86    = boot pad 14 + FAT pad 15x2 + root pad 15 + EOF slack 15 + 12
+//   WL 48       = 3 whole sectors x 16: ONLY what the FTL writes (cfg +
+//                 state x2); the rotating dummy spare is NOT class 4
+//                 (spec/ui.md — sectors handed to the FS layer are decorated
+//                 by the FS layer alone)
+//   obsolete 16 = the dummy, still holding the stale copy of the sector the
+//                 FTL vacated when it rotated (dead bytes — honest garbage)
+//   erased 832  = 52 never-touched free clusters x 16
 const census = (m) => { const c = [0, 0, 0, 0, 0, 0]; for (const v of m) c[v]++; return c; };
-const okCensus = JSON.stringify(census(lm)) === JSON.stringify([832, 5, 0, 37, 64, 86]);
+const okCensus = JSON.stringify(census(lm)) === JSON.stringify([832, 5, 16, 37, 48, 86]);
 // Sub-sector resolution really happened: sectors mix classes (the FAT sector:
 // 1 metadata page + 15 slack; hello's cluster: 1 live + 15 slack).
 const pps = SECTOR_SIZE / PAGE_SIZE;
 const sectors = Array.from({ length: SECTOR_COUNT }, (_, s) => [...lm.slice(s * pps, (s + 1) * pps)]);
 const okGranular = sectors.some((cls) => cls.includes(1) && cls.includes(5))
   && sectors.some((cls) => cls.includes(3) && cls.includes(5));
-// Class 4 still lands exactly on the WL FTL's own 4 whole sectors:
-// state1/state2/cfg at the fixed top-of-device positions (61,62,63) plus the
-// rotating dummy spare somewhere in the data region (0..60).
+// Class 4 lands exactly on the FTL-WRITTEN sectors: state1/state2/cfg at the
+// fixed top-of-device positions (61,62,63) — three whole sectors, no strays.
 const wlSectors = sectors.flatMap((cls, s) => (cls.every((v) => v === 4) ? [s] : []));
-const okWlClass = wlSectors.length === 4
+const okWlClass = wlSectors.length === 3
   && [61, 62, 63].every((s) => wlSectors.includes(s))
-  && wlSectors.filter((s) => s <= 60).length === 1
-  && census(lm)[4] === 64; // no stray class-4 pages outside those sectors
+  && census(lm)[4] === 48;
 // Deleting a file frees its cluster in the FAT while the bytes stay
 // programmed: those pages must flip live->obsolete ("free but not erased",
 // distinct from true erased), and its EOF slack vanishes with the allocation.
 runner.remove('hello.txt');
 const lm2 = runner.liveMap();
-const okObsolete = JSON.stringify(census(lm2)) === JSON.stringify([832, 5, 16, 36, 64, 71]);
+const okObsolete = JSON.stringify(census(lm2)) === JSON.stringify([832, 5, 32, 36, 48, 71]);
+// --- post-rotation placement guard ---
+// Force the dummy through several more rotations (updaterate 16; each write
+// erases FAT x2 + root + data sectors), then write a marker file with a
+// distinctive fill and assert the map's classes land at the marker's REAL
+// physical pages — the logical->physical composition must track WL's live
+// state (dummy position, move count) at walk time, never a mount-time
+// snapshot.
+for (let i = 0; i < 10; i++) runner.write('rot.bin', new Uint8Array(8192).fill(0x5A));
+runner.write('marker.bin', new Uint8Array(3000).fill(0xC3));
+const lm3 = runner.liveMap();
+const flash = runner.device.flash;
+const fullC3 = []; // physical pages entirely 0xC3
+for (let p = 0; p < npages; p++) {
+  let all = true;
+  for (let i = 0; i < PAGE_SIZE; i++) if (flash[p * PAGE_SIZE + i] !== 0xC3) { all = false; break; }
+  if (all) fullC3.push(p);
+}
+// marker.bin = 3000 B = 11 full pages + 1 partial. Every full-0xC3 page is
+// either the live copy (class 3) or a stale copy left where the dummy passed
+// (class 2) — never metadata/WL/slack — and exactly 11 of them are live.
+const okRotPlacement = fullC3.length >= 11
+  && fullC3.every((p) => lm3[p] === 3 || lm3[p] === 2)
+  && fullC3.filter((p) => lm3[p] === 3).length === 11;
+// The map's boot sector (metadata in pages 0-1 but not 2) sits exactly where
+// a real VBR lives on the die right now.
+const bootSecs = sectors.map((_, s) => s).filter((s) =>
+  lm3[s * pps] === 1 && lm3[s * pps + 1] === 1 && lm3[s * pps + 2] !== 1);
+const okRotBoot = bootSecs.length === 1
+  && flash[bootSecs[0] * SECTOR_SIZE] === 0xEB
+  && flash[bootSecs[0] * SECTOR_SIZE + 510] === 0x55
+  && flash[bootSecs[0] * SECTOR_SIZE + 511] === 0xAA;
 const okContent = got === payload;
 const okList = list.some((e) => e.name === 'hello.txt' && e.size === enc.encode(payload).length)
   && list.some((e) => e.name === lfnName && e.size === big.length);
 
-const checks = { okAbi, okCaps, okGcNoop, okSectorClasses, okLiveMap, okCensus, okGranular, okWlClass, okObsolete, okContent, okList };
+const checks = { okAbi, okCaps, okGcNoop, okSectorClasses, okLiveMap, okCensus, okGranular, okWlClass, okObsolete, okRotPlacement, okRotBoot, okContent, okList };
 const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([k]) => k);
 
 if (failed.length) {

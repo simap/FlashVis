@@ -1,0 +1,93 @@
+/*
+ * FAT+WL live-map RENDER pin (spec/ui.md): drives the REAL web/src/viz.js on a
+ * fake DOM (same harness pattern as viz-heat-test.mjs) and asserts how the
+ * driver's extra classes decorate cells:
+ *
+ *   - class 5 "slack" (allocated but carrying no data) renders BLANK — an
+ *     empty data-live, exactly like erased: never metadata, never a live tint
+ *     ("unused pages in a file's clusters read as erased/blank").
+ *   - class 4 "WL" renders as the 'wl' shade — FTL-written metadata only.
+ *   - liveCounts() folds slack into the ERASED bucket, never metadata (slack
+ *     must not inflate the metadata counter) and never obsolete/garbage.
+ *   - unknown higher classes still degrade to 'meta' (no throw, no unstyled
+ *     name) — the ADR-0011 graceful-degradation contract.
+ */
+import { createViz } from '../web/src/viz.js';
+
+let pass = 0, failed = 0;
+const ok = (c, m) => { if (c) { pass++; console.log('  ok   -', m); } else { failed++; console.error('  FAIL -', m); } };
+
+// ---- minimal fake DOM (viz-heat-test pattern) + a registry of created els ----
+const made = [];
+function makeEl() {
+  const style = { setProperty() {} };
+  Object.defineProperty(style, 'boxShadow', { set() {} });
+  Object.defineProperty(style, 'height', { set() {} });
+  Object.defineProperty(style, 'transitionDuration', { set() {} });
+  const el = {
+    dataset: {}, style, className: '', children: [],
+    appendChild(c) { this.children.push(c); },
+    addEventListener() {},
+    classList: { add() {}, remove() {}, toggle() {} },
+    animate() {},
+  };
+  made.push(el);
+  return el;
+}
+globalThis.matchMedia = () => ({ matches: false, addEventListener() {}, addListener() {} });
+globalThis.document = { createElement: () => makeEl() };
+let pendingFrame = null;
+globalThis.requestAnimationFrame = (cb) => { pendingFrame = cb; return 1; };
+globalThis.cancelAnimationFrame = () => { pendingFrame = null; };
+const stepFrame = (ts) => { const cb = pendingFrame; if (cb) { pendingFrame = null; cb(ts); } };
+
+const sectorSize = 4096, sectorCount = 64, pageSize = 256;
+const pps = sectorSize / pageSize, npages = sectorCount * pps;
+const listeners = [];
+const device = {
+  sectorSize, sectorCount, pageSize,
+  wear: new Uint32Array(sectorCount),
+  stats: { reads: 0, simNs: 0 },
+  onEvent(fn) { listeners.push(fn); },
+};
+const viz = createViz(device);
+viz.setScale(Infinity);
+viz.mountDie(makeEl());
+stepFrame(0);
+
+// Program the first 8 pages so shown[p] > 0 there (the live-map tint only
+// paints cells with programmed bytes; everything else renders '').
+for (let p = 0; p < 8; p++) for (const fn of listeners) fn({ op: 'prog', off: p * pageSize, len: pageSize, ns: 100 });
+stepFrame(16);
+
+// Synthetic map: page p <- class p for p = 0..6 (6 = unknown), rest erased.
+const map = new Uint8Array(npages);
+for (let p = 0; p < 7; p++) map[p] = p;
+viz.applyLiveMap(map);
+
+const cells = made.filter((el) => el.className === 'cell');
+ok(cells.length === npages, `harness sees all ${npages} cells (got ${cells.length})`);
+
+const live = (p) => cells[p].dataset.live;
+ok(live(0) === '', 'class 0 (erased) renders blank');
+ok(live(1) === 'meta', 'class 1 renders meta');
+ok(live(2) === 'obsolete', 'class 2 renders obsolete');
+ok(live(3) === 'live', 'class 3 renders live');
+ok(live(4) === 'wl', 'class 4 (FTL-written metadata) renders wl');
+ok(live(5) === '', 'class 5 (slack) renders BLANK — never metadata, never a live tint (spec/ui.md)');
+ok(live(6) === 'meta', 'unknown class 6 degrades to meta (no throw, no unstyled name)');
+ok(live(8) === '', 'an unprogrammed page renders blank regardless of class');
+
+// Counters: slack folds into erased, WL into metadata; slack inflates neither
+// metadata nor obsolete.
+const counts = viz.liveCounts();
+// shown pages 0..7 -> classes 0,1,2,3,4,5,6,0: erased bucket = two class-0
+// pages + the slack page (5) = 3.
+ok(counts.erased === 3, `slack counts as erased-equivalent (erased=${counts.erased}: class 0 x2 + class 5)`);
+ok(counts.metadata === 3, `metadata counts meta+wl+unknown only (metadata=${counts.metadata}: classes 1, 4, 6)`);
+ok(counts.obsolete === 1 && counts.live === 1, `obsolete/live unaffected (${counts.obsolete}/${counts.live})`);
+
+console.log(failed === 0
+  ? `\nPASS - FAT+WL extra classes render per spec/ui.md: slack blank + uncounted, WL a metadata shade (${pass} checks).`
+  : `\nFAIL - ${failed} of ${pass + failed} render-pin checks failed`);
+process.exit(failed === 0 ? 0 : 1);
