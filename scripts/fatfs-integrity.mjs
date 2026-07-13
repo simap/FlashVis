@@ -44,6 +44,23 @@ for (let op = 0; op < 3000; op++) {
 }
 for (const name of truth.keys()) verify(name);
 
+// Live-map sanity after heavy churn: classes stay in the driver's taxonomy
+// (0-3 baseline + 4 WL + 5 slack), the WL FTL still owns exactly 4 whole
+// sectors, and the FAT resolution shows sub-sector structure: any surviving
+// file whose size isn't a 4096-multiple must put live pages and EOF-slack
+// pages in the same sector (its last cluster).
+const lm = runner.liveMap();
+const pps = 4096 / 256;
+const wlPages = [...lm].filter((v) => v === 4).length;
+const mixed = Array.from({ length: 64 }, (_, s) => [...lm.slice(s * pps, (s + 1) * pps)])
+  .some((cls) => cls.includes(3) && cls.includes(5));
+const expectMixed = [...truth.values()].some((d) => d.length % 4096 !== 0);
+if (!(lm.length === 1024 && [...lm].every((v) => v >= 0 && v <= 5) && wlPages === 64
+      && (mixed || !expectMixed))) {
+  console.log(`FAIL — live-map sanity after churn: len ${lm.length}, wlPages ${wlPages}, mixed ${mixed}, expectMixed ${expectMixed}`);
+  process.exit(1);
+}
+
 const live = [...truth.values()].reduce((s, d) => s + d.length, 0);
 const s = runner.device.stats;
 console.log(`ops 3000 | files ${truth.size} | live ${(live / 1024).toFixed(1)} KiB | read-backs ${checks} | ${s.programs} programs, ${s.erases} erases`);

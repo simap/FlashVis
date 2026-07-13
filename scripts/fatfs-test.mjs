@@ -54,34 +54,52 @@ const okAbi = runner.name === 'fatfs';
 const okCaps = runner.caps === 0xc; // FF_CAP_APPEND | FF_CAP_LIVE_MAP (GC off)
 const okGcNoop = runner.gcStep() === null;
 const okSectorClasses = runner.sectorClasses() === null;
-// The native hook composes the FAT logical view through the WL mapping.
-// With two files written, expect a valid map showing both metadata and live
-// data — proving it walked the FS, not just returned zeros. Classes are the
-// shared 0-3 baseline plus the FAT+WL-specific 4 = "WL" (the FTL's own
-// cfg/state/dummy sectors; per-FS taxonomy, ADR-0011/0012).
+// The native hook composes the FAT logical view through the WL mapping at
+// PAGE granularity — it parses real FAT12 structure (BPB, FAT table, dir
+// entries, file sizes + chains), so classes vary *within* sectors instead of
+// whole-sectors-always-full. Classes: shared 0-3 baseline plus FAT+WL-specific
+// 4 = "WL" (the FTL's own cfg/state/dummy sectors) and 5 = "slack" (allocated
+// but carrying no data: cluster tails past EOF, metadata-region padding).
+// Per-FS taxonomy, ADR-0011/0012.
 const npages = (SECTOR_SIZE * SECTOR_COUNT) / PAGE_SIZE;
 const lm = runner.liveMap();
-const okLiveMap = lm !== null && lm.length === npages && [...lm].every((v) => v >= 0 && v <= 4)
-  && [...lm].some((v) => v === 1) && [...lm].some((v) => v === 3);
-// Class 4 lands exactly on the WL FTL's own sectors: state1/state2/cfg at the
-// fixed top-of-device positions (physical sectors 61,62,63 with 240 KiB usable
-// of 64 sectors) plus the rotating dummy spare somewhere in 0..60 — 4 whole
-// sectors total, and every page within a sector uniform (the hook classifies
-// per physical sector).
+const okLiveMap = lm !== null && lm.length === npages && [...lm].every((v) => v >= 0 && v <= 5);
+// Exact page census for this deterministic scene (256-B pages, 4096-B
+// clusters, hello.txt = 100 B, f000-... = 9000 B):
+//   live 37    = 100 B -> 1 page; 9000 B -> 16 + 16 + 4 pages
+//   meta 5     = boot record 2 (512 B) + 1 used FAT page x2 copies (FAT12
+//                uses ceil(58*1.5) = 87 B) + root dir 1 (4 entries: hello.txt
+//                SFN + f000's 2 LFN + 1 SFN = 128 B)
+//   slack 86   = boot pad 14 + FAT pad 15x2 + root pad 15 + EOF slack 15 + 12
+//   WL 64      = 4 whole sectors x 16 (cfg + state x2 + dummy)
+//   erased 832 = 52 never-touched free clusters x 16
+const census = (m) => { const c = [0, 0, 0, 0, 0, 0]; for (const v of m) c[v]++; return c; };
+const okCensus = JSON.stringify(census(lm)) === JSON.stringify([832, 5, 0, 37, 64, 86]);
+// Sub-sector resolution really happened: sectors mix classes (the FAT sector:
+// 1 metadata page + 15 slack; hello's cluster: 1 live + 15 slack).
 const pps = SECTOR_SIZE / PAGE_SIZE;
-const secClass = Array.from({ length: SECTOR_COUNT }, (_, s) => lm[s * pps]);
-const uniform = Array.from({ length: SECTOR_COUNT }, (_, s) =>
-  [...lm.slice(s * pps, (s + 1) * pps)].every((v) => v === secClass[s])).every(Boolean);
-const wlSectors = secClass.flatMap((c, s) => (c === 4 ? [s] : []));
-const okWlClass = uniform
-  && wlSectors.length === 4
+const sectors = Array.from({ length: SECTOR_COUNT }, (_, s) => [...lm.slice(s * pps, (s + 1) * pps)]);
+const okGranular = sectors.some((cls) => cls.includes(1) && cls.includes(5))
+  && sectors.some((cls) => cls.includes(3) && cls.includes(5));
+// Class 4 still lands exactly on the WL FTL's own 4 whole sectors:
+// state1/state2/cfg at the fixed top-of-device positions (61,62,63) plus the
+// rotating dummy spare somewhere in the data region (0..60).
+const wlSectors = sectors.flatMap((cls, s) => (cls.every((v) => v === 4) ? [s] : []));
+const okWlClass = wlSectors.length === 4
   && [61, 62, 63].every((s) => wlSectors.includes(s))
-  && wlSectors.filter((s) => s <= 60).length === 1;
+  && wlSectors.filter((s) => s <= 60).length === 1
+  && census(lm)[4] === 64; // no stray class-4 pages outside those sectors
+// Deleting a file frees its cluster in the FAT while the bytes stay
+// programmed: those pages must flip live->obsolete ("free but not erased",
+// distinct from true erased), and its EOF slack vanishes with the allocation.
+runner.remove('hello.txt');
+const lm2 = runner.liveMap();
+const okObsolete = JSON.stringify(census(lm2)) === JSON.stringify([832, 5, 16, 36, 64, 71]);
 const okContent = got === payload;
 const okList = list.some((e) => e.name === 'hello.txt' && e.size === enc.encode(payload).length)
   && list.some((e) => e.name === lfnName && e.size === big.length);
 
-const checks = { okAbi, okCaps, okGcNoop, okSectorClasses, okLiveMap, okWlClass, okContent, okList };
+const checks = { okAbi, okCaps, okGcNoop, okSectorClasses, okLiveMap, okCensus, okGranular, okWlClass, okObsolete, okContent, okList };
 const failed = Object.entries(checks).filter(([, ok]) => !ok).map(([k]) => k);
 
 if (failed.length) {
@@ -90,6 +108,7 @@ if (failed.length) {
 }
 console.log('\nPASS — FatFs/wear_levelling formatted, mounted, wrote two files (one LFN) and read one');
 console.log('       back, ABI version 1 confirmed, caps 0xc (APPEND|LIVE_MAP), gc + sectorClasses');
-console.log('       gated to null, live map classifies metadata+data+WL(4), issuing', runner.device.stats.reads, 'reads /',
+console.log('       gated to null, live map resolves FAT structure per page (meta/live/slack/');
+console.log('       obsolete within sectors, WL(4) whole), issuing', runner.device.stats.reads, 'reads /',
             runner.device.stats.programs, 'programs /', runner.device.stats.erases,
             'erases against the emulated NOR device.');
