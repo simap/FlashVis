@@ -180,6 +180,22 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
   // op phase, waiting on a slower peer's op (e.g. everyone parked on SPIFFS's
   // 64-erase boot format) — reads as holding, not just post-quiescence waits.
   let pacePhaser = null;
+  // ---- Reset epoch: every round in flight (a paceStep round, a raceTick
+  // command, a manual step()) captures `epoch` when it starts, and its
+  // COMPLETION bookkeeping — cursor advances, busy releases, paceArrived/
+  // paceWaiting/pacePhaser writes — is void once reset() has bumped the epoch.
+  // Without this, a round parked at an await when reset() rebuilds state wakes
+  // AFTERWARD and stomps the fresh world with its pre-reset index: e.g. the
+  // btnReset flow (stop() then reset(), synchronous) aborts the round's token,
+  // whose continuation then runs the FIX-B advance `cursors.set(s, i+1)` with
+  // the OLD i — leaving every stomped cursor >= the fresh sequence's length,
+  // so replayed boot commands sit at '⧗ queued' forever (a dead console until
+  // page reload), or — when only a subset of sessions was `due` — a mixed
+  // cursor field that pins the stale ones as 'waiting' forever. stop() does
+  // NOT bump the epoch: FIX B's advance is load-bearing for plain Pause
+  // (the churn op genuinely applied; resume must not re-apply it). Only
+  // reset() — which rebuilds the very state those writes target — voids them. ----
+  let epoch = 0;
 
   // ---- Stop/abort (ADR-0019 Consequences): every command execution captures the
   // token active when it STARTS. stop() flips it aborted and resolves its promise
@@ -370,8 +386,15 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
           // clears the lock and leaves the cursor at i (rewind, mirroring the
           // abort model) so the FS stays recoverable instead of frozen. Guard
           // against a late settle for a session setSessions() already removed —
-          // don't resurrect its cursor/busy Map entries (minor leak fix).
+          // don't resurrect its cursor/busy Map entries (minor leak fix) — and
+          // against a settle from BEFORE a reset() (stale epoch): the fresh
+          // world already zeroed cursors and cleared busy, and the session may
+          // be legitimately mid-command in a NEW round, so a stale settle must
+          // touch nothing at all (a stale busy=false would unlock that round's
+          // re-entry protection; a stale cursor write corrupts the sequence).
+          const myEpoch = epoch;
           const settle = (advance) => {
+            if (epoch !== myEpoch) return;
             if (!sessions.includes(s)) { busy.delete(s); return; }
             if (advance) cursors.set(s, i + 1);
             busy.set(s, false);
@@ -422,7 +445,12 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
     const due = sessions.filter((s) => (cursors.get(s) ?? 0) === i && !busy.get(s));
     if (!due.length) return;                            // every min-cursor session is mid-execution elsewhere — retry next tick
     for (const s of due) busy.set(s, true);
-    const releaseBusy = () => { for (const s of due) busy.set(s, false); };
+    // Every write this round makes AFTER an await is epoch-guarded: once a
+    // reset() has bumped the epoch, the fresh world owns cursors/busy/the
+    // pace sets, and this abandoned round must touch none of them (the stale
+    // FIX-B/advance write was the "Reset mid-round wedges the console" bug).
+    const myEpoch = epoch;
+    const releaseBusy = () => { if (epoch === myEpoch) for (const s of due) busy.set(s, false); };
     const tok = stopToken;
     if (entry.kind === 'command') {
       paceArrived = new Set();
@@ -437,7 +465,7 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
       // rejects and the catch below clears the lock.
       const run = Promise.all(due.map((s) =>
         runCommandOnSession(s, entry, pacePace(s, phaser, tok)).then(
-          () => { phaser.leave(s); paceArrived.add(s); paceWaiting.add(s); },
+          () => { phaser.leave(s); if (epoch === myEpoch) { paceArrived.add(s); paceWaiting.add(s); } },
           (e) => { phaser.leave(s); throw e; })));
       try {
         await Promise.race([run, tok.promise]);
@@ -445,24 +473,34 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
         // REJECT exit (FIX A): guarantee busy clears even when the throw skips the
         // abort/advance branches below. Rewind (cursor stays at i), mirroring the
         // command-abort model — the FS is recoverable, not frozen.
-        releaseBusy(); paceArrived = new Set(); paceWaiting = new Set(); return;
+        releaseBusy();
+        if (epoch === myEpoch) { paceArrived = new Set(); paceWaiting = new Set(); }
+        return;
       } finally {
-        pacePhaser = null;                 // command ops done (or abandoned) — no live phaser to park in
+        // command ops done (or abandoned) — no live phaser to park in. Stale
+        // rounds leave the (fresh) phaser slot alone.
+        if (epoch === myEpoch) pacePhaser = null;
       }
-      if (tok.aborted) { releaseBusy(); paceArrived = new Set(); paceWaiting = new Set(); return; }   // abandoned mid-flight — cursors stay at i, lock released
+      if (tok.aborted) {   // abandoned mid-flight — cursors stay at i, lock released
+        releaseBusy();
+        if (epoch === myEpoch) { paceArrived = new Set(); paceWaiting = new Set(); }
+        return;
+      }
     } else {
       for (const s of due) runEntry(s, entry);
     }
     // Instrument the round's drain barrier for the `waiting` signal: a session
     // that resolves its OWN barrier() while a peer has not is parked waiting on the
     // slower peer (paceWaiting). A session still draining its op animation has an
-    // UNRESOLVED barrier -> not added -> not "waiting". `roundDone`/`tok.aborted`
-    // guard a late resolve after the round advanced or aborted from re-flagging.
+    // UNRESOLVED barrier -> not added -> not "waiting". `roundDone`/`tok.aborted`/
+    // the epoch guard a late resolve (after the round advanced, aborted, or a
+    // reset() rebuilt the world) from re-flagging.
     let roundDone = false;
     const barriers = sessions.map((s) =>
-      s.barrier().then(() => { if (!roundDone && !tok.aborted) paceWaiting.add(s); }));
+      s.barrier().then(() => { if (!roundDone && !tok.aborted && epoch === myEpoch) paceWaiting.add(s); }));
     await Promise.race([Promise.all(barriers), tok.promise]);
     roundDone = true;
+    if (epoch !== myEpoch) return;   // a reset() rebuilt cursors/busy/sets mid-round — this round's completion is void
     paceArrived = new Set();
     paceWaiting = new Set();
     if (tok.aborted) {
@@ -472,6 +510,8 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
       // match, or resume re-applies the same churn op (double simNs/wear/WA,
       // divergence from the canonical sequence). A COMMAND aborted here keeps the
       // ADR-0019 rewind (cursor stays at i) — its abort semantics are untouched.
+      // (Never reached with a STALE epoch — the return above — so a Reset that
+      // landed in this window can't be stomped with the pre-reset i+1.)
       if (entry.kind !== 'command') for (const s of due) cursors.set(s, i + 1);
       releaseBusy();
       return;
@@ -655,6 +695,7 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
         try { await paceStep(true); } finally { paceBusy = false; }   // force one produced step even while paused (ADR-0020)
         return;
       }
+      const myEpoch = epoch;   // a reset() mid-step voids this step's completion writes (see the epoch note)
       await Promise.all(sessions.map(async (s) => {
         // FIX 2: the 16ms raceTick now drains queued commands EVERY tick (even
         // paused), so a manual Step must not also grab a session raceTick is
@@ -670,9 +711,10 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
         try {
           if (entry.kind === 'command') await runCommandOnSession(s, entry, { before: () => Promise.resolve(), after: () => Promise.resolve() });
           else runEntry(s, entry);
-          cursors.set(s, i + 1);
-        } finally { busy.set(s, false); }
+          if (epoch === myEpoch) cursors.set(s, i + 1);
+        } finally { if (epoch === myEpoch) busy.set(s, false); }
       }));
+      if (epoch !== myEpoch) return;
       // Keep the shared clock at/above every session's simNs so a subsequent Run
       // doesn't have to wait for raceClock to climb back up to what the manual
       // step already spent.
@@ -695,8 +737,22 @@ export function createLockstep({ churn, gcRatio = 0.5 }) {
      *  followed by the command's second full one (the double-format boot bug —
      *  SPIFFS swept all 64 sectors twice). Unmounted+blank returns blank-chip
      *  fsinfo/liveMap values on every driver, so the short window before the
-     *  command executes is safe to poll. */
+     *  command executes is safe to poll.
+     *
+     *  Rounds still in flight when reset() lands are ABANDONED, twice over:
+     *  the epoch bump voids their completion bookkeeping (an abandoned round
+     *  waking after this must not stomp the fresh cursors/busy/pace sets with
+     *  its pre-reset state — the "Reset mid-round wedges the console" bug),
+     *  and aborting the outgoing stop token (same pattern as stop()) hangs
+     *  their remaining inner-API awaits per ADR-0019, so a mid-flight command
+     *  can't keep issuing ops against the just-blanked chip. stop() before
+     *  reset() (the header-Reset flow) makes the abort a no-op repeat; a BARE
+     *  reset() mid-flight now gets the same abandon semantics instead of a
+     *  zombie round. */
     reset({ format = true } = {}) {
+      epoch++;                       // void every in-flight round's completion writes
+      stopToken.aborted = true;      // hang in-flight ops + unblock coordinator-level races (as stop() does)
+      stopToken.resolve();
       for (const s of sessions) (format ? s.freshFormat() : s.blankChip?.());
       churn.reset();
       sequence.length = 0;

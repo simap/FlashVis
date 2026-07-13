@@ -813,6 +813,85 @@ async function scenarioWaitingNotWhileAnimatingRace() {
   else ok('no actively-animating Race session ever read holding/stalled (the laggard never flags)');
 }
 
+// ---- Scenario 16 (KEY REGRESSION): reset() abandons a mid-flight round; its
+// stale completion writes are void ----
+// The "Reset mid-round wedges the console" bug. A round parked at an await when
+// reset() rebuilds cursors/sequence used to wake AFTERWARD and stomp the fresh
+// world with its pre-reset bookkeeping. Three faces, each deterministic:
+//   (a) btnReset flow (stop() then reset()) with a NON-command churn round parked
+//       in its barrier window: the abandoned round's FIX-B advance wrote
+//       cursors.set(s, OLD i+1) over the zeroed cursors, so every stomped cursor
+//       sat >= the fresh sequence's length and replayed boot commands never
+//       executed (stuck '⧗ queued' forever = dead console), or -- when only a
+//       subset was due -- pinned the stale sessions as 'waiting' forever.
+//   (b) BARE reset() (no stop()) with a gated COMMAND parked mid-fn: reset must
+//       abandon it like stop() does (abort the outgoing token), so the zombie fn
+//       can never issue another device op against the just-blanked chip.
+//   (c) BARE reset() in RACE mode landing in a command's quiescence window (the
+//       macrotask between its last op and the setTimeout re-check): the late
+//       settle used to write the stale cursor into the fresh world.
+async function scenarioResetAbandonsMidFlight() {
+  console.log('\n[16] reset() abandons a mid-flight round (stale-epoch guard)');
+
+  // (a) the exact header-Reset flow, on the exact FIX-B window
+  const rig = await makeRig();
+  rig.coord.setMode('pace');
+  for (let k = 0; k < 3; k++) await stepToCompletion(rig);           // cursors at 3: the stale index is visibly non-zero
+  await flushMacro();                                                // let the interval's paceStep .finally release paceBusy
+  const inflight = rig.coord.step();                                 // applies churn step 3 synchronously, parks at the barrier await
+  inflight.catch(() => {});
+  rig.coord.stop();                                                  // btnReset flow, part 1: abort (resolves the round's token race)
+  rig.coord.reset({ format: false });                                // part 2: rebuild -- cursors 0, sequence empty, fresh epoch
+  for (let g = 0; g < 10; g++) { await flushMacro(); tickOnce(rig.dom); }   // the abandoned round's continuation runs here
+  if (!allAt(rig.coord, 0)) fail(`[16a] abandoned round stomped the fresh cursors: ${cursorsOf(rig.coord)}, expected [0,0] (stale FIX-B write survived reset)`);
+  else ok('abandoned pace round left the fresh cursors at 0 (stale FIX-B write voided)');
+  // the boot-replay shape: a broadcast command must actually execute now.
+  // Pump on the CURSORS (the round fully advancing), not the journal 'done'
+  // flip — 'done' lands at quiescence, a couple of macrotasks before the
+  // round's drain barrier advances the cursor.
+  const { entry } = rig.coord.broadcast(async (api) => { await api.fs.format(); await api.fs.mount(); }, 'format()');
+  await pump(rig.dom, { done: () => allAt(rig.coord, 1), maxIter: 4000 });
+  if (![...entry.journalEntries.values()].every((je) => je.state === 'done')) fail('[16a] replayed command advanced the cursors but its tape entries never reached done');
+  else ok('post-Reset broadcast command executed on every session (no dead console)');
+  if (Object.values(rig.coord.waitStates()).some(Boolean)) fail('[16a] a session is stuck waiting after the post-Reset replay drained (the stuck-pin symptom)');
+  else ok('no session stuck waiting after the replay drained');
+
+  // (b) bare reset() abandons a parked command -- no zombie ops on the fresh chip
+  const rig2 = await makeRig();
+  const g2 = gatedCommand();
+  rig2.coord.broadcast(g2.fn, 'gated s16');
+  rig2.coord.setMode('pace');
+  await pumpUntil(rig2.dom, () => g2.state.atGate >= FS_ORDER.length, 's16-window');   // both sessions parked mid-fn, round in flight
+  rig2.coord.reset();                                                // BARE reset: no stop() first
+  for (let g = 0; g < 10; g++) { await flushMacro(); tickOnce(rig2.dom); }
+  const postReset = Object.fromEntries(rig2.sessions.map((s) => [s.fsId, { ...s.device.stats }]));
+  g2.state.release();                                                // wake the zombie: its next op must HANG, not run
+  for (let g = 0; g < 30; g++) { await flushMacro(); tickOnce(rig2.dom); }
+  for (const s of rig2.sessions) {
+    const d = s.device.stats;
+    if (d.programs !== postReset[s.fsId].programs || d.erases !== postReset[s.fsId].erases) {
+      fail(`[16b] ${s.fsId}: the abandoned command wrote to the fresh chip after reset (programs ${postReset[s.fsId].programs} -> ${d.programs})`);
+    } else ok(`${s.fsId}: abandoned command issued no device op after bare reset() (zombie hung per ADR-0019)`);
+    if (s.runner.names().includes(GATE_B)) fail(`[16b] ${s.fsId}: ${GATE_B} exists on the fresh chip -- the zombie's second write ran`);
+  }
+  if (!allAt(rig2.coord, 0)) fail(`[16b] cursors not clean after bare reset: ${cursorsOf(rig2.coord)}`);
+  await flushMacro();     // let the last tick's interval paceStep release paceBusy, or step() below silently no-ops
+  await stepToCompletion(rig2);                                      // the coordinator itself must still be live
+  if (!allAt(rig2.coord, 1)) fail(`[16b] coordinator wedged after abandoning the command (step did not advance: ${cursorsOf(rig2.coord)})`);
+  else ok('coordinator stayed live after abandoning the parked command (paceBusy released)');
+
+  // (c) race-mode late command settle: reset() lands in the quiescence window
+  const rig3 = await makeRig();
+  rig3.coord.setMode('race');
+  rig3.coord.broadcast(async () => {}, 'noop s16');                  // zero ops: quiesces at the first macrotask re-check
+  tickOnce(rig3.dom);                                                // raceTick dispatches it (busy set, quiescence check scheduled)
+  for (let k = 0; k < 10; k++) await Promise.resolve();              // MICROtasks only: fn done, setTimeout re-check still pending
+  rig3.coord.reset();                                                // reset BEFORE the re-check fires
+  for (let g = 0; g < 10; g++) { await flushMacro(); tickOnce(rig3.dom); }   // re-check fires -> late settle -> must be void
+  if (!allAt(rig3.coord, 0)) fail(`[16c] late race settle stomped the fresh cursors: ${cursorsOf(rig3.coord)}, expected [0,0]`);
+  else ok('late race-command settle after reset left the fresh cursors at 0 (stale write voided)');
+}
+
 // ---- run all ----
 console.log('lockstep concurrency / no-double-execution suite (real coordinator + real WASM)\n');
 console.log('[0] exactly-once reference for a single gated command');
@@ -833,6 +912,7 @@ await scenarioWaitingRace();
 await scenarioWaitingPacePeer();
 await scenarioWaitingNotWhileAnimating();
 await scenarioWaitingNotWhileAnimatingRace();
+await scenarioResetAbandonsMidFlight();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }

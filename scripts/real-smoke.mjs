@@ -167,27 +167,35 @@ for (let i = 0; i < 200 && !gcReported; i++) {
 if (!gcReported) fail(`typed gc() never produced a timed "gc() → …" result line on the tape:\n${tapeText().split('\n').slice(-8).join('\n')}`);
 if (g('tape').children.length <= preGcLen) fail('typed gc() did not grow the tape at all');
 
-// ---- header Reset again, this time after a long Pace/Race/gc() session: stop,
-// re-format every FS (files/stats back to 0), wipe the tape, and replay the
-// boot log (help()/format()) — no page reload. The holding showcase is
-// exercised above, right after boot, in a clean coordinator state; this
-// second Reset is deliberately the simpler smoke check (tape wipe + replay +
-// files back to 0) — a fuller assertion here would need to reach quiescence
-// after substantial prior Pace/Race churn, which is its own can of worms
-// (see the note in the report about a Reset-after-heavy-Race-activity
-// coordinator issue found but left alone as out of scope for this change). ----
+// ---- header Reset again, this time after a long Pace/Race/gc() session, with
+// the sim RUNNING in Pace so the click lands mid-round (a churn op's animation
+// draining) — the Reset-mid-round regression (lockstep's reset epoch): an
+// abandoned round used to wake after reset() and stomp the fresh cursors with
+// its pre-reset index, leaving the replayed help()/format() stuck at ⧗ queued
+// forever (dead console) or a subset of FS cards pinned "waiting" forever.
+// Assert the full boot-identical replay: tape wiped + replayed, format()
+// settles with a real cost, the animated drain runs its holding showcase
+// again (SPIFFS never flags), and it drains to all-clear with files at 0. ----
+if (g('modeWheel').dataset.mode === 'race') dom.dispatch('modeWheel');   // back to Pace, the boot-default regime Reset replays into
 if (g('runLabel').textContent !== 'Pause') dom.dispatch('btnRun');   // get something running again
-await tick(60);
+await tick(60);                     // running Pace churn: a round is virtually always mid-drain now
 dom.dispatch('btnReset');
 if (g('runLabel').textContent !== 'Run') fail('Reset should stop a running sim (runLabel back to "Run")');
 if (tapeText().includes('gc()')) fail(`Reset should wipe the pre-reset tape, but it still shows old entries:\n${tapeText()}`);
 if (!/help\(\)/.test(tapeText())) fail(`Reset should replay the boot log (help()) on the tape:\n${tapeText()}`);
-let formatSettled = false;
-for (let i = 0; i < 200 && !formatSettled; i++) {
+let lateSawWaiter = false, lateSpiffsFlagged = false, lateDrained = false, formatSettled = false;
+for (let i = 0; i < 800 && !(formatSettled && lateDrained); i++) {
   await tick(1);
+  const w = FS.filter((fs) => card(fs).waiting);
+  if (w.length) lateSawWaiter = true;
+  if (w.includes('spiffs')) lateSpiffsFlagged = true;
+  lateDrained = lateSawWaiter && w.length === 0;   // waiters appeared, then all cleared = round done
   formatSettled = /format\(\)\s*→/.test(tapeText());
 }
-if (!formatSettled) fail(`Reset's replayed format() never completed on the tape:\n${tapeText()}`);
+if (!formatSettled) fail(`Reset's replayed format() never completed on the tape (the mid-round Reset wedge):\n${tapeText()}`);
+if (!lateSawWaiter) fail('no FS ever showed holding during the late Reset replay\'s format drain (Reset must stay fully animated)');
+if (lateSpiffsFlagged) fail('SPIFFS (the late-Reset format laggard, actively draining its own animation) flagged holding — the wrong-FS bug');
+if (!lateDrained) fail('the late Reset replay never drained to all-clear — a stale mid-round write left an FS pinned "waiting" (the stuck-pin symptom)');
 if (Number(g('sFiles').textContent) !== 0) fail(`Reset should return the focused FS to 0 files, HUD shows sFiles="${g('sFiles').textContent}"`);
 if (/NaN|undefined/.test(card('fastffs').v)) fail(`fastffs vital looks wrong after Reset: "${card('fastffs').v}"`);
 
@@ -199,5 +207,6 @@ console.log('       flag while SPIFFS drains, SPIFFS itself never does); Pace ad
 console.log('       Race shows workload "ops done" + ops/s; geometry has no "SOP-8"; after a');
 console.log('       Pace->Race divergence the stall indicator fires for ahead FSs only — never all');
 console.log('       at once, never the frontier (min flash time) FS; typed gc() reports timing/op-');
-console.log('       stats on the tape like churn-driven GC; and a second Reset after that activity');
-console.log('       still wipes+replays the tape, landing one replayed format with files back to 0.');
+console.log('       stats on the tape like churn-driven GC; and a second Reset clicked MID-ROUND');
+console.log('       after all that activity still lands the full boot-identical replay (no wedged');
+console.log('       ⧗ queued commands, no stuck "waiting" pins — the reset-epoch regression).');
