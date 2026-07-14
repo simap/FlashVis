@@ -143,7 +143,9 @@ section disagree, this section wins; prose reconciliation is tracked in the revi
 *playback* (the metered replay position). **The protocol's currency is the playback clock** —
 limits, acks, baselines, awaited-op resolution, standings. Execution appears only in telemetry.
 Every message carries `epoch`; mismatch ⇒ discard, and a bump voids the worker's held limits,
-scale, and entries. Entry indexes and journal/event ids are monotonic within an epoch.
+scale, entries, prep flag, and any suspended-metering state — the session rebuilds in the new
+epoch. UI pull cursors from the old epoch are void too: re-attach with `newest`. Entry indexes
+and journal/event ids are **consecutive** and monotonic within an epoch.
 
 **One control loop: `grant`/`grantAck`.** Entries are instruction feed, not control; all UI data
 rides `pull`/`frame`. Steady-state traffic is O(1) messages per session per frame regardless of
@@ -156,14 +158,21 @@ op rate, and the worker holds no state about what the UI has seen.
 - `entries {epoch, [{index, kind: churn|gc|command, payload, seed}]}` — incremental append,
   consecutive monotonic indexes; commands ship as source. Pure prefetch: shipping authorizes
   nothing. Race: window ahead of each cursor, refilled from acked cursors; Pace: the frontier
-  advances one entry per join.
+  advances one entry per join. **Window size is a deferred tuning knob — correctness never
+  depends on it:** exhaustion acks immediately (see grantAck), so an undersized window costs at
+  most a round-trip of idle — simNs simply doesn't advance for a few frames, accounting
+  unaffected. Size later by measurement: marshalling overhead vs the achievable no-delay
+  multiplier.
 - `grant {epoch, round, entryLimit, playLimitNs, scale}` — the whole control plane; per session,
   frame cadence. "Execute entries `index < entryLimit`; play back up to `playLimitNs` at
   `scale`." `round` is a monotonic grant id for ack matching and stale-ack discard. `playLimitNs`
   is derived, never accumulated: `playLimitNs_s = baseline_s + rel`,
   `rel = max_s(ackedPlayback_s − baseline_s) + Δ`, Δ and scale taken at release, clamped ≥ that
   session's last acked position; round n+1 releases only when every current participant acked
-  round n. `entryLimit` — Pace: shared index + 1 for due sessions (a session already past it
+  round n. **Rounds run continuously at frame cadence: a grant is always sent, degenerating to a
+  no-op (limits unchanged) when there is nothing new to authorize — the loop controls how much
+  is granted, never whether; neither side ever detaches.** `entryLimit` — Pace: shared index + 1
+  for due sessions (a session already past it
   gets its own cursor); Race: the shipped frontier. No-delay Δ is finite, sized to drain-paced
   playback throughput.
 - `pull {epoch, heat?, wear?, liveMap:{since}?, journal:{since, limit, newest}?, events:{since,
@@ -171,15 +180,26 @@ op rate, and the worker holds no state about what the UI has seen.
   (full pull); a compare view pulls several sessions heat/wear/liveMap-only. **Focus = which
   workers the UI pulls and what it asks for; no focus message exists.**
 - `reset {epoch'}` — voids all in-flight state on both sides; awaits hang, never reject.
-- No stop or speed message: stop = withhold grants (awaits starve → hang); SPEED rides only on
-  `grant.scale`, so it cannot race the grant stream. Terminate is `worker.terminate()` after the
-  teardown settle, not a message.
+- No stop, pause, or speed message exists. **The UI's Run/Stop gates the churn generator only
+  (ADR-0020)** — grants keep flowing (no-op when idle) and a typed command executes at Speed
+  while "stopped." Pace naturally idles when no entries arrive; Race spends the idle letting
+  laggards catch up (intentional; a speed = 0 "freeze time" is a possible later option). The
+  generator produces entries on demand — when the lead session's window needs them. **Reset is a
+  halt**: the coordinator lets the in-flight round's acks land (≤ one frame — grants are
+  granular, nothing needs interrupting), then bumps the epoch; in-flight awaits need no explicit
+  hang mechanism — they starve, since their epoch never receives another grant, and the session
+  rebuilds in the new epoch. SPEED rides only on `grant.scale`, so it cannot race the grant
+  stream. Terminate is `worker.terminate()` after the teardown settle, not a message.
 
 **Worker → main**
 
-- `grantAck {epoch, round, playbackNs, cursor, entriesDrained, drainedCounters}` — heartbeat at
-  frame cadence whenever playback advanced, plus at limit-reach and at quiescence; idempotent
-  per round, coordinator keeps the per-session max. `cursor` = entries executed (drives window
+- `grantAck {epoch, round, playbackNs, cursor, entriesDrained, drainedCounters}` — **every grant
+  is acked on receipt**, even with zero progress (an idle ack reports the parked position), then
+  re-acked at frame cadence while playback advances, on reaching either limit (`playLimitNs`, or
+  `entryLimit` — window exhaustion acks immediately), and at quiescence; idempotent per round,
+  coordinator keeps the per-session max. Diagnostic invariant: activity in a no-op grant's ack
+  is a bug or a leaky abstraction spilling somewhere. Per-round acks also mean the CS pin /
+  status-dot data (spec/ui.md) is fresh every round. `cursor` = entries executed (drives window
   refill and bounds execution skew); `entriesDrained` = highest index executed AND tape-drained.
   **The Pace join = every session reporting `entriesDrained ≥ shared index`**, and the rebase
   reads that ack's `playbackNs` — ack-quiescence: that position must not move again before the
@@ -202,6 +222,13 @@ op rate, and the worker holds no state about what the UI has seen.
   gc lines gray by kind (ADR-0023). Nothing is updated in place.
 - Viz events (erase sweep, command lifecycle): same ring/id pattern, frame-batched — numerous at
   full speed but never op-tape-scale (the heat field already coalesced those by construction).
+- Log ids are consecutive per epoch, so a gap is arithmetically detectable (first returned id >
+  `since`+1 ⇒ ring eviction — reachable whenever pulls stop while the worker runs, e.g. a
+  backgrounded tab; the UI may render a break marker). `newest:true` ignores `since` and returns
+  the newest `limit` items plus current heads — the **(re)attach mode**: a focus switch, tab
+  re-foreground, or epoch bump pulls journal `{newest, limit: 400}` and events
+  `{newest, limit: 0}` (head pointer only — stale sweeps are never replayed); continuous pulls
+  use `since`.
 - liveMap versioning is **execution-granular** — the finest that exists: WASM is synchronous, so
   FS state changes atomically at op execution; during an op-tape's playback the state already
   holds the post-op result, and past states are not walkable. Dirty = any program/erase executed
@@ -233,9 +260,15 @@ op rate, and the worker holds no state about what the UI has seen.
 
 **prep (ADR-0014) in protocol terms**
 
-- `prep(true)`/`prep(false)` are ordinary broadcast entries; the bracket is a **barrier at both
-  ends** — the coordinator holds `entryLimit` at the bracket index until every session's
-  `entriesDrained` reaches it (reseat mechanics; a momentary join even in Race: on your marks).
+- `prep(true)`/`prep(false)` are ordinary broadcast entries. `prep(true)` takes effect
+  per-session at its sequence position — no entry sync; sessions enter prep as their cursors
+  arrive. **Only the exit is a join**: the coordinator holds `entryLimit` at the `prep(false)`
+  index until every session's `entriesDrained` reaches it, because the clear + reseat must land
+  at one shared entry (reseat mechanics; a momentary join even in Race). Playback is one FIFO
+  replay, so entering prep flushes whatever remains of that session's own pre-bracket tape; a
+  session's execution reaches `prep(true)` only after its backlog drains below `TAPE_CAP` at
+  Speed — so the exit join waits on the slowest session's drain (minutes at deep slow-mo;
+  accepted, the SPEED slider is the remedy).
 - While set, the worker plays tape instantly (`playbackNs ≡ executedTapeNs`; metering, drain
   pacing, and await-pacing suspended — user-invoked semantics, not a perf lever; no ADR-0022
   conflict). Journal events carry a prep flag, rendered distinct like gc lines. Measurement
@@ -257,9 +290,11 @@ op rate, and the worker holds no state about what the UI has seen.
 
 **Control flow, one line each**
 
-- New work: enqueue is immediate, paused or not; ships as `entries`, becomes runnable when
-  `entryLimit` covers it — Pace at the next join, Race immediately; the derived `playLimitNs`
-  means no banked time, so execution starts at Speed.
+- New work: enqueue is immediate, paused or not — a command lands at the frontier of the entries
+  stream, the same index for every session; it becomes runnable when `entryLimit` covers it —
+  Pace at the next join (usually responsive), Race when each session's cursor reaches its index
+  (a backlogged FS sees the identical sequence); the derived `playLimitNs` means no banked time,
+  so execution starts at Speed.
 - Speed change: next grant carries the new scale; consumed time keeps its old rate, the
   remainder plays at the new one; effective ≤ one frame (heartbeats keep acks flowing).
 - Focus switch: the UI repoints its per-frame `pull`, sending `since` = what it already holds;
