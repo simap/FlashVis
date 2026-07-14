@@ -65,6 +65,14 @@ console lines multiplied or didn't broadcast, and ops from different lines inter
   hang path. **Unrecoverable only if the command never yields to the macrotask queue** (sync or
   microtask-only infinite loop); no per-command timeout.
 
+## Update — 2026-07-12: reset() voids in-flight rounds via an epoch
+
+reset() didn't void stale writes: a round parked at await could wake post-reset and write pre-reset
+state — stuck-queued boot commands (dead console), or sessions pinned "waiting". Fix: **reset epoch**
+per round; post-await writes void once `reset()` bumps it. reset() aborts the stop token, hanging
+zombie's ops. `stop()` skips the bump — its cursor advance backs Pause resume. Tested:
+`lockstep-concurrency-test.mjs` [16].
+
 ## Alternatives considered
 
 - **Op-level broadcast + result-routing bridge.** Rejected: still needs cross-FS handle proxies, and a
