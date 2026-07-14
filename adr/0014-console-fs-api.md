@@ -6,74 +6,57 @@
 
 ## Context
 
-The console is the main way to poke the FS by hand and script tests, but its facade is **whole-file
-only** — no partial/positioned I/O, prefix-filtered listing, per-file stat, or multiple handles, even
-though FASTFFS supports all of them. This matters *now*, before LittleFS: the shim ABI
-(ADR-0011) should reach its final shape first so the second driver
-is built against it, not retrofitted. Scripting also needs the internal `runner.names()` backdoor to
-pick a delete victim; the public API should return enough for a script to track its own set.
+The console — the main way to poke the FS by hand and script tests — is **whole-file only**: no
+partial/positioned I/O, prefix listing, per-file stat, or multiple handles, though FASTFFS has all
+of them. Finalize the shim ABI (ADR-0011) before LittleFS: the second driver builds against it,
+not a retrofit. Scripts need the internal `runner.names()` backdoor to pick delete victims; the
+public API should let them self-track.
 
 ## Decision
 
-Two tiers, **both paced and animated by default** (that pacing is the console's whole point), both
-borrowing FASTFFS's API shape.
+Two tiers, **both paced and animated by default** (the console's whole point), both FASTFFS-shaped.
 
 **Tier 1 — friendly top-level pokes** (optional args, data-agnostic):
-`writeFile(name?, size?) → {name, size}` (random name / stock size when omitted);
+`writeFile(name?, size?) → {name, size}` (random name/stock size defaults);
 `readFile(name?) → {name, size}` (size = bytes read, never the bytes); `deleteFile(name?) → {name,
-size}` (stats then deletes); `mkdir(path)` = **`mkdir -p`** (real on hierarchical FSs, no-op on
-flat); `ls(prefix?)` streaming print; `getFiles(prefix?) → [{name, size}]`. Returning descriptors
-lets a script self-track its file set, so the `runner.names()` peek stops being special.
+size}` (stats then deletes); `mkdir(path)` = **`mkdir -p`**; `ls(prefix?)` streaming print;
+`getFiles(prefix?) → [{name, size}]`.
 
-**Tier 2 — raw `fs.` handle-based** (POSIX-shaped, the FASTFFS/LittleFS intersection, not
-FASTFFS-branded): `fs.stat`/`list`/`mkdir` (single-level), lifecycle `fs.format/mount/unmount`,
-introspection `fs.sectorClasses()`/`liveMap()`; `fs.openDir(prefix?) → {read()→{name,size}|null,
-close()}` (regular files only — the shim skips `.`/`..` and dir entries); `fs.open(name, mode) →
-{read(n), write(bytes), seek(off, whence), stat(), close()}` where `'r'`/`'w'` are mandatory and
-**`'a'` append is optional/driver-advertised** (FASTFFS lacks it, LittleFS has it). `whence`
-`'set'|'cur'|'end'` uniform; **open-flag/whence enums are FS-neutral names**, each shim mapping to
-its own (`FFFS_O_*`/`LFS_O_*`). Existing `fs.write/read/cat/remove/exists/fsinfo` stay as whole-file
-raw ops.
+**Tier 2 — raw `fs.` handle-based** (POSIX-shaped FASTFFS/LittleFS intersection, not
+FASTFFS-branded): `fs.stat`/`list`/`mkdir` (single-level), `fs.format/mount/unmount`,
+`fs.sectorClasses()`/`liveMap()`; `fs.openDir(prefix?) → {read()→{name,size}|null, close()}`
+(regular files only); `fs.open(name, mode) → {read(n), write(bytes), seek(off, whence), stat(),
+close()}` — `'r'`/`'w'` mandatory, **`'a'` optional, driver-advertised** (FASTFFS lacks it,
+LittleFS has it), `whence` `'set'|'cur'|'end'` uniform, **enums FS-neutral**, mapped per shim
+(`FFFS_O_*`/`LFS_O_*`). Existing `fs.write/read/cat/remove/exists/fsinfo` stay whole-file.
 
-**Namespace — path-shaped names, no normalization layer.** Names pass to the driver as-is;
-directories are bridged only by `mkdir -p` (loops the idempotent single-level `ff_mkdir`), real on
-LittleFS and a no-op on flat FSs, so `mkdir('a/b'); writeFile('a/b/c')` behaves the same everywhere.
-**Divergence at the edges is accepted, not papered over** (and is instructive): skipping `mkdir`
-works flat but fails on LittleFS (parent must exist); non-canonical paths pass through unnormalized;
-`prefix` matches at a single level, deeper listings may differ per FS.
+**Namespace — path-shaped names, no normalization.** Names hit the driver as-is; the only
+directory bridge is `mkdir -p` (looped idempotent single-level `ff_mkdir`; real on LittleFS, no-op
+flat), giving identical behavior everywhere. **Edge divergence is accepted, instructive**: skipping `mkdir` fails only on LittleFS; non-canonical paths pass through;
+`prefix` is single-level.
 
-**Handle model — a fixed static pool in the shim** (`files[N]`/`dirs[N]` + used-bitmap; `ff_open`/
-`ff_dir_open` return a small int handle, negative on exhaustion; per-handle ops index it) — the
-pattern the FASTFFS benchmark adapters use, bounded and malloc-free. Where a driver's file handle
-carries a cache, the pool also holds a **static per-file buffer** (LittleFS: `LFS_NO_MALLOC` +
-`lfs_file_opencfg` with `file_bufs[N][cache_size]` and static mount buffers). Pool reuse must `close`
-a slot before freeing (uncommitted writes live in the handle until close).
+**Handle model — fixed static pool in the shim** (`files[N]`/`dirs[N]` + used-bitmap;
+`ff_open`/`ff_dir_open` → small int handle, negative on exhaustion) — the FASTFFS
+benchmark-adapter pattern: bounded, malloc-free. Cache-carrying drivers get **static per-file
+buffers** (LittleFS: `LFS_NO_MALLOC`, `lfs_file_opencfg`, `file_bufs[N][cache_size]`, static mount
+buffers). `close` before slot reuse — uncommitted writes live in the handle.
 
-**Setup mode — `prep(enable)`**, a global toggle: runs console ops full-speed with **no animation
-and no await-pacing** while **still logging** each op and keeping die state current (the ops are
-real). For bulk setup that shouldn't crawl op-by-op; "silent" would be the wrong name since logging
-stays.
+**Setup mode — `prep(enable)`**, global: full-speed, **no animation/await-pacing**, still logged,
+die state current (real ops). For bulk setup.
 
 ## Consequences
 
-- The console can express everything the FS does, and LittleFS is built against the final ABI shape.
-  Preflighted against LittleFS twice; the handle-based core maps 1:1.
-- The shared interface is deliberately **simple** (no normalization, no auto-`mkdir`, no
-  recursive-descent listing) — edge divergence illustrates flat vs. hierarchical and is more than a
-  visualizer script needs.
-- Directories cost metadata blocks on LittleFS, so its `liveMap`/block usage won't be pixel-identical
-  to FASTFFS for the same file set — cosmetic.
-- New shim surface + static pool is **C that needs simulation-correctness tests** (byte-exact
-  partial/seeked reads, short-read `&got` semantics, pool exhaustion/reuse). Downsides: more ABI
-  surface per shim (the whole-file ops can wrap the handle ops); `prep` is global state.
+- The console expresses everything the FS does; LittleFS gets the final ABI shape.
+- The shared interface is deliberately **simple**.
+- LittleFS directories cost metadata blocks — `liveMap`/block usage won't match FASTFFS exactly;
+  cosmetic.
+- New shim C needs simulation-correctness tests: byte-exact partial/seeked reads, short-read
+  `&got` semantics, pool exhaustion/reuse. Downsides: more ABI per shim; `prep` is global state.
 
 ## Alternatives considered
 
-- **Keep whole-file only, no handles.** Rejected: can't show partial/positioned I/O and forces a
-  LittleFS retrofit later.
-- **Expose the `runner.names()` tracked set for scripts.** Rejected: returning descriptors is cleaner
-  and keeps the public API honest, with no silent state.
-- **Dynamic / per-instance handle allocation.** Rejected: a fixed static pool matches embedded
-  reality and the benchmark adapters.
-- **A normalization + auto-`mkdir` + recursive-descent listing layer.** Rejected: too much machinery;
-  `mkdir -p` plus single-level uniformity is enough, and edge divergence is an instructive limit.
+- **Whole-file only, no handles.** No partial/positioned I/O; LittleFS retrofit later.
+- **Expose the `runner.names()` tracked set.** Returned descriptors are cleaner; no silent state.
+- **Dynamic / per-instance handle allocation.** Static pool matches embedded reality.
+- **Normalization + auto-`mkdir` + recursive-descent listing.** Too much machinery; single-level
+  uniformity suffices.
