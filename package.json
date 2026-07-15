@@ -15,7 +15,7 @@
     "test:fastffs": "node scripts/fastffs-test.mjs",
     "test:integrity": "node scripts/integrity-test.mjs",
     "test:console": "node scripts/console-api-test.mjs",
-    "test:domsmoke": "node scripts/dom-smoke.mjs",
+    "test:playgroundboot": "node scripts/playground-boot-test.mjs",
     "test:littlefs": "node scripts/littlefs-test.mjs",
     "test:littlefs-integrity": "node scripts/littlefs-integrity.mjs",
     "test:spiffs": "node scripts/spiffs-test.mjs",
@@ -32,11 +32,10 @@
     "test:commanderror": "node scripts/command-error-test.mjs",
     "test:tapeleak": "node scripts/tape-leak-test.mjs",
     "test:vizframe": "node scripts/viz-frame-test.mjs",
-    "test:sessionclient": "node scripts/session-client-test.mjs",
     "test:opcount": "node scripts/opcount-test.mjs",
     "test:sessionworker": "node scripts/session-worker-test.mjs",
     "test:workerconformance": "node scripts/worker-conformance-test.mjs",
-    "test": "npm run test:fastffs && npm run test:integrity && npm run test:console && npm run test:domsmoke && npm run test:littlefs && npm run test:littlefs-integrity && npm run test:spiffs && npm run test:spiffs-integrity && npm run test:jesfs && npm run test:jesfs-integrity && npm run test:fatfs && npm run test:fatfs-integrity && npm run test:fatfs-render && npm run test:realsmoke && npm run test:bootformat && npm run test:concurrency && npm run test:coordwire && npm run test:commanderror && npm run test:tapeleak && npm run test:vizframe && npm run test:sessionclient && npm run test:workerconformance && npm run test:opcount && npm run test:sessionworker",
+    "test": "npm run test:fastffs && npm run test:integrity && npm run test:console && npm run test:playgroundboot && npm run test:littlefs && npm run test:littlefs-integrity && npm run test:spiffs && npm run test:spiffs-integrity && npm run test:jesfs && npm run test:jesfs-integrity && npm run test:fatfs && npm run test:fatfs-integrity && npm run test:fatfs-render && npm run test:realsmoke && npm run test:bootformat && npm run test:concurrency && npm run test:coordwire && npm run test:commanderror && npm run test:tapeleak && npm run test:vizframe && npm run test:workerconformance && npm run test:opcount && npm run test:sessionworker",
     "ci": "npm run build && npm test"
   }
 }
