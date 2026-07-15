@@ -1,5 +1,5 @@
 /*
- * Concurrency / exactly-once regression suite — ADR-0024 (worker-per-session),
+ * Concurrency / exactly-once regression suite, ADR-0024 (worker-per-session),
  * driven against the REAL production backend end to end: the real coordinator
  * (web/src/lockstep.js) + real session proxies (web/src/session-proxy.js) +
  * the real standalone worker host (web/src/session-worker.js) over real WASM,
@@ -10,20 +10,20 @@
  *
  * See LANE-REPORT.md for the full OLD->NEW observable mapping and which
  * scenarios are covered here vs. by lane C's coord-wire-test.mjs (the §2
- * algebra + signals against MOCK workers) — this suite's distinct role is the
+ * algebra + signals against MOCK workers), this suite's distinct role is the
  * REAL-WASM composition plus cross-FS byte-identity, which a WASM-free suite
  * cannot check.
  *
  * OBSERVABLES (all in-band; no closure counter, no synchronous device reach-in):
  *   - dispatch count: the worker's own JOURNAL, pulled via C2W.PULL (a command
  *     that runs twice appends its op lines twice). Data leaves a session ONLY
- *     via the journal — there is no byte side-channel (settled decision).
+ *     via the journal, there is no byte side-channel (settled decision).
  *   - cost: drainedCounters (fileOpCount/flashTimeNs) on GRANT_ACK.
  *   - cross-FS byte-identity: a command PRINTs a content hash of the files into
  *     the journal; we compare the printed hash across FS (the settled
- *     journal-print technique — the only way bytes are observable over the wire).
+ *     journal-print technique, the only way bytes are observable over the wire).
  *   - standing signals: snapshots()[i].{holding (debounced), csActive (raw)} and
- *     waitStates() — `stalled`/`waiting` are REMOVED (settled signal rework).
+ *     waitStates(), `stalled`/`waiting` are REMOVED (settled signal rework).
  *
  * Pause model (settled): stop() gates the churn GENERATOR only (ADR-0020); it
  * NEVER aborts an in-flight command. reset() voids in-flight rounds via the
@@ -44,7 +44,7 @@ const countLines = (journal, substr) => journal.filter((j) => j.text.includes(su
 const hashLines = (journal, tag) => journal.filter((j) => j.text.startsWith(tag)).map((j) => j.text);
 
 // A command that writes `name` then prints an FNV-1a content hash of it into the
-// journal — the settled cross-FS byte-identity probe (no byte side-channel).
+// journal, the settled cross-FS byte-identity probe (no byte side-channel).
 function hashingWrite(name, size, tag = 'HASH') {
   return `await writeFile('${name}', ${size}); { const b = await fs.read('${name}'); let x = 2166136261 >>> 0; for (let i = 0; i < b.length; i++) { x ^= b[i]; x = Math.imul(x, 16777619) >>> 0; } print('${tag} ${name} ' + x); }`;
 }
@@ -62,7 +62,7 @@ async function assertCrossFsIdentical(rig, tag, label) {
 // [1] exactly-once dispatch: N distinct commands each execute exactly once per
 // session, and both FS end byte-identical. The core no-double-execution
 // invariant, re-expressed in-band. Mutation-proven via a scratch worker-host
-// copy (FV_WORKER_HOST) that drops the in-flight re-entrancy guard — see
+// copy (FV_WORKER_HOST) that drops the in-flight re-entrancy guard, see
 // LANE-REPORT.md "Mutation evidence".
 // ============================================================================
 async function scenarioExactlyOnce() {
@@ -141,7 +141,7 @@ async function scenarioResetReproducible() {
 // ============================================================================
 // [4] a rejecting (throwing) command releases the lock and the coordinator
 // recovers. OLD scenario 4. Settled model: a thrown command is logged
-// ('command error: …'), still reaches quiescence (I1 — a runaway can't wedge
+// ('command error: …'), still reaches quiescence (I1, a runaway can't wedge
 // the pump), and the NEXT command executes normally.
 // ============================================================================
 async function scenarioRejectingCommand() {
@@ -163,7 +163,7 @@ async function scenarioRejectingCommand() {
 }
 
 // ============================================================================
-// [5/6] stop() gates the GENERATOR only — a paused command COMPLETES, never
+// [5/6] stop() gates the GENERATOR only, a paused command COMPLETES, never
 // aborts/rewinds (settled model; the old stop-aborts-churn-step / stop-aborts-
 // command-mid-drain scenarios are reframed). We start a command, stop() while
 // it is in flight, and assert it still completes exactly once and both FS stay
@@ -183,7 +183,7 @@ async function scenarioStopGatesGeneratorOnly() {
   for (const fsId of FS_ORDER) {
     const j = await pullJournal(rig, fsId);
     const a = countLines(j, 'write(s5a.bin'), b = countLines(j, 'write(s5b.bin');
-    if (a !== 1 || b !== 1) fail(`s5/6: ${fsId} paused command did not complete exactly once (s5a×${a}, s5b×${b}) — stop() must not abort/rewind`);
+    if (a !== 1 || b !== 1) fail(`s5/6: ${fsId} paused command did not complete exactly once (s5a×${a}, s5b×${b}), stop() must not abort/rewind`);
     else ok(`s5/6: ${fsId} the in-flight command completed exactly once despite stop() (generator-only pause)`);
   }
   await assertCrossFsIdentical(rig, 'HASH', 's5/6');
@@ -218,38 +218,40 @@ async function scenarioReseatBurst() {
   let sawBehindHold = false;
   await run(rig, 10, () => { const s = snapById(rig); if (s[behind].holding) sawBehindHold = true; });
   const curAfter = rig.byId[behind].acked.cursor;
-  if (!(curAfter > curBefore)) fail(`s7: behind FS ${behind} did not advance after Pace->Race (cursor ${curBefore}->${curAfter}) — reseat wrong`);
-  else ok(`s7: behind FS ${behind} burst forward on reseat (cursor ${curBefore}->${curAfter}) — burned its headroom`);
+  if (!(curAfter > curBefore)) fail(`s7: behind FS ${behind} did not advance after Pace->Race (cursor ${curBefore}->${curAfter}), reseat wrong`);
+  else ok(`s7: behind FS ${behind} burst forward on reseat (cursor ${curBefore}->${curAfter}), burned its headroom`);
   if (sawBehindHold) fail(`s7: behind FS ${behind} read holding while catching up (it is running, not frozen)`);
   else ok(`s7: behind FS ${behind} never read holding while bursting (nothing freezes in Race)`);
 }
 
 // ============================================================================
-// [9] opsPerSec tracks WORKLOAD ops (drained fileOpCount), never flash ops.
-// OLD scenario 9. In Pace both FS consume steps in lockstep, so opsPerSec must
-// track together across FS even though their flash-op costs differ. (The
-// coordinator computes opsPerSec from acked.fileOpCount; a mutation to flash
-// ops would skew the two — provable via a scratch FV_COORDINATOR copy.)
+// [9] opsPerSec = drained fileOpCount per SIMULATED flash-second (never flash ops,
+// never wall clock). In Pace both FS do equal fileops (cursor lockstep), but littlefs
+// spends MORE sim-time per op, so it reads a LOWER ops/sim-second (less efficient),
+// it must NEVER read higher. A flash-op mutation (opsPerSec keyed on flash ops) would
+// INVERT this: the chatty FS (littlefs, far more flash ops) would inflate above the
+// cheap FS. So "chatty FS not inflated" is the workload-vs-flash guard under the
+// sim-time metric. Speed-invariance is s18.
 // ============================================================================
 async function scenarioOpsPerSec() {
-  console.log('\n[9] opsPerSec tracks workload fileOpCount, not flash ops (Pace lockstep => equal-ish rate)');
-  const rig = await makeRig({ speed: Infinity });
+  console.log('\n[9] opsPerSec is fileops per SIM-second (workload/sim-time), chatty FS never inflated');
+  const rig = await makeRig({ speed: 1e6 });        // finite (real-time); Infinity is now clamped anyway
   rig.coord.setMode('pace');
   rig.coord.start();
-  await run(rig, 60);
+  await run(rig, 120);
   const s = snapById(rig);
   const ff = s.fastffs, lf = s.littlefs;
   if (ff.stepCursor !== lf.stepCursor) fail(`s9: pace cursors not in lockstep (${ff.stepCursor} vs ${lf.stepCursor})`);
   else ok(`s9: workload cursors in lockstep at ${ff.stepCursor} (steps consumed 1:1)`);
   // fileOpCount tracks workload; both should be equal in Pace lockstep.
-  if (ff.fileOpCount !== lf.fileOpCount) fail(`s9: fileOpCount differs across FS in Pace lockstep (${ff.fileOpCount} vs ${lf.fileOpCount}) — not workload-tracked?`);
+  if (ff.fileOpCount !== lf.fileOpCount) fail(`s9: fileOpCount differs across FS in Pace lockstep (${ff.fileOpCount} vs ${lf.fileOpCount}), not workload-tracked?`);
   else ok(`s9: fileOpCount equal across FS (${ff.fileOpCount}) despite differing flash cost`);
   if (!(ff.opsPerSec > 0) || !(lf.opsPerSec > 0)) { fail(`s9: opsPerSec not positive during an active run (ff ${ff.opsPerSec}, lf ${lf.opsPerSec})`); return; }
-  // the two rates track the SAME workload; allow EMA slop but they must be close, and
-  // NOT skewed by the flash-op ratio (littlefs is much chattier on flash).
-  const rel = Math.abs(ff.opsPerSec - lf.opsPerSec) / Math.max(ff.opsPerSec, lf.opsPerSec);
-  if (rel > 0.25) fail(`s9: opsPerSec diverges across FS (ff ${ff.opsPerSec.toFixed(1)}, lf ${lf.opsPerSec.toFixed(1)}, ${(rel * 100).toFixed(0)}% apart) — measuring flash ops, not workload?`);
-  else ok(`s9: opsPerSec tracks across FS within ${(rel * 100).toFixed(0)}% (ff ${ff.opsPerSec.toFixed(1)}, lf ${lf.opsPerSec.toFixed(1)}) — the workload-op rate`);
+  // littlefs is chattier on flash (more sim-time per op), so per SIM-second it does the
+  // SAME fileops over MORE seconds => a LOWER rate. It must never read higher than the
+  // cheap FS (that inversion is exactly the flash-op mutation this guards).
+  if (lf.opsPerSec > ff.opsPerSec * 1.05) fail(`s9: chatty FS littlefs read a HIGHER ops/sim-second (${lf.opsPerSec.toFixed(1)}) than fastffs (${ff.opsPerSec.toFixed(1)}), opsPerSec is measuring flash ops, not workload/sim-time`);
+  else ok(`s9: chatty FS not inflated (fastffs ${ff.opsPerSec.toFixed(1)} >= littlefs ${lf.opsPerSec.toFixed(1)} ops/sim-second), workload per sim-time, not a flash-op rate`);
 }
 
 // ============================================================================
@@ -257,7 +259,7 @@ async function scenarioOpsPerSec() {
 // model: holding sustained+debounced, csActive raw per-frame; NO stalled/
 // waiting). lane C's coord-wire-test proves the signal ALGEBRA against mock
 // workers; this asserts the same signals surface correctly for REAL WASM
-// sessions — the laggard-safe invariant (a still-executing FS never reads
+// sessions, the laggard-safe invariant (a still-executing FS never reads
 // holding) and csActive tracking real playback advance.
 // ============================================================================
 async function scenarioSignalsRealBackend() {
@@ -279,13 +281,13 @@ async function scenarioSignalsRealBackend() {
     if (x.fastffs.csActive) ffActive++;
     if (x.littlefs.csActive) lfActive++;
     // in Race the pricier FS is the laggard on playback; while its gate is open it is
-    // running, not frozen — it must not read holding.
+    // running, not frozen, it must not read holding.
     const laggard = x.fastffs.simNs <= x.littlefs.simNs ? 'littlefs' : 'fastffs';
     if (x[laggard].holding && x[laggard].csActive) laggardHeld = true;
     if (x.fastffs.holding && x.littlefs.holding) both++;
   });
   if (ffActive < NF * 0.4 || lfActive < NF * 0.4) fail(`s11: csActive rarely fired while running (ff ${ffActive}/${NF}, lf ${lfActive}/${NF})`);
-  else ok(`s11: csActive fired on most running frames (ff ${ffActive}/${NF}, lf ${lfActive}/${NF}) — the real-time blinky`);
+  else ok(`s11: csActive fired on most running frames (ff ${ffActive}/${NF}, lf ${lfActive}/${NF}), the real-time blinky`);
   if (laggardHeld) fail('s12: a session read holding=true AND csActive=true (a frozen FS must not be advancing)');
   else ok('s12: holding and csActive never both true on one FS (mutually exclusive, laggard-safe)');
   // stop the generator, then let the fixed backlog fully drain to idle (in Race the
@@ -306,7 +308,7 @@ async function scenarioSignalsRealBackend() {
 // OLD scenario 16(b)/(c). A command parked mid-flight when reset() bumps the
 // epoch must not land in the fresh epoch. We park a command at a test-held gate
 // (the gate is in-realm test rigging, visible to the compiled command since the
-// mock transport shares the process — see LANE-REPORT.md), reset, then release:
+// mock transport shares the process, see LANE-REPORT.md), reset, then release:
 // the zombie's post-gate write must never appear on the fresh chip.
 // ============================================================================
 async function scenarioResetAbandonsMidFlight() {
@@ -381,8 +383,39 @@ async function scenarioRaceMaxSpeedBound() {
   else ok('s17: both FS ran flat-out at MAX speed (metered against the finite ceiling)');
 }
 
+// ============================================================================
+// [18] opsPerSec is SPEED-INVARIANT (ops per SIMULATED second). The SAME workload
+// run at scale S and at scale S/4 must yield the SAME opsPerSec, because the metric
+// is fileops per sim-second (a workload density in sim-time), not per wall-second.
+// A wall-clock computation reads a DIFFERENT rate at the two speeds (it counts ops per
+// real second, which slow-mo changes); the sim-time metric does not. Verified
+// load-bearing: a wall-clock mutant of sampleRates fails this (>20% apart under the
+// harness clock), the sim-time metric holds within a few %. Real WASM, deterministic.
+// ============================================================================
+async function runToSimSeconds(scale, simNs, maxFrames = 3000) {
+  const rig = await makeRig({ speed: scale });
+  rig.coord.setMode('race');
+  rig.coord.start();
+  // let each FS accumulate `simNs` of playback so the sim-time EMA (tau = 2 sim-sec)
+  // settles to the same physical window at either speed.
+  await pumpUntil(rig, () => Math.min(...rig.proxies.map((p) => p.acked.playbackNs)) >= simNs, `sim@${scale}`, maxFrames);
+  return snapById(rig).fastffs.opsPerSec;
+}
+async function scenarioOpsPerSecSpeedInvariant() {
+  console.log('\n[18] opsPerSec is speed-invariant: same workload at scale S and S/4 reads the same rate');
+  const S = 4e6, SIM = 5e9;                 // 5 sim-seconds (> 2 tau) so the EMA settles at both speeds
+  const rateHi = await runToSimSeconds(S, SIM);
+  const rateLo = await runToSimSeconds(S / 4, SIM);
+  if (!(rateHi > 0) || !(rateLo > 0)) { fail(`s18: opsPerSec not positive (S ${rateHi}, S/4 ${rateLo})`); return; }
+  const rel = Math.abs(rateHi - rateLo) / Math.max(rateHi, rateLo);
+  // sim-invariant => within EMA/workload slop (a few %). A wall-clock metric drifts with
+  // speed (a wall-clock mutant reads >20% apart here); 10% cleanly separates the two.
+  if (rel > 0.1) fail(`s18: opsPerSec changed with speed (S ${rateHi.toFixed(1)}, S/4 ${rateLo.toFixed(1)}, ${(rel * 100).toFixed(0)}% apart), still keyed on wall clock, not sim time`);
+  else ok(`s18: opsPerSec speed-invariant within ${(rel * 100).toFixed(0)}% (S ${rateHi.toFixed(1)} vs S/4 ${rateLo.toFixed(1)} ops/sim-second), a wall-clock metric drifts with speed`);
+}
+
 // ---- run all ----
-console.log('ADR-0024 concurrency suite — REAL coordinator + REAL worker host + REAL WASM over the wire\n');
+console.log('ADR-0024 concurrency suite, REAL coordinator + REAL worker host + REAL WASM over the wire\n');
 await scenarioExactlyOnce();
 await scenarioResetReproducible();
 await scenarioRejectingCommand();
@@ -392,6 +425,7 @@ await scenarioOpsPerSec();
 await scenarioSignalsRealBackend();
 await scenarioResetAbandonsMidFlight();
 await scenarioRaceMaxSpeedBound();
+await scenarioOpsPerSecSpeedInvariant();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
