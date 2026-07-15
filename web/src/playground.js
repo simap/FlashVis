@@ -243,7 +243,11 @@ async function boot() {
       card.setAttribute('aria-pressed', String(snap.fsId === focusedFsId));
       const good = goodOf(snap);
       card.classList.toggle('leader', leaderGood > 0 && good >= leaderGood);
-      $('fsHold-' + snap.fsId).textContent = mode === 'race' ? '◷ waiting' : '◷ holding';
+      // B3: the label always reads "holding" — it's the debounced `holding`
+      // signal (spec/ui.md "Holding" card) that drives VISIBILITY (the
+      // `.fs.waiting` class toggle below, in the waitStates loop), not the
+      // mode. A mode-hardcoded "waiting" string could show even when
+      // nothing is actually waiting.
       $('fsV-' + snap.fsId).textContent = mode === 'race' ? String(snap.fileOpCount) : fmtTime(snap.simNs);
       $('fsL-' + snap.fsId).textContent = mode === 'race' ? 'ops done' : 'flash time';
       $('fsBar-' + snap.fsId).style.width = (leaderGood > 0 ? Math.round((good / leaderGood) * 100) : 0) + '%';
