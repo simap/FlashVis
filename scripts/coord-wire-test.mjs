@@ -5,14 +5,20 @@
  * protocol.js message envelopes, over the faithful mock transport (structuredClone +
  * async queued delivery), against a pair of mock session workers. NO WASM, NO real
  * session — the point is to prove the §2 clock-release algebra and its grant/ack/round
- * barrier end to end, and that holding/stalled/waiting are correctly DERIVED from ack
- * state alone (the old synchronous device/pending reads are gone).
+ * barrier end to end, and that the standing signals are correctly DERIVED from ack
+ * state alone (the old synchronous device/pending reads are gone): `holding` (the
+ * SUSTAINED fast-FS-frozen-at-the-join wait, debounced) and `csActive` (the RAW
+ * per-frame CS-pin blinky). See spec/ui.md for the two contracts.
  *
  * Two workers model a "cheap" FS (fastffs, 1e6 ns/op) and a "pricey" FS (littlefs,
  * 5e6 ns/op) so a Race under an identical playback ceiling diverges in step count
  * while playback stays level — the ADR-0016 comparison — and a Pace stays in cursor
  * lockstep while playback (cost) diverges.
  */
+// Deterministic default for the fake-clock _tick polling: no hold debounce, so the
+// raw hold predicate passes straight through to `holding`. The debounce timing itself
+// is checked separately (testHoldDebounce, which flips this back on real time).
+globalThis.__flashvisHoldShowMs = 0;
 import { createTransport, flushTurns } from './mock-worker-transport.mjs';
 import { createMockWorker } from './mock-worker.mjs';
 import { createSessionProxy } from '../web/src/session-proxy.js';
@@ -131,32 +137,37 @@ async function testPaceLockstep() {
 }
 
 // ---------------------------------------------------------------------------
-async function testPaceCommandAndHolding() {
-  console.log('\n[5] PACE: multi-op command — faster FS finishes the step first and reads HOLDING');
-  // finite speed + a chunk between the two per-op costs so the cheap FS drains the
-  // command a grant before the pricey one -> a real holding window.
-  const rig = makeRig({ speed: 120000, units: { fastffs: 1e6, littlefs: 3e6 } });   // chunk ≈ 2e6 ns/frame
+// (a) The SUSTAINED Pace hold (the product's whole point): a fast FS finishes the
+// shared step and sits FROZEN at the join — for many consecutive frames — while the
+// slow peer grinds. Speed is chosen so chunk sits BETWEEN the two per-op costs, so the
+// fast FS clears the multi-op step in a couple of frames and the slow FS takes many.
+async function testSustainedPaceHold() {
+  console.log('\n[5] PACE: sustained hold — fast FS frozen at the join for many frames while slow grinds');
+  const rig = makeRig({ speed: 180000, units: { fastffs: 1e6, littlefs: 5e6 } });   // chunk ≈ 3e6: fast ≥3 ops/frame, slow ~1
   await flushTurns(4);
   rig.coord.setMode('pace');
-  const { index } = rig.coord.broadcast({ ops: [1, 1, 1, 1] }, 'cmd x4');
-  let sawFastHolding = false, sawSlowHolding = false, sawAnimatingHold = false;
-  await run(rig, 60, () => {
+  const { index } = rig.coord.broadcast({ ops: Array(12).fill(1) }, 'cmd x12');       // a heavy multi-op step
+  let fastHoldRun = 0, maxFastHoldRun = 0, sawSlowHold = false, sawFastFrozenActive = false, sawCleared = false, everFastHeld = false;
+  await run(rig, 120, () => {
     const s = snapById(rig);
-    if (s.fastffs.holding && !s.littlefs.holding) sawFastHolding = true;
-    if (s.littlefs.holding && !s.fastffs.holding) sawSlowHolding = true;
-    // the laggard (still draining the command) must NEVER read holding
-    const slowStillWorking = rig.byId.littlefs.acked.entriesDrained < index;
-    if (slowStillWorking && s.littlefs.holding) sawAnimatingHold = true;
+    const slowStillOnStep = rig.byId.littlefs.acked.entriesDrained < index;   // slow hasn't finished the command
+    // fast holds while slow still works the same step
+    if (s.fastffs.holding && !s.littlefs.holding) { fastHoldRun += 1; maxFastHoldRun = Math.max(maxFastHoldRun, fastHoldRun); everFastHeld = true; }
+    else { if (everFastHeld && !s.fastffs.holding && !slowStillOnStep) sawCleared = true; fastHoldRun = 0; }
+    if (s.littlefs.holding && slowStillOnStep) sawSlowHold = true;             // the laggard must NEVER read holding
+    if (s.fastffs.holding && s.fastffs.csActive) sawFastFrozenActive = true;   // a held FS is frozen -> csActive must be false
   });
   const drained = FS_ORDER.every((f) => rig.byId[f].acked.entriesDrained >= index);
   if (!drained) fail(`pace command not drained on both (entriesDrained ${FS_ORDER.map((f) => rig.byId[f].acked.entriesDrained)})`);
   else ok('pace command drained on both workers');
-  if (!sawFastHolding) fail('cheap FS never read holding while the pricey FS was still draining the command');
-  else ok('cheap FS read holding while pricey FS still worked the shared step (derived from acks)');
-  if (sawSlowHolding) fail('pricey FS (the laggard) wrongly read holding while it was the one still working');
-  else ok('pricey FS never read holding while it was the laggard (correct: only the one waited-ON is idle)');
-  if (sawAnimatingHold) fail('the still-draining FS read holding (the wrong-FS holding bug)');
-  else ok('a still-draining FS never read holding');
+  if (maxFastHoldRun < 3) fail(`fast FS hold was a flicker, not sustained (longest run ${maxFastHoldRun} frames) — the join hold is meant to persist`);
+  else ok(`fast FS held FROZEN at the join for ${maxFastHoldRun} consecutive frames while slow ground the step (the sustained Pace hold)`);
+  if (sawSlowHold) fail('slow FS (the laggard) wrongly read holding while it was the one still working');
+  else ok('slow FS never read holding while it was the laggard (only the waited-ON fast FS holds)');
+  if (sawFastFrozenActive) fail('a holding FS also read csActive=true (a frozen FS must not read active)');
+  else ok('the holding FS read csActive=false throughout (frozen, not advancing)');
+  if (!sawCleared) fail('fast FS hold never cleared after the step advanced');
+  else ok('fast FS hold cleared once the shared step advanced (join released)');
 }
 
 // ---------------------------------------------------------------------------
@@ -174,25 +185,117 @@ async function testReseatBurstNoStall() {
   ok(`pace diverged playback: fastffs ${(before.fastffs / 1e6).toFixed(0)}ms, littlefs ${(before.littlefs / 1e6).toFixed(0)}ms (gap ${(gap / 1e6).toFixed(0)}ms); ${behind} is behind`);
   const curBefore = rig.byId[behind].acked.cursor;
   rig.coord.setMode('race');
-  // one race frame: the behind FS should BURST (cursor jumps) as it burns its extra
-  // headroom (rel − (acked − baseline) ≥ chunk) toward the leader's ceiling.
-  let sawBehindStalled = false;
-  await run(rig, 6, () => {
+  // race frames: the behind FS should BURST (cursor jumps) as it burns its extra
+  // headroom (rel − (acked − baseline) ≥ chunk) toward the leader's ceiling. Nothing is
+  // frozen in Race, so NO session should read a sustained hold (spec: steady Race won't
+  // fire) and the behind FS — the one running — must never read holding.
+  let maxHoldRun = 0, holdRun = 0, sawBehindHold = false;
+  await run(rig, 8, () => {
     const s = snapById(rig);
-    if (s[behind].stalled) sawBehindStalled = true;
+    const anyHold = s.fastffs.holding || s.littlefs.holding;
+    holdRun = anyHold ? holdRun + 1 : 0;
+    maxHoldRun = Math.max(maxHoldRun, holdRun);
+    if (s[behind].holding) sawBehindHold = true;
   });
   const curAfter = rig.byId[behind].acked.cursor;
   if (!(curAfter > curBefore)) fail(`behind FS ${behind} did not advance after Pace→Race (cursor ${curBefore}→${curAfter}) — baseline reseat wrong`);
   else ok(`behind FS ${behind} burst forward on reseat (cursor ${curBefore}→${curAfter}) — burned its headroom toward the leader (never slow the leader)`);
-  // and the LEADER should read stalled/waiting for a frame or two while it is metered
-  // to one chunk far above the field min (the §2 standing-signal for "held at ceiling").
-  let sawLeaderStall = false;
-  const leader = behind === 'fastffs' ? 'littlefs' : 'fastffs';
-  await run(rig, 1, () => { if (snapById(rig)[leader].stalled) sawLeaderStall = true; });
-  if (sawLeaderStall) ok(`leader ${leader} read stalled while metered at the ceiling above the field min`);
-  else ok(`(leader ${leader} re-leveled before a stall sample — §2 closes the gap fast; see LANE-REPORT on the standing-signal semantics)`);
-  if (sawBehindStalled) fail(`behind FS ${behind} read stalled while it was the one bursting to catch up (should never — it is running)`);
-  else ok(`behind FS ${behind} never read stalled while catching up (it is the one running)`);
+  if (sawBehindHold) fail(`behind FS ${behind} read holding while it was the one bursting to catch up (should never — it is running)`);
+  else ok(`behind FS ${behind} never read holding while catching up (it is running, not frozen)`);
+  if (maxHoldRun > 2) fail(`a sustained hold (${maxHoldRun} frames) fired in steady Race — §2 MAX means nothing stays frozen`);
+  else ok(`no sustained Race hold (max run ${maxHoldRun}) — a laggard burns headroom, it does not freeze`);
+}
+
+// ---------------------------------------------------------------------------
+// The OTHER catch-up direction the spec calls out: RACE→PACE. Race diverges cursors
+// (cheap FS leads); on the switch to Pace the LEAD FS is parked at the join until the
+// laggard climbs to its cursor — a sustained hold that clears on convergence.
+async function testRaceToPaceCatchupHold() {
+  console.log('\n[6b] RACE→PACE catch-up: the lead FS holds until the laggard converges');
+  // moderate finite speed so chunk sits between the two op costs -> cheap out-steps
+  // pricey by ~2/frame; stop the divergence early so the gap is small enough to fully
+  // converge under Pace's one-step-per-frame join within the frame budget.
+  const rig = makeRig({ speed: 180000, units: { fastffs: 1e6, littlefs: 5e6 } });
+  await flushTurns(4);
+  rig.coord.setMode('race');
+  rig.coord.start();
+  for (let i = 0; i < 30; i++) { await frame(rig); const s = snapById(rig); if (Math.abs(s.fastffs.stepCursor - s.littlefs.stepCursor) >= 8) break; }
+  const s0 = snapById(rig);
+  const lead = s0.fastffs.stepCursor >= s0.littlefs.stepCursor ? 'fastffs' : 'littlefs';
+  const lag = lead === 'fastffs' ? 'littlefs' : 'fastffs';
+  if (s0[lead].stepCursor <= s0[lag].stepCursor) { fail('precondition: Race did not create a cursor lead'); return; }
+  ok(`Race left a cursor lead: ${lead} at ${s0[lead].stepCursor}, ${lag} at ${s0[lag].stepCursor}`);
+  rig.coord.stop();                     // stop generating new churn so the frontier is fixed and the laggard can converge
+  rig.coord.setMode('pace');
+  let sawLeadHold = false, holdRun = 0, maxHoldRun = 0;
+  await run(rig, 400, () => {
+    const s = snapById(rig);
+    if (s[lead].holding && !s[lag].holding) { sawLeadHold = true; holdRun += 1; maxHoldRun = Math.max(maxHoldRun, holdRun); }
+    else holdRun = 0;
+  });
+  if (!sawLeadHold) fail(`lead FS ${lead} never read holding after Race→Pace while the laggard caught up`);
+  else ok(`lead FS ${lead} read holding (sustained ${maxHoldRun} frames) while ${lag} caught up (mode-switch catch-up hold)`);
+  const s1 = snapById(rig);
+  if (s1.fastffs.stepCursor !== s1.littlefs.stepCursor) fail(`cursors did not converge (${s1.fastffs.stepCursor} vs ${s1.littlefs.stepCursor})`);
+  else if (s1[lead].holding) fail('lead FS still holding after cursors converged (hold did not clear)');
+  else ok('hold cleared once cursors converged (join satisfied)');
+}
+
+// ---------------------------------------------------------------------------
+// (b) csActive: RAW per-frame — true on a frame the session's playback advanced,
+// false while frozen / idle. No debounce.
+async function testCsActive() {
+  console.log('\n[9] csActive: raw per-frame blinky — true while playback advances, false while frozen/idle');
+  const rig = makeRig({ speed: Infinity });
+  await flushTurns(4);
+  // idle (not running, no work): csActive false for both
+  await run(rig, 3);
+  let s = snapById(rig);
+  if (s.fastffs.csActive || s.littlefs.csActive) fail(`csActive true while idle with no work (${s.fastffs.csActive}, ${s.littlefs.csActive})`);
+  else ok('csActive false while idle (no playback advance)');
+  // running Race: both advance playback most frames -> csActive true frequently
+  rig.coord.setMode('race');
+  rig.coord.start();
+  let fastActiveFrames = 0, slowActiveFrames = 0, N = 20;
+  await run(rig, N, () => { const x = snapById(rig); if (x.fastffs.csActive) fastActiveFrames++; if (x.littlefs.csActive) slowActiveFrames++; });
+  if (fastActiveFrames < N * 0.5 || slowActiveFrames < N * 0.5) fail(`csActive rarely true while running (fast ${fastActiveFrames}/${N}, slow ${slowActiveFrames}/${N})`);
+  else ok(`csActive true on most running frames (fast ${fastActiveFrames}/${N}, slow ${slowActiveFrames}/${N}) — the real-time blinky`);
+  // stop generation + reset to a clean idle chip (no queued frontier) -> csActive false
+  rig.coord.stop();
+  rig.coord.reset();
+  await flushTurns(4);
+  await run(rig, 4);
+  s = snapById(rig);
+  if (s.fastffs.csActive || s.littlefs.csActive) fail(`csActive still true after reset to idle (${s.fastffs.csActive}, ${s.littlefs.csActive})`);
+  else ok('csActive false again once reset to an idle chip (playback frozen)');
+}
+
+// ---------------------------------------------------------------------------
+async function testHoldDebounce() {
+  console.log('\n[10] holding is DEBOUNCED (~300ms): raw hold does not light the card immediately');
+  const savedSeam = globalThis.__flashvisHoldShowMs;
+  globalThis.__flashvisHoldShowMs = 300;                 // real ~300ms debounce for this test only
+  try {
+    const rig = makeRig({ speed: Infinity });
+    await flushTurns(4);
+    rig.coord.setMode('race');
+    rig.coord.start();
+    await run(rig, 30);                                   // diverge cursors
+    const s0 = snapById(rig);
+    const lead = s0.fastffs.stepCursor >= s0.littlefs.stepCursor ? 'fastffs' : 'littlefs';
+    rig.coord.stop();
+    rig.coord.setMode('pace');                            // lead FS enters a sustained raw hold NOW
+    await frame(rig);
+    if (snapById(rig)[lead].holding) fail('holding lit on the very first frame of a fresh hold — not debounced');
+    else ok('holding NOT lit immediately when the raw hold begins (debounce engaged)');
+    // let ~350ms of real wall-time pass while the hold persists, ticking as we go
+    const t0 = Date.now();
+    while (Date.now() - t0 < 360) await frame(rig);
+    if (!snapById(rig)[lead].holding) fail('holding never lit after the raw hold persisted > 300ms (debounce stuck)');
+    else ok('holding lit after the raw hold persisted past ~300ms (debounce released)');
+  } finally {
+    globalThis.__flashvisHoldShowMs = savedSeam;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -248,19 +351,47 @@ async function testResetEpochDiscard() {
   else ok('coordinator ran cleanly on the fresh epoch');
 }
 
+// ---------------------------------------------------------------------------
+// Boot / header-Reset flow (spec/ui.md): reset() bumps epoch → worker rebuilds a fresh
+// (blanked) chip; the ONE real format ships as a broadcast command AFTER reset (no
+// format wire field); a header Reset NEVER switches race/pace mode.
+async function testBootResetFlow() {
+  console.log('\n[11] boot/header-Reset flow: reset→blank, format-as-broadcast, mode preserved');
+  const rig = makeRig({ speed: Infinity });
+  await flushTurns(4);
+  rig.coord.setMode('race');                     // set a non-default mode
+  const modeBefore = rig.coord.mode;
+  rig.coord.reset();                             // header Reset
+  if (rig.coord.mode !== modeBefore) fail(`reset() switched mode ${modeBefore}→${rig.coord.mode} — spec says it must not`);
+  else ok(`reset() preserved mode '${modeBefore}' (header Reset never switches race/pace)`);
+  // the boot sequence: broadcast the ONE format command right after reset
+  const { index } = rig.coord.broadcast({ ops: [1, 1] }, 'format()');
+  if (index !== 0) fail(`format command not at the frontier index 0 after reset (got ${index})`);
+  else ok('format command queued at index 0 on the fresh sequence');
+  rig.coord.start();
+  await run(rig, 20);
+  if (!FS_ORDER.every((f) => rig.byId[f].acked.entriesDrained >= 0)) fail('post-reset format command did not execute on every worker');
+  else ok('post-reset format command executed on every worker (boot flow works without a format wire field)');
+}
+
 // ---- run all ----
 console.log('ADR-0024 coordinator-over-the-wire suite (mock transport + mock workers)');
 await testHandshake();
 await testRaceDivergence();
 await testRaceCommand();
 await testPaceLockstep();
-await testPaceCommandAndHolding();
+await testSustainedPaceHold();
 await testReseatBurstNoStall();
+await testRaceToPaceCatchupHold();
 await testGrantContinuityNoAccumulation();
 await testResetEpochDiscard();
+await testCsActive();
+await testHoldDebounce();
+await testBootResetFlow();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
-console.log('PASS - Race + Pace both drive the mock-worker pair over the wire with correct');
-console.log('       grant/ack/round semantics; holding/stalled/waiting derived from acks.');
+console.log('PASS - Race + Pace drive the mock-worker pair over the wire with correct');
+console.log('       grant/ack/round semantics; holding (sustained, debounced) + csActive');
+console.log('       (raw per-frame) derived from acks; boot/reset flow intact.');
 process.exit(0);
