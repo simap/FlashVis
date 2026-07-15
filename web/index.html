@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FLASHVIS — flash filesystems on NOR, live</title>
+<title>FLASHVIS: flash filesystems on NOR, live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -464,6 +464,10 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 .btn.primary{background:var(--prog);color:#241a06;border-color:var(--prog);font-weight:600}
 .btn.primary:hover{background:var(--prog-edge)}
 .btn .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+/* docbtn: non-interactive button-look for inline references in prose (about panel). No hover/active/focus/cursor. Use .docbtn or .docbtn.primary; optional inner .dot. */
+.docbtn{font-family:inherit;font-size:.9em;color:var(--txt);background:var(--chrome);border:1px solid var(--line);border-radius:5px;padding:1px 5px;display:inline-flex;align-items:center;gap:5px;vertical-align:middle;cursor:default}
+.docbtn.primary{background:var(--prog);color:#241a06;border-color:var(--prog);font-weight:600}
+.docbtn .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
 .toggle{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:10.5px;letter-spacing:.05em;cursor:pointer;user-select:none}
 .toggle input{position:absolute;opacity:0;pointer-events:none}
 .tswitch{width:32px;height:17px;border-radius:10px;background:var(--chrome);border:1px solid var(--line);position:relative;transition:.15s}
@@ -695,43 +699,34 @@ dialog.about[open]{animation:aboutIn .18s ease}
   <div class="about-body">
     <section class="about-sec">
       <p><span class="wordmark">FLASH<b>VIS</b></span> runs <span class="k">real embedded filesystems</span>, compiled to
-      <b>WebAssembly</b>, against an emulation of an SPI NOR flash chip. Every read, program, and
-      erase lights up the <b>die</b> under real NOR flash rules, so you can watch and compare how
+      <b>WebAssembly</b>, against an emulated NOR flash chip that lets you see where the data ends up and where operations work. 
+      Every read, program, and erase lights up the <b>die</b>, so you can watch and compare how
       filesystems behave. It exists to show how
       <a href="https://github.com/simap/FASTFFS" target="_blank" rel="noopener">FASTFFS</a>, a new
-      NOR flash filesystem, works next to others like LittleFS.</p>
+      NOR flash filesystem, works next to others.</p>
+      <p>Hit <b class="docbtn primary">Run</b> to see it in action.</p>
+      <p>The filesystem cards in the header switch the view: click one to focus its die and
+      compare the same workload on each.</p>
     </section>
 
     <section class="about-sec">
-      <h3>You are looking at a SPI NOR flash chip</h3>
+      <h3>You are looking at NOR flash - sectors and pages</h3>
       <p>The chip die visualization grid shows <b>256 KB</b> of NOR flash: <b>64 sectors</b> of <b>4 KB</b>, each <b>16 pages</b>
       of <b>256 bytes</b>.</p> 
-      <p>Each die cell is one 256 byte page, and its <b>fill height</b> is the bytes programmed. Past that
-      physical fill, the die can also tint pages by <b>logical</b> roles the filesystem assigns: live
+      <p>The larger squares are sectors, each cell inside is one 256 byte page, and its <b>fill height</b> is the bytes programmed. Past that
+      physical fill, the die also tints pages by <b>logical</b> roles the filesystem assigns: live
       versus obsolete (which copy it still treats as current, not a physical byte state) and data
       versus metadata (file bytes versus the filesystem's own bookkeeping). The <b>wear heatmap</b> adds a
-      third view, tinting each sector by how many times it has been erased, so you can watch wear pool
-      into hotspots.</p>
-      <p>NOR flash has a few peculiarities:</p>
-      <ul>
-        <li>Erased data reads as <code>0xFF</code>.</li>
-        <li>Programming only clears bits from <code>1</code> to <code>0</code>, down to a byte at a time. You can keep
-        programming <code>1</code> bits into <code>0s</code> without erasing.</li>
-        <li>Setting bits back to <code>1</code> takes an <span class="k">erase</span>, and erase only works
-        on a whole <b>4 KB sector</b>. It is the slowest operation, and wears out the flash over time.</li>
-      </ul>
-      <p>Timing is based on measured performance using an <b>ESP32-S3</b>, and is used both for <b>flash
-      time</b> accounting and relative visual animation speeds: a 256 byte read is about <b>0.1 ms</b>, a
-      page program is about <b>1.5 ms</b>, and a sector erase is about <b>21 ms</b>. The <b>speed control</b> scales this
-      simulated flash time so you can watch it in super slomo, or speed it up to see how it behaves over time.</p>
+      third view, tinting each sector by how many times it has been erased, so you can watch for hotspots that might wear out early.</p>
     </section>
 
     <section class="about-sec">
       <h3>Two ways to drive it</h3>
-      <p><b>Run</b>, in the header, starts the <b>automated workload generator</b>: it creates, replaces,
+      <p><b class="docbtn primary">Run</b> starts the <b>automated workload generator</b>: it creates, replaces,
       and deletes files continuously to a roughly <b>steady state</b> of storage capacity, so you watch the 
-      die under a write heavy load. This is where most of the intersting action happens and where most
+      die under a write heavy load. This is where most of the interesting action happens and where most
       of the <b>divergent filesystem behavior</b> occurs.</p>
+      <p><b class="docbtn">Step</b> drives the automated workload generator one step at a time.</p>
       <p>The console and the poke buttons (<b>write</b>, <b>read</b>, <b>ls</b>, <b>delete</b>,
       <b>gc</b>, <b>format</b>) drive one action at a time, so you can watch a single operation on the
       die. Or put in a one liner to run a micro-benchmark. Type <code>help()</code> for the full command list.</p>
@@ -739,7 +734,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
 
     <section class="about-sec">
       <h3>Least time, or most ops</h3>
-      <p>The header sentence switches how the comparison reads. <b>Least time for equal ops</b> (pace)
+      <p>This toggle switches how the various filesystems are kept in sync. <b>Least time for equal ops</b> (pace)
       holds every filesystem to the same workload step, so the die images stay directly comparable,
       and tracks each one's active flash time: the same work, timed. <b>Most ops in equal time</b>
       (race) lets each filesystem run as fast as it can and counts how far it gets: equal time, more
@@ -748,13 +743,30 @@ dialog.about[open]{animation:aboutIn .18s ease}
     </section>
 
     <section class="about-sec">
+      <h3>NOR flash has a few peculiarities:</h3>
+      <ul>
+        <li>Erased data reads as <code>0xFF</code>.</li>
+        <li>Programming only clears bits from <code>1</code> to <code>0</code>, down to a byte at a time. You can keep
+        programming <code>1</code> bits into <code>0s</code> without erasing.</li>
+        <li>Setting bits back to <code>1</code> takes an <span class="k">erase</span>, and erase only works
+        on a whole <b>4 KB sector</b>. It is the slowest operation, and wears out the flash over time.</li>
+        <li>Most NOR flash chips are rated for 100,000 program/erase cycles per sector. Some flash, like the flash inside 
+          a microcontroller, might be rated for 10,000 or 1,000 cycles.</li>
+      </ul>
+      <p>Timing is based on measured performance using an <b>ESP32-S3</b>, and is used both for <b>flash
+      time</b> accounting and relative visual animation speeds: a 256 byte read is about <b>0.1 ms</b>, a
+      page program is about <b>1.5 ms</b>, and a sector erase is about <b>21 ms</b>. The <b>speed control</b> scales this
+      simulated flash time so you can watch it in super slomo, or speed it up to see how it behaves over time.</p>
+    </section>
+
+    <section class="about-sec">
       <h3>How the filesystems cope</h3>
-      <p><span class="wordmark">FLASH<b>VIS</b></span> compares five filesystems today &mdash;
+      <p><span class="wordmark">FLASH<b>VIS</b></span> compares five filesystems today:
       <b>FASTFFS</b>, <b>LittleFS</b>, <b>SPIFFS</b>, <b>JesFS</b>, and ChaN <b>FatFs</b> over the
-      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT+WL</b>) &mdash; with more
+      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT+WL</b>), with more
       planned. The first four are purpose-built for raw flash: they write new data into erased space
       and let superseded copies linger as <b>garbage</b> to reclaim later, since flash cannot cheaply
-      overwrite in place. FatFs is the outlier &mdash; a classic <b>overwrite-in-place</b> FAT
+      overwrite in place. FatFs is the outlier, a classic <b>overwrite-in-place</b> FAT
       filesystem that only runs on flash because a wear-levelling translation layer beneath it remaps
       and rotates sectors to imitate a rewritable disk.</p>
 
@@ -769,7 +781,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
         <li><b>Power-loss behavior is where they diverge.</b> FASTFFS and LittleFS are fully
         copy-on-write and fall back to the last known good state after an interrupted write. The
         log-structured SPIFFS and chain-structured JesFS recover their committed files on remount.
-        FatFs overwrites in place, so a write cut short &mdash; for example by a full volume &mdash;
+        FatFs overwrites in place, so a write cut short, for example by a full volume,
         can leave a file truncated.</li>
       </ul>
 
@@ -808,7 +820,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
       expensive, so it is not used here out of fairness.</p>
 
       <h4>SPIFFS</h4>
-      <p>SPIFFS is <b>log-structured</b> at a <b>256-byte page</b> granule &mdash; the same size as
+      <p>SPIFFS is <b>log-structured</b> at a <b>256-byte page</b> granule, the same size as
       one die cell, so its native map lines up one-to-one with the grid. Every 4&nbsp;KB block begins
       with an <b>object-lookup table</b>: a compact array with one entry per data page in the block,
       recording which object that page belongs to. That table is SPIFFS's <b>metadata</b> and its
@@ -818,50 +830,41 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <code>0</code>), leaving the page as garbage that lingers until its whole block is dead. Like
       FASTFFS, SPIFFS then reclaims in <b>bounded background steps</b>: a quick pass erases one block
       whose pages are all deleted, moving nothing. Because that step is small and churn-safe, SPIFFS
-      is the <b>other</b> filesystem the <b>background GC control</b> drives &mdash; turn it up and
+      is the <b>other</b> filesystem the <b>background GC control</b> drives. Turn it up and
       SPIFFS tidies more often between writes, just like FASTFFS. It also reclaims inline when free
       space runs tight.</p>
-      <p>SPIFFS's format erases the whole chip up front (FASTFFS's touches two sectors) &mdash; a
-      visible sweep on the die, but a one-time cost, often paid at the factory. The behavior that
-      matters here is everything after.</p>
 
       <h4>JesFS</h4>
       <p>JesFS organizes the chip as <b>chains of 4&nbsp;KB sectors</b>. Sector&nbsp;0 holds a master
       header plus the <b>file index</b>, an array of pointers to each file's start. A file's
       <b>HEAD</b> sector co-locates its metadata (name, length, CRC) with the first ~4&nbsp;KB of its
       data; longer files chain into further data sectors. Every sector carries a 4-byte <b>magic</b>
-      recording its state &mdash; which is exactly what the die coloring reads.</p>
-      <p>Deleting a file just rewrites those magics &mdash; the head to a <b>deleted</b> state, its
-      data sectors to a <b>to-delete</b> state &mdash; without erasing. Reclamation is entirely
+      recording its state, which is exactly what the die coloring reads.</p>
+      <p>Deleting a file just rewrites those magics, the head to a <b>deleted</b> state and its
+      data sectors to a <b>to-delete</b> state, without erasing. Reclamation is entirely
       <b>inline and just-in-time</b>: when a later write needs a fresh sector, the allocator sweeps
       forward (a rotating cursor that also levels wear) and erases the next to-delete sector right
       before reusing it. There is no separate GC pass, so the <b>background GC control</b> does
       nothing when JesFS is focused.</p>
-      <p>JesFS has no native <b>seek</b>, so seeking is emulated by rewinding and re-reading forward
-      &mdash; visible extra read traffic on the die. Filenames are capped at <b>21 characters</b>.</p>
 
       <h4>FAT+WL</h4>
-      <p>FatFs is the classic FAT filesystem &mdash; here, ChaN <b>FatFs</b> over the ESP-IDF
+      <p>FatFs is the classic FAT filesystem, here ChaN <b>FatFs</b> over the ESP-IDF
       <b>wear_levelling</b> FTL. FAT expects to <b>overwrite sectors in place</b> and does no erasing
       itself; it simply rewrites the FAT table and directory entries as files change. Flash cannot
       overwrite, so the wear_levelling layer beneath it does the real work: it remaps each logical
       sector to a physical one and rotates a spare <b>dummy</b> sector on every update, spreading
       repeated overwrites (including the constant FAT-table rewrites) across the die instead of
       hammering one spot.</p>
-      <p>That translation layer costs <b>4 of the 64 sectors</b> &mdash; its config, state, and dummy
-      sectors show up as <b>metadata</b> on the die &mdash; leaving a <b>240&nbsp;KB</b> logical
+      <p>That translation layer costs <b>4 of the 64 sectors</b>. Its config, state, and dummy
+      sectors show up as <b>metadata</b> on the die, leaving a <b>240&nbsp;KB</b> logical
       volume (about <b>224&nbsp;KB</b> usable as FAT12, 4&nbsp;KB clusters, two FAT copies). Deleting
       a file frees its clusters in the FAT, but the old bytes stay on the die as <b>garbage</b> until
       something reuses them; nothing reclaims proactively, so the <b>background GC control</b> is
       inert here too.</p>
       <p>The cost of overwrite-in-place is the headline. Driven through the same workload, FatFs
-      produces far more erasing than the log-structured designs &mdash; on one churn run about
-      <b>14,600</b> sector erases against roughly <b>1,000</b> for FASTFFS. And because FAT is not
+      produces far more erasing than the log-structured designs. And because FAT is not
       copy-on-write, a write interrupted by a full volume can leave a file truncated, where the
       log-structured filesystems fall back cleanly.</p>
-
-      <p>The filesystem cards in the header switch the view: click one to focus its die and
-      compare the same workload on each.</p>
     </section>
   </div>
 </dialog>
