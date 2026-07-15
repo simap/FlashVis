@@ -663,8 +663,16 @@ export function installWorkerHost(port, opts = {}) {
       ensureLiveness();
       if (cachedMap && livenessGen > (m.liveMap.since ?? -1)) payload.liveMap = { version: livenessGen, classes: cachedMap.slice() };
     }
+    // B19: the journal ring has the SAME one-past head / exclusive-since off-by-one
+    // as the events ring (B18) — the consumer feeds journalHead back as `since`
+    // (playground.js), so `id > since` drops the boundary tape line of every pull
+    // window; at slow-mo exactly one entry lands per window and it IS the dropped
+    // one, so tape lines go missing. Same inclusive-lower-bound bridge as events
+    // below. The consumer dedups by monotonic id (tapeSeen), and the bridge does
+    // not re-return already-seen ids across pulls anyway (next window is id >=
+    // reported head), so no duplicate tape lines.
     payload.journal = m.journal
-      ? (m.journal.newest ? journal.newest(m.journal.limit) : journal.since(m.journal.since, m.journal.limit))
+      ? (m.journal.newest ? journal.newest(m.journal.limit) : journal.since((m.journal.since ?? 0) - 1, m.journal.limit))
       : [];
     // B18: the events cursor the consumer sends back is the eventHead we last
     // reported — and eventHead is `nextId`, ONE PAST the highest id issued (§7).

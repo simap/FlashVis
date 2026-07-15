@@ -198,17 +198,22 @@ async function run() {
     await flushTurns(3);
     const SLOW = 30000;                          // ~33x slow-mo (real-time = 1e6)
     const chunk = SLOW * (1000 / 60);
-    let playLimitNs = 0, eventsSince = 0;
-    const seen = new Map();                       // id -> times surfaced
+    let playLimitNs = 0, eventsSince = 0, journalSince = 0;
+    const seen = new Map();                       // erase id -> times surfaced
+    const jseen = new Map();                       // journal id -> times surfaced on the wire (B19)
     let maxMs = 0;
     for (let fr = 0; fr < 2000; fr++) {
       playLimitNs += chunk;
       t3.mainPort.postMessage(msg(C2W.GRANT, { epoch: 20, round: fr + 1, entryLimit: gcEntries.length, playLimitNs, scale: SLOW }));
-      t3.mainPort.postMessage(msg(C2W.PULL, { epoch: 20, events: { since: eventsSince, limit: 400 } }));
+      // Pull BOTH streams with the head-as-since cursor convention (playground.js):
+      // eventsSince = frame.eventHead, journalSince = frame.journalHead.
+      t3.mainPort.postMessage(msg(C2W.PULL, { epoch: 20, events: { since: eventsSince, limit: 400 }, journal: { since: journalSince, limit: 400 } }));
       await flushTurns(2);                        // settle each frame (one PULL per frame, no pipelining)
       for (const f of w3.frame.splice(0)) {
         for (const ev of (f.events || [])) if (ev.kind === 'erase') { seen.set(ev.id, (seen.get(ev.id) || 0) + 1); maxMs = Math.max(maxMs, ev.ms); }
+        for (const j of (f.journal || [])) jseen.set(j.id, (jseen.get(j.id) || 0) + 1);
         if (f.eventHead != null) eventsSince = f.eventHead;   // the playground cursor convention (head fed back as since)
+        if (f.journalHead != null) journalSince = f.journalHead;
       }
       const ack = w3.grantAck[w3.grantAck.length - 1];
       if (ack && ack.entriesDrained >= gcEntries.length - 1) break;
@@ -221,6 +226,16 @@ async function run() {
     else fail(`B18: ${dups} erase(s) surfaced more than once — the cursor bridge over-returns`);
     if (maxMs > 300) ok(`B18: slow-mo erase holds for a long scaled ms (${maxMs.toFixed(0)}ms) — the 21ms erase is genuinely visible, not a MIN_ANIM flash`);
     else fail(`B18: slow-mo erase ms too short (${maxMs.toFixed(0)}ms) — duration not scaling with slow-mo`);
+    // B19: the same head-as-since cursor over the JOURNAL stream. Each write/gc entry
+    // journals an op line; at slow-mo one entry drains per pull window, so the boundary
+    // line was dropped pre-fix (missing tape lines). Assert every op line surfaces AND
+    // none is returned twice on the wire (the consumer also dedups via tapeSeen).
+    const jdups = [...jseen.values()].filter((n) => n > 1).length;
+    // 12 writes + 12 gc each emit an op line (gc's batch carries its erase) = 24 op lines.
+    if (jseen.size >= 20) ok(`B19: journal tape lines surface at slow-mo via the head-as-since cursor (${jseen.size} lines; pre-fix the boundary line of each window was dropped)`);
+    else fail(`B19: journal tape lines missing at slow-mo (got ${jseen.size}, expected ~24) — boundary-line drop regressed`);
+    if (jdups === 0) ok('B19: no journal line returned twice on the wire — the journal bridge does not duplicate tape lines');
+    else fail(`B19: ${jdups} journal line(s) returned more than once — the journal cursor bridge over-returns`);
   }
 
   console.log('');
