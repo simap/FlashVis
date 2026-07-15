@@ -269,7 +269,7 @@ async function boot() {
     const wrap = $('fsSet');
     const snaps = coordinator.snapshots();
     const mode = coordinator.mode;
-    const goodOf = (s) => (mode === 'race' ? (s.opsPerSec || 0) : (s.simNs > 0 ? s.fileOpCount / s.simNs : 0));
+    const goodOf = (s) => (mode === 'race' ? (s.opsPerSec || 0) : (s.flashTimeNs > 0 ? s.fileOpCount / s.flashTimeNs : 0));
     const leaderGood = snaps.reduce((m, s) => Math.max(m, goodOf(s)), 0);
     for (const snap of snaps) {
       if (!fsSetBuilt.has(snap.fsId)) { wrap.appendChild(fsCard(snap.fsId)); fsSetBuilt.add(snap.fsId); }
@@ -284,12 +284,13 @@ async function boot() {
       // mode. A mode-hardcoded "waiting" string could show even when
       // nothing is actually waiting.
       // Both totals ALWAYS show, in both modes (spec/ui.md "FS cards"): flash
-      // time (execution counter simNs) first, then ops (fileOpCount), equal
-      // weight. Only the bottom rate + leader bar switch by mode.
-      $('fsTime-' + snap.fsId).textContent = fmtTime(snap.simNs);
+      // time (PACED flashTimeNs, the §2 grant-bounded clock, so Race flash times
+      // converge; NOT the execution simNs which vaults per command) first, then
+      // ops (fileOpCount), equal weight. Only the bottom rate + bar switch by mode.
+      $('fsTime-' + snap.fsId).textContent = fmtTime(snap.flashTimeNs);
       $('fsOps-' + snap.fsId).textContent = String(snap.fileOpCount);
       $('fsBar-' + snap.fsId).style.width = (leaderGood > 0 ? Math.round((good / leaderGood) * 100) : 0) + '%';
-      $('fsTag-' + snap.fsId).textContent = mode === 'race' ? `${fmtRate(snap.opsPerSec || 0)} ops/s` : fmtPerOp(snap.simNs, snap.fileOpCount);
+      $('fsTag-' + snap.fsId).textContent = mode === 'race' ? `${fmtRate(snap.opsPerSec || 0)} ops/s` : fmtPerOp(snap.flashTimeNs, snap.fileOpCount);
     }
   }
 
