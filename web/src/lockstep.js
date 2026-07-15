@@ -77,32 +77,21 @@ const holdDebounceMs = () => (typeof globalThis !== 'undefined' && globalThis.__
 // coarse per-step arrivals average into a steady bar and decay to 0 when idle.
 const OPS_EMA_TAU_MS = 2000;
 
-// Race prefetch lookahead: keep the shipped frontier this far ahead of the leader's
-// cursor while running, so a bursting laggard never starves for an authorized entry.
-// The shipped-but-unplayed frontier is exactly what keeps draining after Stop once
-// generation halts (ADR-0020: a bounded drain is fine, a long tail is not — B16), so
-// its size sets the post-Stop tail. SCALE-AWARE: size it to ~RACE_LOOKAHEAD_FRAMES
-// frames of PLAYBACK (chunk = scale × MS_PER_FRAME) worth of entries, so a fast
-// (near real-time) or no-delay leader keeps a deep window for throughput while a
-// slow-mo leader — which plays back only a fraction of an entry per frame — keeps a
-// shallow one, and its post-Stop tail stays a handful of entries instead of the flat
-// 256 draining out over slow-mo minutes. Under-provisioning only ever costs a round-
-// trip of idle, never correctness (§4 "window size is a deferred tuning knob").
-// The window must be sized in ENTRIES the cheapest FS actually burns per frame, NOT
-// a fixed nominal per-entry cost. A cheap-op FS drains many small entries to fill one
-// chunk of the shared flash-time ceiling; if the window is sized by a nominal cost far
-// above that FS's real per-entry cost, entryLimit binds BEFORE the §2 playLimitNs gate
-// and the FS cannot burn its granted headroom, which (1) breaks Race's equal-flash-
-// time (the cheap FS falls short of the shared ceiling the pricey FS reaches) and (2)
-// once the clamp saturates, stops the race rate responding to SPEED. So we size it from
-// the OBSERVED per-entry cost (Δplayback / Δcursor, min across sessions), i.e. the
-// window feeds whatever the field's cheapest FS demands to keep the GATE the only
-// throttle. The post-Stop tail stays bounded in TIME regardless of the entry count:
-// the frontier drains at the gate rate, so it is always ~RACE_LOOKAHEAD_FRAMES frames.
-const RACE_LOOKAHEAD_MAX = 4096;    // generous ceiling over the realistic finite range (memory guard, not a throttle)
-const RACE_LOOKAHEAD_MIN = 4;       // slow-mo floor: enough to never starve the next entry
-const RACE_LOOKAHEAD_FRAMES = 8;    // aim to keep this many frames of paced playback shipped ahead
-const NOMINAL_ENTRY_NS = 2_000_000; // BOOTSTRAP only: per-entry flash used before any cost is observed
+// Race entry window (per session). entryLimit must sit a few frames ahead of each
+// session's OWN cursor: big enough that the §2 playLimitNs gate (not the window) is the
+// throttle so scale drives the rate (symptom 2), yet small enough that the post-Stop
+// backlog is only a few frames of THIS session's drain (a bounded tail, B16). A single
+// shared frontier sized by the LEADER cannot do both: it leaves the laggard a tail of
+// (leader-lead + window), and in a diverging Race the leader lead grows without bound,
+// so the laggard drains for hundreds of frames after Stop. Hence the window is sized
+// PER SESSION from that session's observed Δcursor/frame (raceWindow, below): each FS is
+// authorized RACE_LOOKAHEAD_FRAMES frames of its own drain, so the gate stays the
+// throttle for every FS and each FS's tail is ~RACE_LOOKAHEAD_FRAMES frames whatever its
+// per-op cost. Under-provisioning only ever costs a round-trip of idle, never
+// correctness (§4 "window size is a deferred tuning knob").
+const RACE_LOOKAHEAD_MAX = 4096;    // per-session ceiling (memory guard, not a throttle)
+const RACE_LOOKAHEAD_MIN = 4;       // floor: enough to never starve the next entry (bootstrap ramps up from here)
+const RACE_LOOKAHEAD_FRAMES = 8;    // authorize this many frames of a session's own drain ahead of its cursor
 
 // Bounded MAX for the §2 RACE watermark (symptom-1 fix). A too-slow FS is genuinely
 // EXECUTION-bound: the coordinator grants it the headroom to catch up, but the worker
@@ -150,30 +139,35 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   let sharedIndex = 0;              // Pace: the one entry currently authorized (entryLimit = +1)
   let frontier = 0;                 // Race: shipped/authorized entry count
 
-  // ---- observed per-entry cost (sizes the Race prefetch window; §2 gate must be the
-  // only throttle, so the window feeds the CHEAPEST FS's actual demand) ----
-  const costEma = new Map();        // proxy -> EMA of playbackNs per drained entry
-  const costLastCur = new Map();    // proxy -> acked.cursor at the previous sample
-  const costLastPb = new Map();     // proxy -> acked.playbackNs at the previous sample
-  function trackEntryCost() {
+  // ---- observed PER-SESSION drain rate (entries drained per frame): sizes each
+  // session's OWN entryLimit window. entryLimit must be a few frames ahead of THIS
+  // session's cursor: big enough that the §2 gate (not the window) throttles it, small
+  // enough that the post-Stop tail is a few frames of ITS OWN drain (B16). A single
+  // shared frontier sized by the LEADER cannot do both: it leaves the laggard a tail
+  // of (leader-lead + window), so the window is per session, keyed on each session's
+  // observed Δcursor/frame. It self-corrects up (never collapses): a window sized below
+  // demand throttles the session, which observes a smaller drain, but the target is
+  // RACE_LOOKAHEAD_FRAMES × drain, always a multiple of it, so it climbs back to the
+  // gate rate within a few frames. Bootstrap ramps from RACE_LOOKAHEAD_MIN. ----
+  const drainEma = new Map();       // proxy -> EMA of entries drained per frame (Δcursor)
+  const lastCur = new Map();        // proxy -> acked.cursor at the previous frame
+  function trackDrainRates() {
     for (const p of proxies) {
-      const cur = p.acked.cursor, pbn = p.acked.playbackNs;
-      const dCur = cur - (costLastCur.get(p) ?? 0);
-      const dPb = pbn - (costLastPb.get(p) ?? 0);
-      costLastCur.set(p, cur); costLastPb.set(p, pbn);
-      if (dCur > 0 && dPb > 0) {
-        const inst = dPb / dCur;                        // this window's flash-ns per entry
-        const prev = costEma.get(p);
-        costEma.set(p, prev == null ? inst : prev + 0.25 * (inst - prev));
+      const cur = p.acked.cursor;
+      const d = cur - (lastCur.get(p) ?? cur);
+      lastCur.set(p, cur);
+      if (d >= 0) {
+        const prev = drainEma.get(p);
+        drainEma.set(p, prev == null ? d : prev + 0.3 * (d - prev));
       }
     }
   }
-  // Min observed per-entry cost across the field (the cheapest FS drives the largest
-  // window need). Bootstrap to NOMINAL_ENTRY_NS before any entry has drained.
-  function observedMinCost() {
-    let m = Infinity;
-    for (const p of proxies) { const c = costEma.get(p); if (c > 0 && c < m) m = c; }
-    return isFinite(m) ? m : NOMINAL_ENTRY_NS;
+  // Entries THIS session may run ahead of its cursor: RACE_LOOKAHEAD_FRAMES frames of
+  // its own drain, clamped. So the gate stays the throttle AND the post-Stop tail is
+  // ~RACE_LOOKAHEAD_FRAMES frames of this session's drain, whatever its per-op cost.
+  function raceWindow(p) {
+    const r = drainEma.get(p) ?? 0;
+    return Math.max(RACE_LOOKAHEAD_MIN, Math.min(RACE_LOOKAHEAD_MAX, Math.ceil(RACE_LOOKAHEAD_FRAMES * r)));
   }
 
   // one-shot step nudges (paused single-step; see step())
@@ -243,11 +237,6 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
 
   const chunkNs = () => (atMax ? NO_DELAY_STEP_NS : scale * MS_PER_FRAME);
   const wireScale = () => (atMax ? Infinity : scale);
-  // Race prefetch depth: deep at no-delay, ~RACE_LOOKAHEAD_FRAMES frames of paced
-  // playback worth of entries at finite speed (bounds the post-Stop tail — B16).
-  const raceLookahead = () => (atMax
-    ? RACE_LOOKAHEAD_MAX
-    : Math.max(RACE_LOOKAHEAD_MIN, Math.min(RACE_LOOKAHEAD_MAX, Math.ceil(RACE_LOOKAHEAD_FRAMES * chunkNs() / observedMinCost()))));
 
   // Pace join: advance the shared index one entry at a time, only when every session
   // has drained the current shared step (∀ entriesDrained ≥ sharedIndex). On each
@@ -274,7 +263,10 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     if (mode === 'pace') {
       paceAdvance();
     } else {
-      if (running) ensure(Math.max(...proxies.map((p) => p.acked.cursor), 0) + raceLookahead());
+      // Generate enough to cover the furthest-reaching session's OWN window (each
+      // session's entryLimit = its cursor + its per-session window, below), so entries
+      // exist for whoever authorizes highest, and no further (bounds what is shipped).
+      if (running) ensure(Math.max(...proxies.map((p) => p.acked.cursor + raceWindow(p)), 0));
       frontier = sequence.length;
     }
     // rel = MAX over sessions of (acked_s − baseline_s), plus one chunk. DERIVED from
@@ -304,7 +296,19 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       if (playLimitNs < p.acked.playbackNs) playLimitNs = p.acked.playbackNs;   // clamp ≥ acked_s
       let entryLimit;
       if (mode === 'pace') entryLimit = Math.max(sharedIndex + 1, p.acked.cursor);
-      else entryLimit = frontier;
+      else {
+        // Race: PER-SESSION window (bounds the post-Stop tail to a few frames of THIS
+        // session's drain (B16) while staying above the §2 gate demand so the gate,
+        // not the window, is the throttle). While running it slides one window ahead of
+        // the cursor; once STOPPED it FREEZES at its last running value so each session
+        // drains only its already-authorized backlog (~one window) and halts, instead of
+        // a treadmill that lets the laggard chase the leader's frontier (at no-delay the
+        // worker bypasses the playback gate, so entryLimit is the only tail bound).
+        const prev = cached.get(p);
+        entryLimit = running
+          ? Math.min(frontier, p.acked.cursor + raceWindow(p))
+          : Math.min(frontier, prev ? prev.entryLimit : p.acked.cursor + raceWindow(p));
+      }
       if (raceStepLimit >= 0) { entryLimit = raceStepLimit; playLimitNs = Infinity; }   // one-shot Race step: ungated
       cached.set(p, { round: r, entryLimit, playLimitNs, scale: wireScale() });
     }
@@ -315,7 +319,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   function frame() {
     sampleRates(nowMs());
     if (!proxies.length) return;
-    trackEntryCost();                                         // update observed per-entry cost (sizes the race window)
+    trackDrainRates();                                        // update per-session drain rate (sizes each race window)
     shipEntries();
     if (lastComputedRound < round) { computeGrants(round); lastComputedRound = round; }
     else if (proxies.every((p) => p.acked.round >= round)) {   // §2 barrier: all acked ⇒ release round+1
@@ -414,7 +418,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       for (const p of [...baseline.keys()]) if (!next.has(p)) {
         baseline.delete(p); cached.delete(p); shipped.delete(p); opsEma.delete(p); lastOps.delete(p);
         prevPlayback.delete(p); csActive.delete(p); holdRawSince.delete(p); holdingShown.delete(p);
-        costEma.delete(p); costLastCur.delete(p); costLastPb.delete(p);
+        drainEma.delete(p); lastCur.delete(p);
       }
       proxies = list.slice();
       for (const p of proxies) if (!baseline.has(p)) {
@@ -481,7 +485,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       for (const p of proxies) { baseline.set(p, 0); shipped.set(p, 0); cached.delete(p); p.reset(epoch); }
       opsEma.clear(); lastOps.clear(); lastSampleNow = 0;
       prevPlayback.clear(); csActive.clear(); holdRawSince.clear(); holdingShown.clear();
-      costEma.clear(); costLastCur.clear(); costLastPb.clear();
+      drainEma.clear(); lastCur.clear();
     },
     get epoch() { return epoch; },
     /** Append one ATOMIC COMMAND at the frontier ("present"). `payload` is the wire
