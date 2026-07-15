@@ -105,12 +105,61 @@ chunk = scale * MS_PER_FRAME (1.67ms at scale 1e5). Verified s13 (real WASM): af
 laggard drains about one window and csActive clears in ~11 frames (was hundreds, then never).
 
 ### Interaction with the bounded-MAX clock at the very top of the slider
-With the observed-cost window, the slider now bites across the range until the point where the
-FS becomes execution-bound. At that point the bounded-MAX clock (symptom 1) pins the leader to
-the slowest FS's exec rate, so at the very top of the range the effective race throughput is
-the slowest FS's execution rate and the slider naturally saturates. That saturation is now the
-CORRECT behavior (you cannot run the shared clock faster than the slowest FS can execute while
-holding flash times within the bound). Below that point the slider responds proportionally.
+The slider now bites across the range until the point where the FS becomes execution-bound. At
+that point the bounded-MAX clock (symptom 1) pins the leader to the slowest FS's exec rate, so
+at the very top the effective race throughput is the slowest FS's execution rate and the slider
+naturally saturates. That saturation is now the CORRECT behavior (you cannot run the shared
+clock faster than the slowest FS can execute while holding flash times within the bound). Below
+that point the slider responds proportionally.
+
+---
+
+## Symptom 1b: the bound was DROPPED at MAX speed (the off-spec infinite-scale path)
+
+### Root cause (COORDINATOR-side, off-spec)
+User repro: reload, Race, MAX speed, run a bit, switch to slowest, and flash times were
+divergent (61/25/25/61/106 ms across the 5 FS, growing with runtime). The bounded-MAX bound
+(symptom 1) lives ENTIRELY in `playLimitNs`. But at MAX speed the coordinator set
+`atMax = !isFinite(scale)` and sent `grant.scale = Infinity`. In `session-worker.js drain()`
+(~line 542) `const noDelay = prepActive || !isFinite(scale); let budget = noDelay ? Infinity :
+(playLimitNs - playbackNs)`, so an infinite scale makes the worker's drain budget Infinity: it
+IGNORES `playLimitNs` and runs flat out. With `playLimitNs` never consulted, the bound does
+nothing at MAX and each FS races ahead at its own op rate. §2 requires Δ = scale / targetFPS to
+be finite and the player "capped at playLimitNs" unconditionally; the infinite scale / no-delay
+path is off-spec, and it is exactly what drops the bound at "max".
+
+### Fix (SETTLED user decision): cap scale to finite, drop "max no delay"
+There is no infinite scale anymore. The finite ceiling is the single chokepoint, so everything
+flows the metered path and the bound holds at every slider position including the top.
+- `lockstep.js`: `MAX_SCALE = 1e7` (10x real-time; real-time = 1e6). `setSpeed(next)` clamps
+  `scale = Math.min(next, MAX_SCALE)` (turns a passed Infinity finite here). `atMax` is removed
+  entirely. `chunkNs() = scale * MS_PER_FRAME` always; `wireScale() = scale` always (both
+  atMax branches removed). `NO_DELAY_STEP_NS` removed (now unused). So `grant.scale` is always
+  finite, the worker always runs `budget = playLimitNs - playbackNs`, and the 2x chunk bound is
+  enforced at the top.
+- `playground.js applySpeed` (minimal, this edit only): removed the `v >= 100 -> Infinity /
+  'max no delay'` branch; log range top is now `Math.log10(1e7)`; `v = 100` maps to exactly 1e7
+  and reads "10x real-time". Feeds both `coordinator.setSpeed` and `viz.setScale` a finite value
+  (viz fill-reveal now scales at the top instead of flooring at MIN_ANIM). viz.js not touched.
+- WHY the user chose 10x: they believe execution is ~5x CPU-bound; keeping the finite range up
+  to 10x lets them SEE whether it can exceed 5x. Past ~5x the workers go execution-bound, the
+  bound pins the leader, and holding shows. That visibility is wanted.
+
+### Landed COORDINATOR-side (not worker-side)
+The fix is coordinator + the shared slider wiring; `session-worker.js` is NOT edited. Its
+no-delay path (`budget = Infinity` when `!isFinite(scale)`, `NO_DELAY_TAPE_CAP`) is now
+UNREACHABLE from production because scale is always finite. Per the coordinator's instruction
+that dead path is left in place for a separate scheduled cleanup (prep still uses `Infinity`,
+which is untouched). Production cannot reach the `!isFinite(scale)` branch: the only scale
+source is `applySpeed` (now finite) and `coordinator.setSpeed` clamps regardless of caller.
+
+### Test (load-bearing, REAL WASM)
+`lockstep-concurrency-test.mjs [17] scenarioRaceMaxSpeedBound`: Race at MAX speed
+(`setSpeed(Infinity)` to PROVE the clamp), two FS of very different per-op cost, run 160 frames;
+assert the flash-time gap stays within 2x chunk (333 ms at 1e7) AND does not grow with runtime
+(the divergence signature). Proven load-bearing by a mutant coordinator that restores the old
+`atMax`/`Infinity` path: it FAILS ([17] gap 31927 ms, growing 6038 -> 31927 ms); the fix PASSES
+([17] gap 272 ms, plateaued 293 -> 272 ms over 120 frames). Full concurrency + coord-wire green.
 
 ---
 
