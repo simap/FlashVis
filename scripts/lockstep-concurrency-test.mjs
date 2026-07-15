@@ -341,6 +341,46 @@ async function scenarioResetAbandonsMidFlight() {
   delete globalThis.__fvGate16;
 }
 
+// ============================================================================
+// [17] Race at TOP speed keeps flash time bounded (the max-speed §2 bound).
+// Regression for the off-spec infinite-scale path: setSpeed(Infinity) used to set
+// atMax and send grant.scale=Infinity, so the worker's drain budget was Infinity and
+// it IGNORED playLimitNs, the whole §2 bound lives in playLimitNs, so at "max" it did
+// nothing and Race flash times DIVERGED (user repro: 61/25/25/61/106ms across 5 FS,
+// growing with runtime). Now setSpeed CLAMPS to MAX_SCALE (1e7 = 10× real-time): there
+// is no infinite scale, everything flows the finite metered path, and the leader may
+// run at most 2×chunk of flash time ahead of the slowest. This MUST be real WASM: the
+// bug only exists with the real flat-out worker. Two FS of very different per-op cost
+// (fastffs vs littlefs); we assert the flash-time gap stays within ~2×chunk AND does
+// not GROW over runtime (the divergence signature). Pre-clamp this fails (unbounded
+// growth); post-clamp it plateaus.
+// ============================================================================
+async function scenarioRaceMaxSpeedBound() {
+  console.log('\n[17] Race at MAX speed: flash time stays within the 2×chunk bound, does not diverge');
+  const MS_PER_FRAME = 1000 / 60, MAX_SCALE = 1e7;   // mirrors lockstep.js
+  const CHUNK = MAX_SCALE * MS_PER_FRAME;             // §2 Δ at the top speed
+  const BOUND = 2 * CHUNK;                            // RACE_LEAD_BOUND_FRAMES = 2
+  const rig = await makeRig({ speed: Infinity });     // Infinity input PROVES the clamp (becomes 1e7)
+  rig.coord.setMode('race');
+  rig.coord.start();
+  const gapNs = () => { const v = rig.proxies.map((p) => p.acked.playbackNs); return Math.max(...v) - Math.min(...v); };
+  await run(rig, 40);
+  const gapEarly = gapNs();
+  await run(rig, 120);
+  const gapLate = gapNs();
+  const ms = (n) => (n / 1e6).toFixed(0);
+  // 1. absolute: within the bound (allow a small margin for one big-op overshoot).
+  if (gapLate > BOUND + 0.3 * CHUNK) fail(`s17: flash-time gap ${ms(gapLate)}ms exceeds the 2×chunk bound ${ms(BOUND)}ms, the max-speed bound is not enforced (infinite-scale path still live?)`);
+  else ok(`s17: flash-time gap ${ms(gapLate)}ms stays within the 2×chunk bound (${ms(BOUND)}ms) at MAX speed`);
+  // 2. divergence signature: the gap must NOT grow with runtime. Unbounded (pre-clamp)
+  // it grows ~linearly with frames; bounded it plateaus.
+  if (gapLate > gapEarly * 1.5 + 0.15 * CHUNK) fail(`s17: flash-time gap GREW ${ms(gapEarly)}ms → ${ms(gapLate)}ms over 120 frames, diverging, not bounded (max-speed clock unmetered)`);
+  else ok(`s17: flash-time gap plateaued (${ms(gapEarly)}ms → ${ms(gapLate)}ms over 120 frames), bounded, not diverging`);
+  // 3. both FS actually ran (not a vacuous pass on a stalled rig).
+  if (rig.proxies.some((p) => p.acked.playbackNs < CHUNK)) fail('s17: a session barely advanced, the run did not exercise MAX speed');
+  else ok('s17: both FS ran flat-out at MAX speed (metered against the finite ceiling)');
+}
+
 // ---- run all ----
 console.log('ADR-0024 concurrency suite — REAL coordinator + REAL worker host + REAL WASM over the wire\n');
 await scenarioExactlyOnce();
@@ -351,6 +391,7 @@ await scenarioReseatBurst();
 await scenarioOpsPerSec();
 await scenarioSignalsRealBackend();
 await scenarioResetAbandonsMidFlight();
+await scenarioRaceMaxSpeedBound();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
