@@ -10,7 +10,10 @@
  *   - The die renders from PULLED FRAMEs, not synchronous device reads: a rAF
  *     loop calls focusedProxy.pull(sel) then viz.applyFrame(frame) for the ONE
  *     focused session (ADR-0017 focus-is-view; unfocused sessions stream
- *     nothing). There is ONE main-thread viz; focus switch = snap repaint.
+ *     nothing). Each session owns a COMPLETE separate UI state copy (its own
+ *     viz+die, pull cursors and journal); focus switch swaps die VISIBILITY and
+ *     re-renders the shared stats/tape from the focused session's own copy —
+ *     no singleton is repointed, so no FS's data bleeds into another (RC-A).
  *   - HUD + compare strip read TELEMETRY (proxy.telemetry) + coordinator
  *     snapshots(), the ~250ms heartbeat, for EVERY session at once.
  *   - The tape (console scrollback) is WORKER-OWNED and read via a journal
@@ -111,30 +114,17 @@ async function boot() {
   });
   const coordinator = createLockstep({ churn });
 
-  // Participating sessions (fsId → { proxy, terminate }) and which is FOCUSED.
+  // RC-A (ADR-0024 §7 PROPOSAL): UI state is a COMPLETE separate copy PER
+  // SESSION — its own viz+die, its own pull cursors, its own journal copy.
+  // THE INVARIANT: no cross-session data bleed — a session's pulled frame /
+  // journal only ever applies to ITS OWN state+die, never overlaid onto
+  // another. Nothing shared is repointed on a focus switch (that singleton
+  // repoint was the RC-A clobber); the ONE legitimate switch-time mutation is
+  // each session's own `pulling` participation field (§7: "focus = which
+  // workers the UI pulls AND what they ask for"). `sessions` holds that
+  // per-session state, keyed by fsId; `focusedFsId` names the visible one.
   const sessions = new Map();
   let focusedFsId = DEFAULT_FS;
-
-  // ONE main-thread renderer; re-pointed (snap repaint) on focus switch.
-  const viz = createViz(geometry);
-  const dieEl = document.createElement('div');
-  dieEl.className = 'die';
-  $('dieStack').appendChild(dieEl);
-  viz.mountDie(dieEl);
-  viz.attachInspector($('insp'));
-
-  // Focused-session pull cursors (ADR-0024 §7). Reset on focus switch / epoch bump.
-  let liveMapSince = 0, journalSince = 0, eventsSince = 0, attachedFresh = true;
-  // B4: don't animate the backlog on the first GENUINELY NEW frame after a
-  // (re)attach. `staleFrameRef` pins the proxy's frame object as of the
-  // switch — since a previously-focused, now-backgrounded session's `.frame`
-  // is left stale (unfocused sessions stream nothing), the very next
-  // renderTick can otherwise see that OLD frame and wrongly treat it as
-  // "the first frame", consuming the suppress flag before the real
-  // (re)attach response (the true events backlog) ever arrives.
-  let suppressEventsOnce = true;
-  let staleFrameRef = null;
-  const tapeSeen = new Set();
 
   // A3: gate controls off the FOCUSED session's real caps bitmask (falls
   // back to "everything capable" if telemetry hasn't reported caps yet).
@@ -142,17 +132,43 @@ async function boot() {
     const c = sessions.get(fsId)?.proxy?.telemetry?.caps;
     return typeof c === 'number' ? c : CAPS_FALLBACK;
   }
+  const proxyOf = (fsId) => sessions.get(fsId).proxy;
+  const fviz = () => sessions.get(focusedFsId).viz;   // the focused session's own renderer
 
   $('specLive').textContent = `loading ${Object.values(FS_REGISTRY).join(' + ')} (WASM)…`;
 
-  // ---- spawn one worker per FS, wrap in a proxy ----
+  // ---- spawn one worker per FS, wrap in a proxy, and give EACH session its
+  // OWN viz + die node (ADR-0024 §7 PROPOSAL). All N dice mount into #dieStack;
+  // focus swaps VISIBILITY only (the `.hidden` class) — a hidden die keeps its
+  // own rendered state and is NEVER re-rendered with another FS's data, so a
+  // switch fires no CSS transitions. The flash-stats panel, journal, inspector
+  // and legend are ONE shared DOM, re-rendered from the focused session's own
+  // state copy on switch. ----
+  const stack = $('dieStack');
   for (const fsId of Object.keys(FS_REGISTRY)) {
     const meta = { fsId, name: FS_REGISTRY[fsId], geometry };
     const { port, terminate } = connectWorker(fsId, meta);
     const proxy = createSessionProxy(port, meta);
-    sessions.set(fsId, { proxy, terminate });
+    const viz = createViz(geometry);
+    const dieEl = document.createElement('div');
+    dieEl.className = 'die' + (fsId === focusedFsId ? '' : ' hidden');
+    stack.appendChild(dieEl);
+    viz.mountDie(dieEl);
+    viz.attachInspector($('insp'));   // ONE shared inspector; only the visible die is clickable
+    sessions.set(fsId, {
+      fsId, proxy, terminate, viz, dieEl,
+      // pull cursors (ADR-0024 §7), per session. liveMapSince:-1 forces a full
+      // current liveMap on the first (fresh) pull.
+      liveMapSince: -1, journalSince: 0, eventsSince: 0,
+      // attachedFresh: the next pull seeds cursors to the session's OWN current
+      // heads (full liveMap + head-only events → NO historical erase replay).
+      attachedFresh: true,
+      lastFrame: null,                // last processed proxy.frame (dedup; ignores stale leftovers)
+      journalEntries: [],             // this session's OWN tape scrollback
+      tapeSeen: new Set(),
+      pulling: fsId === focusedFsId,  // §7 participation: only the focused session is pulled
+    });
   }
-  const proxyOf = (fsId) => sessions.get(fsId).proxy;
   const proxies = [...sessions.values()].map((s) => s.proxy);
 
   // setSessions init()'s every worker (INIT builds a fresh chip at epoch 0).
@@ -163,25 +179,28 @@ async function boot() {
     return coordinator.broadcast(userSrc, userSrc);   // RAW source; worker compiles it
   }
 
-  // ---- focus switch: die/tape/telemetry/legend follow one session; a pure
-  // view op (ADR-0017), never logged, never touches state. Re-attach fresh so
-  // the next pull is a full-state snap repaint (§7). ----
+  // ---- focus switch (ADR-0017 focus-is-view): a PURE view op — never logged,
+  // never touches worker state. It mutates NO shared UI state: it swaps die
+  // VISIBILITY, flips per-session pull participation, and re-renders the shared
+  // stats/journal/legend DOM FROM the newly-focused session's OWN state copy.
+  // The focused session re-attaches FRESH (§7): the next pull seeds its cursors
+  // to its own current heads — full liveMap snapshot + head-only events, so no
+  // historical erase sweep replays and no other FS's data can bleed in. ----
   function setFocus(fsId) {
     focusedFsId = fsId;
-    viz.clear();
-    liveMapSince = 0; journalSince = 0; eventsSince = 0; attachedFresh = true;
-    // B4: the (re)attach pull below asks for the whole events ring
-    // (since:0) so the worker knows what "current" is, but that ring is
-    // one-shot animation history (erase sweeps) already played once —
-    // ADR-0024 §7's (re)attach rule is events{newest,0} (head pointer
-    // only, never replayed). The worker still serves {since:0}, so we
-    // decouple on this side: the FIRST frame received after a switch
-    // advances eventsSince to its eventHead WITHOUT animating, and only
-    // frames after that animate genuinely-new events.
-    suppressEventsOnce = true;
-    staleFrameRef = sessions.get(fsId).proxy.frame;   // may be null (never focused) or a stale leftover
-    tapeSeen.clear();
-    $('tape').innerHTML = '';
+    // The ONE legitimate switch-time mutation (§7): pull participation. Only the
+    // focused session is pulled; hidden sessions pull nothing and keep their own
+    // die frozen at its last render (visibility-swap, not a re-render).
+    for (const st of sessions.values()) {
+      st.pulling = (st.fsId === fsId);
+      st.dieEl.classList.toggle('hidden', st.fsId !== fsId);
+    }
+    const st = sessions.get(fsId);
+    st.attachedFresh = true;
+    st.liveMapSince = -1;               // force a full CURRENT liveMap on the fresh pull
+    st.lastFrame = st.proxy.frame;      // ignore any stale leftover frame; wait for the fresh one
+    // Re-render the SHARED tape DOM from THIS session's own journal copy.
+    renderTapeFromState(st);
     $('insp').innerHTML = '<span class="hint">Click a sector to inspect it.</span>';
     applyCapsGating(capsFor(fsId));
     renderLegend(fsId);
@@ -208,13 +227,25 @@ async function boot() {
     while (out.children.length > 400) out.removeChild(out.firstChild);
     out.scrollTop = out.scrollHeight;
   }
-  function ingestJournal(journal) {
+  // Ingest a pulled journal into the focused session's OWN scrollback copy
+  // (deduped by monotonic id) and append the new lines to the shared tape DOM.
+  function ingestJournal(st, journal) {
     if (!journal) return;
     for (const e of journal) {
-      if (tapeSeen.has(e.id)) continue;
-      tapeSeen.add(e.id);
+      if (st.tapeSeen.has(e.id)) continue;
+      st.tapeSeen.add(e.id);
+      st.journalEntries.push(e);
+      if (st.journalEntries.length > 400) st.journalEntries.shift();
       appendTapeEntry(e);
     }
+  }
+  // Re-render the shared tape DOM from a session's own journal copy (focus
+  // switch): the die/stats/journal all follow one session's OWN state, never a
+  // clobbered singleton.
+  function renderTapeFromState(st) {
+    const out = $('tape');
+    out.innerHTML = '';
+    for (const e of st.journalEntries) appendTapeEntry(e);
   }
 
   // ---- the standings rail (ADR-0018): one .fs card per FS, click to focus ----
@@ -328,7 +359,7 @@ async function boot() {
   // '—'. ----
   function refreshHUD() {
     const t = proxyOf(focusedFsId).telemetry;
-    const m = viz.metrics();
+    const m = fviz().metrics();
     const lc = t.livenessCounts || { live: 0, obsolete: 0, metadata: 0 };
     const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
     set('sAmp', t.wa != null ? t.wa.toFixed(1) + '×' : '—');
@@ -340,8 +371,9 @@ async function boot() {
     set('fSim', fmtTime(t.simNs || 0));
     const programmed = lc.live + lc.obsolete + lc.metadata;
     set('sObs', programmed ? Math.round(100 * lc.obsolete / programmed) + '%' : '0%');
-    const uProg = $('uProg'); if (uProg) uProg.style.width = (100 * lc.live / viz.npages) + '%';
-    const uObs = $('uObs'); if (uObs) uObs.style.width = (100 * lc.obsolete / viz.npages) + '%';
+    const npages = fviz().npages;
+    const uProg = $('uProg'); if (uProg) uProg.style.width = (100 * lc.live / npages) + '%';
+    const uObs = $('uObs'); if (uObs) uObs.style.width = (100 * lc.obsolete / npages) + '%';
     const specLive = $('specLive');
     if (specLive) specLive.textContent = `mounted · ${t.fsinfo ? t.fsinfo.files : 0} files · ${fmtTime(t.simNs || 0)} of flash time`;
   }
@@ -358,44 +390,42 @@ async function boot() {
   injectCommand('help()');
   injectCommand('format()');
 
-  // ---- the render loop: pull + paint the FOCUSED session once per rAF
-  // (ADR-0024 §4/§7). Unfocused sessions stream nothing. ----
+  // ---- the render loop: pull + paint the FOCUSED session once per rAF into
+  // its OWN viz (ADR-0024 §4/§7). Hidden sessions pull nothing and keep their
+  // own die frozen. No singleton state, no cross-session bleed (RC-A).
+  //   On (re)attach (attachedFresh) the pull seeds the session's cursors to its
+  // OWN current heads: a full liveMap snapshot + HEAD-ONLY events ({newest,
+  // limit:0} → empty batch, but the frame still carries eventHead), so shown/
+  // heat/liveMap snap-repaint while NO historical erase sweep replays. The
+  // frame's own heads then seed the cursors and subsequent pulls carry forward
+  // ({since}), so genuinely-new events DO animate for the watched FS. This is
+  // the root fix that retires the B4 suppressEventsOnce/staleFrameRef hack. ----
   const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(() => fn(Date.now()), 16);
   function renderTick() {
-    const proxy = proxyOf(focusedFsId);
-    // Paint whatever the LAST pull returned (one frame of wire latency), then
-    // issue the next pull.
-    const f = proxy.frame;
-    // Skip a frame object that's just the stale leftover from this session's
-    // PREVIOUS focus stint (see staleFrameRef comment) — it is not a
-    // response to this switch's (re)attach pull, so treating it as "the
-    // first frame" would consume suppressEventsOnce early and let the real
-    // backlog response (arriving next) animate uncontrolled (B4).
-    if (f && f !== staleFrameRef) {
-      // B4: the first frame after (re)attach carries the whole events ring
-      // as backlog (the worker doesn't yet offer a {newest} events
-      // selector, ADR-0024 §7) — apply it with events stripped so shown/
-      // heat/liveMap still snap-repaint, but no historical erase sweep
-      // replays. Advance the cursor to this frame's head so only events
-      // AFTER this point animate.
-      if (suppressEventsOnce) {
-        viz.applyFrame({ ...f, events: undefined });
-        suppressEventsOnce = false;
-      } else {
-        viz.applyFrame(f);   // FRAME is protocol-conformant; viz consumes it directly
-      }
-      if (f.liveMap && f.liveMap.version != null) liveMapSince = f.liveMap.version;
-      if (f.journalHead != null) journalSince = f.journalHead;
-      if (f.eventHead != null) eventsSince = f.eventHead;
-      ingestJournal(f.journal);
+    const st = sessions.get(focusedFsId);
+    const f = st.proxy.frame;
+    // Process each frame once; ignore a stale leftover from a previous focus
+    // stint (st.lastFrame was pinned to it on switch) — wait for the fresh one.
+    if (f && f !== st.lastFrame) {
+      st.lastFrame = f;
+      st.viz.applyFrame(f);   // FRAME is protocol-conformant; the fresh-attach frame's events are empty
+      if (f.liveMap && f.liveMap.version != null) st.liveMapSince = f.liveMap.version;
+      if (f.journalHead != null) st.journalSince = f.journalHead;
+      if (f.eventHead != null) st.eventsSince = f.eventHead;
+      ingestJournal(st, f.journal);
+      st.attachedFresh = false;   // fresh frame consumed; subsequent pulls carry the cursors forward
     }
-    proxy.pull({
+    st.proxy.pull(st.attachedFresh ? {
       heat: true, wear: true,
-      liveMap: { since: liveMapSince },
-      journal: attachedFresh ? { since: 0, limit: 400, newest: true } : { since: journalSince, limit: 400 },
-      events: attachedFresh ? { since: 0, limit: 400 } : { since: eventsSince, limit: 400 },
+      liveMap: { since: -1 },                          // full CURRENT liveMap
+      journal: { since: st.journalSince, limit: 400 }, // carry the tape forward (scrollback, no replay risk)
+      events: { newest: true, limit: 0 },              // HEAD only: no historical erase sweep
+    } : {
+      heat: true, wear: true,
+      liveMap: { since: st.liveMapSince },
+      journal: { since: st.journalSince, limit: 400 },
+      events: { since: st.eventsSince, limit: 400 },   // only genuinely-new events animate
     });
-    attachedFresh = false;
     raf(renderTick);
   }
   raf(renderTick);
@@ -466,11 +496,19 @@ async function boot() {
   $('btnFormat').addEventListener('click', () => injectCommand('format()'));
 
   // ---- Reset (header): bump epoch (workers rebuild a fresh chip), then replay
-  // the boot log. Never switches race/pace mode (spec/ui.md). ----
+  // the boot log. Never switches race/pace mode (spec/ui.md). Every session's
+  // OWN state (its die, cursors and journal copy) is reset — the coordinator
+  // nulls each proxy.frame on reset, so a re-attach snaps to the fresh chip. ----
   $('btnReset')?.addEventListener('click', () => {
     setRunning(false);
     coordinator.reset();
-    setFocus(focusedFsId);   // re-attach so the tape/die snap back to the fresh chip
+    for (const st of sessions.values()) {
+      st.viz.clear();
+      st.liveMapSince = -1; st.journalSince = 0; st.eventsSince = 0;
+      st.attachedFresh = true; st.lastFrame = null;
+      st.journalEntries = []; st.tapeSeen.clear();
+    }
+    setFocus(focusedFsId);   // re-render the shared DOM from the (now empty) focused state
     $('specLive').textContent = 'formatted + mounted — empty and paused';
     injectCommand('help()');
     injectCommand('format()');
@@ -498,9 +536,12 @@ async function boot() {
   applyGc(+$('gc').value);
   $('gc').addEventListener('input', (e) => applyGc(+e.target.value));
 
-  // heat-map toggle: a pure view (the focused die's wear overlay). It reads the
-  // wear the FRAME already carries, so it just flips the viz overlay flag.
-  $('heat').addEventListener('change', (e) => { viz.setHeatmap(e.target.checked, dieEl); });
+  // heat-map toggle: a pure view (the wear overlay). It reads the wear the FRAME
+  // already carries, so it just flips each session's viz overlay flag — applied
+  // to ALL dice so the setting persists across focus switches.
+  $('heat').addEventListener('change', (e) => {
+    for (const st of sessions.values()) st.viz.setHeatmap(e.target.checked, st.dieEl);
+  });
 
   // ---- console input ----
   const HKEY = 'flashvis.console.history', HMAX = 20;
@@ -530,7 +571,7 @@ async function boot() {
     const nameEl = $('themeName');
     if (nameEl) nameEl.textContent = (THEME_LIST.find((x) => x.id === t) || {}).name || '';
     try { store?.setItem(THEME_KEY, t); } catch { /* no storage */ }
-    viz.refreshTheme();
+    for (const st of sessions.values()) st.viz.refreshTheme();
   };
   const themeHost = $('themeChips');
   if (themeHost) {
