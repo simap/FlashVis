@@ -79,7 +79,19 @@ const OPS_EMA_TAU_MS = 2000;
 
 // Race prefetch lookahead: keep the shipped frontier this far ahead of the leader's
 // cursor while running, so a bursting laggard never starves for an authorized entry.
-const RACE_LOOKAHEAD = 256;
+// The shipped-but-unplayed frontier is exactly what keeps draining after Stop once
+// generation halts (ADR-0020: a bounded drain is fine, a long tail is not — B16), so
+// its size sets the post-Stop tail. SCALE-AWARE: size it to ~RACE_LOOKAHEAD_FRAMES
+// frames of PLAYBACK (chunk = scale × MS_PER_FRAME) worth of entries, so a fast
+// (near real-time) or no-delay leader keeps a deep window for throughput while a
+// slow-mo leader — which plays back only a fraction of an entry per frame — keeps a
+// shallow one, and its post-Stop tail stays a handful of entries instead of the flat
+// 256 draining out over slow-mo minutes. Under-provisioning only ever costs a round-
+// trip of idle, never correctness (§4 "window size is a deferred tuning knob").
+const RACE_LOOKAHEAD_MAX = 256;     // no-delay + fast finite: feed the flat-out leader
+const RACE_LOOKAHEAD_MIN = 4;       // slow-mo floor: enough to never starve the next entry
+const RACE_LOOKAHEAD_FRAMES = 8;    // aim to keep this many frames of paced playback shipped ahead
+const NOMINAL_ENTRY_NS = 2_000_000; // rough per-entry flash used only to size the window (a small churn write)
 
 const nowMs = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
 
@@ -178,6 +190,11 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
 
   const chunkNs = () => (atMax ? NO_DELAY_STEP_NS : scale * MS_PER_FRAME);
   const wireScale = () => (atMax ? Infinity : scale);
+  // Race prefetch depth: deep at no-delay, ~RACE_LOOKAHEAD_FRAMES frames of paced
+  // playback worth of entries at finite speed (bounds the post-Stop tail — B16).
+  const raceLookahead = () => (atMax
+    ? RACE_LOOKAHEAD_MAX
+    : Math.max(RACE_LOOKAHEAD_MIN, Math.min(RACE_LOOKAHEAD_MAX, Math.ceil(RACE_LOOKAHEAD_FRAMES * chunkNs() / NOMINAL_ENTRY_NS))));
 
   // Pace join: advance the shared index one entry at a time, only when every session
   // has drained the current shared step (∀ entriesDrained ≥ sharedIndex). On each
@@ -204,7 +221,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     if (mode === 'pace') {
       paceAdvance();
     } else {
-      if (running) ensure(Math.max(...proxies.map((p) => p.acked.cursor), 0) + RACE_LOOKAHEAD);
+      if (running) ensure(Math.max(...proxies.map((p) => p.acked.cursor), 0) + raceLookahead());
       frontier = sequence.length;
     }
     // rel = MAX over sessions of (acked_s − baseline_s), plus one chunk. DERIVED from
