@@ -414,6 +414,39 @@ async function scenarioOpsPerSecSpeedInvariant() {
   else ok(`s18: opsPerSec speed-invariant within ${(rel * 100).toFixed(0)}% (S ${rateHi.toFixed(1)} vs S/4 ${rateLo.toFixed(1)} ops/sim-second), a wall-clock metric drifts with speed`);
 }
 
+// ============================================================================
+// [19] The FS-card flash time must be the PACED clock (snap.flashTimeNs), which the
+// §2 grant bounds, NOT the EXECUTION counter (snap.simNs, telemetry). In Race the paced
+// flash time converges across FS within the 2x chunk bound (the laggard catches up in
+// the clock the grant governs); execution simNs vaults atomically when a command runs,
+// so it leads paced playback by up to one command and does NOT converge. This is the
+// user's "flash times not converging" symptom: the card was reading the execution
+// counter. Diagnosis was case (A): paced converges, execution does not. Real WASM,
+// slow-mo so a command's cost is many chunks.
+// ============================================================================
+async function scenarioPacedFlashTimeConverges() {
+  console.log('\n[19] FS-card flash time: PACED (flashTimeNs) converges within the bound, EXECUTION (simNs) does not');
+  const SCALE = 5e4, CHUNK = SCALE * (1000 / 60), BOUND = 2 * CHUNK;   // ~20x slow-mo
+  const rig = await makeRig({ speed: SCALE });
+  rig.coord.setMode('race');
+  rig.coord.start();
+  const gapOf = (key) => { const v = rig.proxies.map((p) => (key === 'exec' ? p.telemetry.simNs : p.acked.flashTimeNs)); return Math.max(...v) - Math.min(...v); };
+  let maxPaced = 0, maxExec = 0;
+  for (let i = 0; i < 8; i++) { await run(rig, 25); maxPaced = Math.max(maxPaced, gapOf('paced')); maxExec = Math.max(maxExec, gapOf('exec')); }
+  const ms = (n) => (n / 1e6).toFixed(1);
+  // snapshots() must expose the paced flash time.
+  const snap = snapById(rig).fastffs;
+  if (typeof snap.flashTimeNs !== 'number') { fail('s19: snapshots() does not expose flashTimeNs (the paced flash time)'); return; }
+  else ok('s19: snapshots() exposes flashTimeNs (the paced flash time) alongside simNs');
+  // 1. paced flash time converges across FS within the 2x chunk bound.
+  if (maxPaced > BOUND + 0.3 * CHUNK) fail(`s19: PACED flash-time gap ${ms(maxPaced)}ms exceeds the 2x chunk bound ${ms(BOUND)}ms (the laggard is not catching up on the paced clock)`);
+  else ok(`s19: paced flash-time gap ${ms(maxPaced)}ms stays within the 2x chunk bound (${ms(BOUND)}ms), the FS converge on the clock the grant governs`);
+  // 2. execution simNs does NOT converge (diverges by ~one command), proving the two are
+  // different clocks and the card must read the paced one.
+  if (!(maxExec > BOUND * 2)) fail(`s19: execution simNs gap ${ms(maxExec)}ms did not diverge past the bound, the test is not exercising the execution-vs-paced difference`);
+  else ok(`s19: execution simNs gap ${ms(maxExec)}ms diverges far past the bound (leads paced playback by ~one command), so the card must read flashTimeNs, not simNs`);
+}
+
 // ---- run all ----
 console.log('ADR-0024 concurrency suite, REAL coordinator + REAL worker host + REAL WASM over the wire\n');
 await scenarioExactlyOnce();
@@ -426,6 +459,7 @@ await scenarioSignalsRealBackend();
 await scenarioResetAbandonsMidFlight();
 await scenarioRaceMaxSpeedBound();
 await scenarioOpsPerSecSpeedInvariant();
+await scenarioPacedFlashTimeConverges();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
