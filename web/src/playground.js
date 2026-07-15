@@ -30,21 +30,18 @@ import { createViz } from './viz.js';
 import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 
 // FS registry (ADR-0015): fsId → display name. All live from page load
-// (ADR-0017). Static per-FS caps (ADR-0011/0021) used for control-gating —
-// caps are not on the wire today (TELEMETRY carries none), so this table
-// stands in; see LANE-REPORT.
+// (ADR-0017).
 const FS_REGISTRY = {
   fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS', jesfs: 'JesFS',
   fatfs: 'FAT+WL',
 };
-const FS_CAPS = {
-  fastffs: FF_CAP_GC | FF_CAP_LIVE_MAP,
-  littlefs: FF_CAP_LIVE_MAP,
-  spiffs: FF_CAP_LIVE_MAP,
-  jesfs: FF_CAP_LIVE_MAP,
-  fatfs: FF_CAP_LIVE_MAP,
-};
 const DEFAULT_FS = 'fastffs';
+// A3: caps ride the wire now (TelemetryMsg.caps, ADR-0011 ff_caps single
+// source of truth). Until the first TELEMETRY for a session lands (or if a
+// worker never emits it), fall back to "everything capable" (all bits set)
+// so we fail OPEN — a missing/stale caps read must not incorrectly hide a
+// control the FS actually supports.
+const CAPS_FALLBACK = FF_CAP_GC | FF_CAP_LIVE_MAP;
 
 // Auto-workload churn config, scaled to the 256 KiB (4096×64) device.
 const CHURN_SEED = 0x00c0ffee;
@@ -139,6 +136,13 @@ async function boot() {
   let staleFrameRef = null;
   const tapeSeen = new Set();
 
+  // A3: gate controls off the FOCUSED session's real caps bitmask (falls
+  // back to "everything capable" if telemetry hasn't reported caps yet).
+  function capsFor(fsId) {
+    const c = sessions.get(fsId)?.proxy?.telemetry?.caps;
+    return typeof c === 'number' ? c : CAPS_FALLBACK;
+  }
+
   $('specLive').textContent = `loading ${Object.values(FS_REGISTRY).join(' + ')} (WASM)…`;
 
   // ---- spawn one worker per FS, wrap in a proxy ----
@@ -179,7 +183,7 @@ async function boot() {
     tapeSeen.clear();
     $('tape').innerHTML = '';
     $('insp').innerHTML = '<span class="hint">Click a sector to inspect it.</span>';
-    applyCapsGating(FS_CAPS[fsId] ?? 0);
+    applyCapsGating(capsFor(fsId));
     renderLegend(fsId);
     renderFsSet();
     $('telName').textContent = FS_REGISTRY[fsId];
@@ -393,7 +397,10 @@ async function boot() {
   raf(renderTick);
 
   // ---- HUD + compare strip on the ~250ms cadence (telemetry heartbeat) ----
-  setInterval(() => { refreshHUD(); renderFsSet(); renderGap(); }, 250);
+  setInterval(() => {
+    refreshHUD(); renderFsSet(); renderGap();
+    applyCapsGating(capsFor(focusedFsId));   // A3: caps land on TELEMETRY, same ~250ms cadence
+  }, 250);
 
   // ---- standing-signal pins (spec/ui.md): the CS pin/status dot renders the
   // RAW per-frame `csActive` blinky (NO debounce); the fs-card "holding" label
