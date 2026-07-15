@@ -170,6 +170,23 @@ ADR-0009: "multi-page ops split to sweep page-by-page." Now a multi-page/sector 
 whole sector's read glow instantly and the pages fade together (overall timing ~ok, but the
 per-page sweep is gone). Regression in the timed-player port (worker-heat glow application).
 
+### B18 — Erase sweep glow visible only at FAST speed, not slow (inverted visibility) · MED
+Erase sweeps appear at fast speeds but NOT slow; only become visible around ~2.8x realtime and
+up. Backwards: a 21ms erase at slow-mo should hold LONG and be very visible.
+INVESTIGATION SO FAR: the duration formula is NOT inverted — worker `eraseMs = clamp(ns/scale,
+MIN_ANIM=110, MAX_ANIM=9000)` (session-worker.js:206) matches OLD viz.js exactly (ns/scale, same
+bounds), so it correctly yields a longer sweep at slow scale. Suspect is TIMING/emission, not
+duration.
+LEADING HYPOTHESIS: erase EventEntries are pushed at EAGER EXECUTION time (execution vaults far
+ahead of metered playback at slow-mo, bounded by the scale-relative TAPE_CAP) instead of when
+metered PLAYBACK reaches the erase (§7: "events land in the frame they play"). So at slow-mo the
+erase sweeps fire in an early burst during the execution vault and are gone before the slow paced
+view shows them; the ~2.8x threshold is where the execution/playback real-time gap collapses to
+the visible window. OLD viz.js animated the erase "at the START of its time slot" during the
+metered drain (playback), not at execution. Fix: emit/queue the erase EventEntry from the metered
+PLAYER (worker-heat applyStep / playback), not from eager device execution. Double-check the whole
+erase-sweep path against OLD viz.js timing.
+
 ### PROPOSAL (design, endorsed) — per-session STATE; per-session die DOM only; visibility-swap
 The per-session-ness is a property of the STATE, not the DOM — that is what kills the clobber
 (nothing shared is mutated on switch).
