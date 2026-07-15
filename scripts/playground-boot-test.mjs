@@ -131,7 +131,7 @@ ok(timeAfter !== timeBefore || dom.getEl('fSim').textContent !== '0 ms',
 const speed = dom.getEl('speed');
 speed.value = '100';
 speed.dispatch('input', { target: speed });
-ok(dom.getEl('speedRead').textContent.includes('no delay'), 'SPEED=max sets the "no delay" label (setSpeed reached the coordinator)');
+ok(dom.getEl('speedRead').textContent.includes('real-time'), 'SPEED=max sets the "10x real-time" label (finite cap, no infinite scale; setSpeed reached the coordinator)');
 
 // ---- die actually rendered from pulled frames: some cell got programmed
 // (fProg > 0% or free pages < total) ----
