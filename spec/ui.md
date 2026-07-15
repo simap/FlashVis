@@ -10,7 +10,9 @@ Stays — useful in non-page-load contexts, e.g. during catch up when switching 
 
 ## Page load - fast forward the load-triggered reset and boot animations/delay so the page lands usable
 
-## FS cards - show flash time and ops for both modes (backlog)
+## FS cards - always show both flash time and ops (both modes); only the bottom rate switches
+Headline: flash time (total simNs) + ops (total) always, both modes.
+Bottom rate + leader bar: Race = ops/s, Pace = per-op flash time; bar = standing on that mode's rate.
 
 ## FAT+WL die - live map resolves past the WL FTL into FAT structure; not whole-sectors-always-full
 Unused pages in a file's clusters are not metadata — they read as erased/blank.

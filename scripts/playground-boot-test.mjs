@@ -100,15 +100,32 @@ for (let i = 0; i < 60; i++) await pump(1);
 ok(/writeFile/.test(tapeText()), `the injected writeFile command echoes on the tape:\n${tapeText().split('\n').slice(-6).join('\n')}`);
 ok(dom.getEl('sFiles').textContent !== '0', `telemetry shows a file after the injected write (sFiles=${dom.getEl('sFiles').textContent}, was ${filesBefore})`);
 
-// ---- Run gates churn: start running, the workload advances fileOpCount ----
-const opsBefore = dom.getEl('fsV-fastffs').textContent;
+// ---- FS cards show BOTH totals (flash time + ops) in BOTH modes (spec/ui.md:
+// only the bottom rate switches by mode, never the headline totals) ----
+const bothStats = () => ({ time: dom.getEl('fsTime-fastffs').textContent, ops: dom.getEl('fsOps-fastffs').textContent });
+{
+  const s = bothStats();   // boot default is Pace
+  ok(s.time !== '—' && /(ms|s)$/.test(s.time), `Pace: fs card shows the flash-time total (${s.time})`);
+  ok(/^\d+$/.test(s.ops), `Pace: fs card shows the ops total alongside it (${s.ops})`);
+}
+dom.dispatch('modeWheel');   // Pace -> Race
+for (let i = 0; i < 20; i++) await pump(1);
+{
+  const s = bothStats();
+  ok(s.time !== '—' && /(ms|s)$/.test(s.time), `Race: fs card STILL shows the flash-time total (${s.time})`);
+  ok(/^\d+$/.test(s.ops), `Race: fs card STILL shows the ops total (${s.ops})`);
+}
+dom.dispatch('modeWheel');   // Race -> Pace (restore boot default for the rest of the run)
+for (let i = 0; i < 20; i++) await pump(1);
+
+// ---- Run gates churn: start running, the workload advances flash time ----
+const timeBefore = dom.getEl('fsTime-fastffs').textContent;
 dom.dispatch('btnRun');    // Run
 for (let i = 0; i < 120; i++) await pump(1);
 dom.dispatch('btnRun');    // Pause
-const opsAfter = dom.getEl('fsV-fastffs').textContent;
-// In Pace (boot default) fsV is flash-time; either way it must have advanced past boot idle.
-ok(opsAfter !== opsBefore || dom.getEl('fSim').textContent !== '0 ms',
-  `Run advanced the workload (fsV ${opsBefore} -> ${opsAfter}, fSim ${dom.getEl('fSim').textContent})`);
+const timeAfter = dom.getEl('fsTime-fastffs').textContent;
+ok(timeAfter !== timeBefore || dom.getEl('fSim').textContent !== '0 ms',
+  `Run advanced the workload (fs card flash time ${timeBefore} -> ${timeAfter}, fSim ${dom.getEl('fSim').textContent})`);
 
 // ---- SPEED slider reaches the coordinator (no throw; label updates) ----
 const speed = dom.getEl('speed');

@@ -255,7 +255,11 @@ async function boot() {
     btn.setAttribute('aria-pressed', String(fsId === focusedFsId));
     btn.innerHTML =
       `<span class="fs-top"><span class="fs-name">${FS_REGISTRY[fsId]}</span><span class="fs-run" title="running"></span></span>` +
-      `<span class="fs-vital"><b class="fs-v" id="fsV-${fsId}">—</b><i class="fs-l" id="fsL-${fsId}">—</i><span class="fs-hold" id="fsHold-${fsId}">◷ holding</span></span>` +
+      `<span class="fs-vital">` +
+        `<span class="fs-stat"><b class="fs-v" id="fsTime-${fsId}">—</b><i class="fs-l">flash time</i></span>` +
+        `<span class="fs-stat"><b class="fs-v" id="fsOps-${fsId}">—</b><i class="fs-l">ops</i></span>` +
+        `<span class="fs-hold" id="fsHold-${fsId}">◷ holding</span>` +
+      `</span>` +
       `<span class="fs-bar"><span class="track"><i id="fsBar-${fsId}"></i></span><span class="tag" id="fsTag-${fsId}">ops/s</span></span>`;
     btn.addEventListener('click', () => { if (sessions.has(fsId) && fsId !== focusedFsId) setFocus(fsId); });
     return btn;
@@ -279,8 +283,11 @@ async function boot() {
       // `.fs.waiting` class toggle below, in the waitStates loop), not the
       // mode. A mode-hardcoded "waiting" string could show even when
       // nothing is actually waiting.
-      $('fsV-' + snap.fsId).textContent = mode === 'race' ? String(snap.fileOpCount) : fmtTime(snap.simNs);
-      $('fsL-' + snap.fsId).textContent = mode === 'race' ? 'ops done' : 'flash time';
+      // Both totals ALWAYS show, in both modes (spec/ui.md "FS cards"): flash
+      // time (execution counter simNs) first, then ops (fileOpCount), equal
+      // weight. Only the bottom rate + leader bar switch by mode.
+      $('fsTime-' + snap.fsId).textContent = fmtTime(snap.simNs);
+      $('fsOps-' + snap.fsId).textContent = String(snap.fileOpCount);
       $('fsBar-' + snap.fsId).style.width = (leaderGood > 0 ? Math.round((good / leaderGood) * 100) : 0) + '%';
       $('fsTag-' + snap.fsId).textContent = mode === 'race' ? `${fmtRate(snap.opsPerSec || 0)} ops/s` : fmtPerOp(snap.simNs, snap.fileOpCount);
     }
