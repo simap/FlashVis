@@ -52,7 +52,6 @@ import { createRing } from './worker-rings.js';
 
 // ---- local tunables (worker-internal; NOT wire fields) ----
 const TELEMETRY_MS = 250;           // W2C.TELEMETRY cadence (§4/§8: unconditional heartbeat)
-const METER_MS = 16;                // playback metering tick (~one frame; relocated viz.frame cadence)
 const JOURNAL_MAX = 2000;           // ring bound; protocol.js's JOURNAL_MIN (400) is the wire floor
 const MIN_ANIM = 110, MAX_ANIM = 9000;   // erase-sweep animated-slot bounds (viz.js parity), for EventEntry.ms
 // ADR-0022 drain pacing (relocated verbatim from viz.js): cap device steps drained
@@ -177,7 +176,7 @@ export function installWorkerHost(port, opts = {}) {
   let prepActive = false;
   let pendingTick = null;                          // synthetic multi-tick command settling: { index, rem }
   let realCmd = null;                              // real async command in flight: { index, done }
-  let telemetryTimer = null, meterTimer = null;
+  let telemetryTimer = null;
   let mapDirty = true, cachedMap = null, cachedCounts = { live: 0, obsolete: 0, metadata: 0 }, livenessGen = 0;
   let lastLivenessWalk = 0;                        // §7/A4: throttle the walk to ≥250ms since last
 
@@ -188,7 +187,6 @@ export function installWorkerHost(port, opts = {}) {
   // / dispFileOps advance exactly when an entry's whole playback has elapsed.
   let pbQueue = [];
   let executedTapeNs = 0;                          // cumulative ns of EXECUTED-but-maybe-unplayed events (I3 backpressure)
-  let lastTickAt = Date.now();
   let captureBatch = null;                         // active timed() capture sink (set synchronously around a work() call)
   let entryFileOps = 0;                            // file ops accrued by the entry currently executing (credited at drain)
 
@@ -466,6 +464,7 @@ export function installWorkerHost(port, opts = {}) {
       realCmd = null;
       cursor = index + 1;                          // EXECUTION frontier advances at quiescence
       pump();                                       // authorize the next entry
+      drain();                                      // meter the command's now-queued playback (drains on the next frame too)
       ack();
     };
     const check = () => setTimeout(() => {
@@ -501,22 +500,25 @@ export function installWorkerHost(port, opts = {}) {
     return out;
   }
 
-  // ---- the PLAYBACK metering tick (relocated viz.js frame()) ----
-  // Spend a real-time budget (dt × scale) against playLimitNs, draining the queue
-  // CONTINUOUSLY intra-event with MAX_OPS_PER_FRAME carry-forward. playbackNs — the
-  // §2 currency — advances only here, so it paces to real-time.
-  function meterTick() {
-    lastTickAt = Date.now();                        // keep dt honest even on an empty tick
-    if (!runner || !pbQueue.length) return;         // synthetic/idle: nothing to pace, no ack (I10)
-    const now = lastTickAt;
-    let dtMs = now - meterTick._last; meterTick._last = now;
-    if (!(dtMs >= 0)) dtMs = 0;
-    if (dtMs > 100) dtMs = 100;                      // cap a stalled/backgrounded gap (viz parity)
-    const noDelay = !isFinite(scale);
-    let budget = noDelay ? Infinity : dtMs * scale;
-    const ceil = playLimitNs - playbackNs;          // §2: never play past the granted watermark
-    if (ceil <= 0) return;                           // ceiling reached — hold (paces Race + slow-mo)
-    budget = Math.min(budget, ceil);
+  // ---- the PLAYBACK metering step (relocated viz.js frame()) ----
+  // Runs once per GRANT (and on command quiescence). Spends the granted headroom
+  // playLimitNs − playbackNs — which the coordinator advances by chunk = scale ×
+  // MS_PER_FRAME each frame, i.e. it IS this frame's realBudget × scale (§2/§6) —
+  // draining the queue CONTINUOUSLY intra-event with MAX_OPS_PER_FRAME carry-
+  // forward (ADR-0022). playbackNs — the §2 currency — advances only here, so it
+  // paces to the coordinator's real (rAF) frame cadence: a 21ms erase holds across
+  // frames, 5× slow-mo runs 1/5 real-time, no-delay flat-out but chunked. Driving
+  // it off the GRANT (not a wall-clock timer) keeps progress deterministic under
+  // the acceptance harness's macrotask-driven frames. Returns true iff it advanced.
+  function drain() {
+    if (!pbQueue.length) return false;
+    // No-delay (scale = Infinity) or prep: no TIME pacing — drain flat-out, bounded
+    // only by MAX_OPS_PER_FRAME (viz.js parity: `budget = noDelay ? Infinity : …`).
+    // Finite scale: the granted headroom IS this frame's realBudget × scale (the
+    // coordinator advanced playLimitNs by chunk = scale × MS_PER_FRAME).
+    const noDelay = prepActive || !isFinite(scale);
+    let budget = noDelay ? Infinity : (playLimitNs - playbackNs);
+    if (!(budget > 0)) return false;                 // watermark reached — hold (paces Race + slow-mo)
     const pb0 = playbackNs, ed0 = entriesDrained;
     let stepBudget = MAX_OPS_PER_FRAME;
     while (pbQueue.length && stepBudget > 0) {
@@ -528,33 +530,21 @@ export function installWorkerHost(port, opts = {}) {
         }
         step.curRem = step.ns; step.started = true; stepBudget--;
       }
-      if (noDelay) { playbackNs += step.curRem; dispFlashNs += step.curRem; step.curRem = 0; }
-      else if (budget >= step.curRem) { budget -= step.curRem; playbackNs += step.curRem; dispFlashNs += step.curRem; step.curRem = 0; }
+      if (budget >= step.curRem) { budget -= step.curRem; playbackNs += step.curRem; dispFlashNs += step.curRem; step.curRem = 0; }
       else { step.curRem -= budget; playbackNs += budget; dispFlashNs += budget; budget = 0; }
       if (step.curRem === 0) {
         pbQueue.shift();
         if (step.last) { entriesDrained = step.entryIndex; dispFileOps += step.fileOps; }
       } else {
-        break;   // budget exhausted mid-step — carry curRem forward to the next tick (continuous intra-event)
+        break;   // budget exhausted mid-step — carry curRem forward to the next frame (continuous intra-event)
       }
     }
-    if (playbackNs !== pb0 || entriesDrained !== ed0) {
-      pump();                                         // draining released I3 backpressure — authorize more
-      ack();                                          // re-ack at frame cadence with the paced currency
-    }
+    if (playbackNs !== pb0 || entriesDrained !== ed0) { pump(); return true; }  // draining released I3 backpressure
+    return false;
   }
-  meterTick._last = Date.now();
 
-  function startTimers() {
-    stopTimers();
-    telemetryTimer = setInterval(sendTelemetry, TELEMETRY_MS);
-    meterTimer = setInterval(meterTick, METER_MS);
-    meterTick._last = Date.now();
-  }
-  function stopTimers() {
-    if (telemetryTimer) clearInterval(telemetryTimer); telemetryTimer = null;
-    if (meterTimer) clearInterval(meterTimer); meterTimer = null;
-  }
+  function startTimers() { stopTimers(); telemetryTimer = setInterval(sendTelemetry, TELEMETRY_MS); }
+  function stopTimers() { if (telemetryTimer) clearInterval(telemetryTimer); telemetryTimer = null; }
 
   function sendTelemetry() {
     ensureLiveness();
@@ -637,7 +627,8 @@ export function installWorkerHost(port, opts = {}) {
   }
   function handleGrant(m) {
     round = m.round; entryLimit = m.entryLimit; playLimitNs = m.playLimitNs; scale = m.scale;
-    pump();
+    pump();                                          // execute newly-authorized entries (eager, bounded by I3)
+    drain();                                         // meter this frame's playback against playLimitNs (§6)
     ack();                                          // I10: EVERY grant acked on receipt (no-op or not)
   }
   function handlePull(m) {
@@ -659,12 +650,20 @@ export function installWorkerHost(port, opts = {}) {
     send(W2C.FRAME, payload);
   }
   function handleReset(m) {
-    gen++;                                          // I5: void in-flight state; stale awaits starve
+    gen++;                                          // I5: void in-flight state; stale awaits starve (incl. INIT's build — myGen check discards it)
     if (runner) {
+      // Fast path (session.js blankChip): reuse the built runner/device.
       try { runner.unmount(); } catch { /* driver-specific */ }
       device.reset();                              // flash→0xFF, stats/wear zeroed; fires 'reset' → heat/queue/event ring
+      resetLocalState(m.epoch);
+    } else {
+      // B2: a RESET that arrives before INIT's async runner build lands must NOT
+      // leave the session runner-less. The in-flight build discards (its myGen !=
+      // the bumped gen); rebuild from the retained fsId/geometry so a runner is
+      // guaranteed after RESET (buildFresh runs resetLocalState internally).
+      runner = null; device = null;
+      buildFresh(gen, m.epoch, fsId, geometry);
     }
-    resetLocalState(m.epoch);
   }
 
   port.onmessage = (e) => {

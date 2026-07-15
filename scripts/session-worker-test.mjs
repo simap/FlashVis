@@ -152,9 +152,29 @@ async function run() {
   if (rf.journal.length === 0) ok('journal empty after RESET (fresh epoch)');
   else fail(`journal not empty after RESET (${rf.journal.length})`);
 
+  // ---- 9. B2: a RESET arriving BEFORE INIT's async runner build lands must not
+  //         leave the session runner-less. Fresh session; INIT then RESET on the
+  //         same turn (no flushTurns between → the build has not resolved), then
+  //         confirm a real churn write actually executes AND drains. ----
+  const t2 = createTransport();
+  const w2 = { grantAck: [], frame: [] };
+  installWorkerHost(t2.workerPort, { createRunner: createStubRunner });
+  t2.mainPort.onmessage = (e) => { const m = e.data; if (m.type === W2C.GRANT_ACK) w2.grantAck.push(m); else if (m.type === W2C.FRAME) w2.frame.push(m); };
+  t2.mainPort.postMessage(msg(C2W.INIT, { epoch: 10, fsId: 'stub', geometry: GEOMETRY, name: 'stub' }));
+  t2.mainPort.postMessage(msg(C2W.RESET, { epoch: 11 }));   // races the in-flight INIT build (B2)
+  await flushTurns(6);   // let both the discarded and the rebuilt runner settle
+  t2.mainPort.postMessage(msg(C2W.ENTRIES, { epoch: 11, entries: [{ index: 0, kind: 'event', payload: { type: 'write', name: 'b2.bin', size: 2048, writeSeed: 7 }, seed: 0 }] }));
+  await flushTurns(2);
+  t2.mainPort.postMessage(msg(C2W.GRANT, { epoch: 11, round: 1, entryLimit: 1, playLimitNs: 1e12, scale: Infinity }));
+  await wait(80);
+  const b2ack = w2.grantAck[w2.grantAck.length - 1];
+  if (b2ack && b2ack.epoch === 11 && b2ack.cursor === 1 && b2ack.playbackNs > 0)
+    ok('B2: RESET before the INIT build landed still yields a runner — real write executed + drained (not runner-less)');
+  else fail(`B2: session runner-less after RESET-races-INIT (ack=${JSON.stringify(b2ack)})`);
+
   console.log('');
   if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
-  console.log('PASS - real-execution path: §2 gate, raw-source sandbox command (I1), FRAME typedefs (heat/shown/liveMap/erase events), write-amp telemetry, I5 discard, RESET.');
+  console.log('PASS - real-execution path: §2 gate, raw-source sandbox command (I1), FRAME typedefs (heat/shown/liveMap/erase events), write-amp telemetry, I5 discard, RESET, B2 reset-races-init.');
   process.exit(0);
 }
 
