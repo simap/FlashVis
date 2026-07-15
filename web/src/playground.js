@@ -128,6 +128,15 @@ async function boot() {
 
   // Focused-session pull cursors (ADR-0024 §7). Reset on focus switch / epoch bump.
   let liveMapSince = 0, journalSince = 0, eventsSince = 0, attachedFresh = true;
+  // B4: don't animate the backlog on the first GENUINELY NEW frame after a
+  // (re)attach. `staleFrameRef` pins the proxy's frame object as of the
+  // switch — since a previously-focused, now-backgrounded session's `.frame`
+  // is left stale (unfocused sessions stream nothing), the very next
+  // renderTick can otherwise see that OLD frame and wrongly treat it as
+  // "the first frame", consuming the suppress flag before the real
+  // (re)attach response (the true events backlog) ever arrives.
+  let suppressEventsOnce = true;
+  let staleFrameRef = null;
   const tapeSeen = new Set();
 
   $('specLive').textContent = `loading ${Object.values(FS_REGISTRY).join(' + ')} (WASM)…`;
@@ -157,6 +166,16 @@ async function boot() {
     focusedFsId = fsId;
     viz.clear();
     liveMapSince = 0; journalSince = 0; eventsSince = 0; attachedFresh = true;
+    // B4: the (re)attach pull below asks for the whole events ring
+    // (since:0) so the worker knows what "current" is, but that ring is
+    // one-shot animation history (erase sweeps) already played once —
+    // ADR-0024 §7's (re)attach rule is events{newest,0} (head pointer
+    // only, never replayed). The worker still serves {since:0}, so we
+    // decouple on this side: the FIRST frame received after a switch
+    // advances eventsSince to its eventHead WITHOUT animating, and only
+    // frames after that animate genuinely-new events.
+    suppressEventsOnce = true;
+    staleFrameRef = sessions.get(fsId).proxy.frame;   // may be null (never focused) or a stale leftover
     tapeSeen.clear();
     $('tape').innerHTML = '';
     $('insp').innerHTML = '<span class="hint">Click a sector to inspect it.</span>';
@@ -339,8 +358,24 @@ async function boot() {
     // Paint whatever the LAST pull returned (one frame of wire latency), then
     // issue the next pull.
     const f = proxy.frame;
-    if (f) {
-      viz.applyFrame(f);   // FRAME is protocol-conformant; viz consumes it directly
+    // Skip a frame object that's just the stale leftover from this session's
+    // PREVIOUS focus stint (see staleFrameRef comment) — it is not a
+    // response to this switch's (re)attach pull, so treating it as "the
+    // first frame" would consume suppressEventsOnce early and let the real
+    // backlog response (arriving next) animate uncontrolled (B4).
+    if (f && f !== staleFrameRef) {
+      // B4: the first frame after (re)attach carries the whole events ring
+      // as backlog (the worker doesn't yet offer a {newest} events
+      // selector, ADR-0024 §7) — apply it with events stripped so shown/
+      // heat/liveMap still snap-repaint, but no historical erase sweep
+      // replays. Advance the cursor to this frame's head so only events
+      // AFTER this point animate.
+      if (suppressEventsOnce) {
+        viz.applyFrame({ ...f, events: undefined });
+        suppressEventsOnce = false;
+      } else {
+        viz.applyFrame(f);   // FRAME is protocol-conformant; viz consumes it directly
+      }
       if (f.liveMap && f.liveMap.version != null) liveMapSince = f.liveMap.version;
       if (f.journalHead != null) journalSince = f.journalHead;
       if (f.eventHead != null) eventsSince = f.eventHead;
