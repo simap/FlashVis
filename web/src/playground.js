@@ -256,8 +256,8 @@ async function boot() {
     btn.innerHTML =
       `<span class="fs-top"><span class="fs-name">${FS_REGISTRY[fsId]}</span><span class="fs-run" title="running"></span></span>` +
       `<span class="fs-vital">` +
-        `<span class="fs-stat"><b class="fs-v" id="fsTime-${fsId}">—</b><i class="fs-l">flash time</i></span>` +
-        `<span class="fs-stat"><b class="fs-v" id="fsOps-${fsId}">—</b><i class="fs-l">ops</i></span>` +
+        `<span class="fs-stat"><b class="fs-v" id="fsTime-${fsId}">·</b><i class="fs-l">flash time</i></span>` +
+        `<span class="fs-stat"><b class="fs-v" id="fsOps-${fsId}">·</b><i class="fs-l">ops</i></span>` +
         `<span class="fs-hold" id="fsHold-${fsId}">◷ holding</span>` +
       `</span>` +
       `<span class="fs-bar"><span class="track"><i id="fsBar-${fsId}"></i></span><span class="tag" id="fsTag-${fsId}">ops/s</span></span>`;
