@@ -185,6 +185,10 @@ export const JOURNAL_MIN = 400;
  * @property {number} exec_simNs         telemetry only — never the currency
  * @property {number} programBytes       cumulative bytes programmed to flash (write-amp numerator)
  * @property {number} hostBytes          cumulative bytes the host asked to write (write-amp denominator)
+ * @property {number} caps               runner.caps bitmask (ADR-0011 ff_caps single-source-of-truth;
+ *                                        FF_CAP_GC / FF_CAP_LIVE_MAP / FF_CAP_SECTOR_CLASSES). Static per
+ *                                        epoch; sent on telemetry so the UI gates off the real bitmask,
+ *                                        not a hardcoded table (fixes A3). Never let the UI assume from fsId.
  *   write-amplification = programBytes / hostBytes; ~250ms scalars, not per-op (I9 intact).
  *   Silence for k*250ms => crash (§8): console tape line, wedges, reload.
  */
