@@ -24,6 +24,14 @@
 // as the fallback when an event arrives with no duration hint.
 const MIN_ANIM = 110, MAX_ANIM = 9000;
 
+// Fill-height reveal/drain scaling (restored from the pre-0024 in-process player,
+// which set fillEls[p].style.transitionDuration = clamp(step.ns/scale, MIN, MAX)
+// per step). The reveal's reference slot is one page's program time: device.js
+// ESP32S3 timing is progFixed 0 + progPer per byte, so a full page programs in
+// PROG_NS_PER_BYTE * pageSize ns, exactly the old per-page step.ns for a full page.
+// The erase DRAIN instead uses the event's own worker-computed ms (already scaled).
+const PROG_NS_PER_BYTE = 5937;
+
 // ---- per-cell read/prog "heat" (glow coalescence) tunables ----
 // Unchanged from the pre-0024 renderer (ADR-0022): heat is additive per-cell
 // intensity rendered across two channels (read/prog) so an overlap blends
@@ -160,6 +168,17 @@ export function createViz(geometry) {
   let heatmapOn = false, selected = -1, inspectorEl = null, onSelectCb = null;
   let lastMap = null;
 
+  // Playback speed for fill-reveal timing (ADR-0024 §6 keeps continuous glow on
+  // heat and the discrete erase on events.ms, but the fill-height REVEAL is
+  // neither, so viz times it from scale exactly as the pre-0024 player did —
+  // lockstep.js documents scale as "the numeric copy the die animation also
+  // uses"). setScale (playground applySpeed) recomputes curFillMs, the reveal's
+  // transition-duration; the erase drain uses the event's own ms instead.
+  const FILL_REF_NS = PROG_NS_PER_BYTE * pageSize;   // one full page's program time
+  let curScale = 20000;
+  let curFillMs = MIN_ANIM;
+  const computeFillMs = () => (isFinite(curScale) ? Math.max(MIN_ANIM, Math.min(MAX_ANIM, FILL_REF_NS / curScale)) : MIN_ANIM);
+
   // Theme-sourced glow colors (re-resolved from the active [data-theme]'s CSS
   // custom properties on switch, via the exposed refreshTheme()). Defaults apply
   // when there is no DOM (tests). This re-SOURCES color only — the heat model
@@ -185,9 +204,13 @@ export function createViz(geometry) {
     if (!lastMap || shown[p] === 0) return '';
     return LIVE_NAME[lastMap[p]] ?? 'meta';
   }
-  function paint(p) {
+  // `fillMs` sets the height transition's duration for THIS change (pre-0024 parity:
+  // the player wrote transitionDuration per step before mutating height). Defaults
+  // to the scale-derived reveal slot curFillMs; the erase drain passes the event ms.
+  function paint(p, fillMs = curFillMs) {
     const has = shown[p] > 0;
     cellEls[p].dataset.s = has ? 'prog' : 'erased';
+    fillEls[p].style.transitionDuration = fillMs + 'ms';   // set BEFORE height so the change animates over it
     fillEls[p].style.height = has ? (shown[p] / pageSize * 100) + '%' : '0';
     cellEls[p].dataset.live = liveTag(p);
   }
@@ -262,9 +285,13 @@ export function createViz(geometry) {
   // Sector base for an erase clear — the same page-range clear the old timed
   // player did per erase step, now driven by the event trigger instead of a
   // device 'erase' op (see applyEvents / ASSUMPTION note there).
-  function eraseSectorLocal(sector) {
+  function eraseSectorLocal(sector, ms) {
     const base = sector * pagesPerSector;
-    for (let k = 0; k < pagesPerSector; k++) { shown[base + k] = 0; paint(base + k); }
+    // Drain the fills to 0 over the erase's own slot (pre-0024 parity: the old
+    // eraseSector set transitionDuration = the erase slot). `ms` is the worker's
+    // scale-derived event ms; clamp/fallback matches the sweep (sweep()).
+    const drainMs = Math.max(MIN_ANIM, Math.min(MAX_ANIM, ms || MIN_ANIM));
+    for (let k = 0; k < pagesPerSector; k++) { shown[base + k] = 0; paint(base + k, drainMs); }
   }
 
   function resetDie() {
@@ -315,7 +342,7 @@ export function createViz(geometry) {
   function applyEvents(events) {
     if (!events) return;
     for (const ev of events) {
-      if (ev.kind === 'erase') { eraseSectorLocal(ev.sector); sweep(ev.sector, ev.ms); if (heatmapOn) refreshHeatmap(); }
+      if (ev.kind === 'erase') { eraseSectorLocal(ev.sector, ev.ms); sweep(ev.sector, ev.ms); if (heatmapOn) refreshHeatmap(); }
       else if (ev.kind === 'reset') resetDie();
     }
   }
@@ -406,6 +433,11 @@ export function createViz(geometry) {
     attachInspector(el) { inspectorEl = el; },
     onSelect(cb) { onSelectCb = cb; },
     setHeatmap(on, dieEl) { heatmapOn = on; dieEl.classList.toggle('heat', on); if (on) refreshHeatmap(); },
+    /** Set playback speed (sim-ns per real-ms; Infinity = no delay), so the fill
+     *  REVEAL transition scales with the speed control the way the pre-0024 player
+     *  did (transitionDuration = clamp(page-program-ns / scale, MIN, MAX)). Reveal
+     *  only — the erase drain rides the event ms, glow/decay ride worker heat. */
+    setScale(simNsPerRealMs) { curScale = simNsPerRealMs; curFillMs = computeFillMs(); },
     /** Re-source the op-glow + erase-sweep colors from the active theme's CSS
      *  custom properties (called on palette switch). Color only — the heat
      *  mechanism is untouched; live cells pick up the new hue on the next

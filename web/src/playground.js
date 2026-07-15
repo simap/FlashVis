@@ -542,6 +542,11 @@ async function boot() {
         : `${x < 10 ? x.toFixed(1) : Math.round(x)}× real-time`;
     }
     coordinator.setSpeed(scale);
+    // The same scale the coordinator paces playback with also times each die's
+    // fill-reveal transition (lockstep.js: "the numeric copy the die animation
+    // also uses"). Without this the fill-height reveal is frozen at its CSS
+    // duration regardless of speed; the glow/decay and erase ms already scale.
+    for (const st of sessions.values()) st.viz.setScale(scale);
     $('speedRead').textContent = label;
   }
   applySpeed(+$('speed').value);

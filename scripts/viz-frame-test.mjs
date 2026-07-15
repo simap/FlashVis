@@ -21,10 +21,12 @@ const ok = (c, m) => { if (c) { pass++; console.log('  ok   -', m); } else { fai
 
 // ---- minimal fake DOM (counts what we care about: animate + boxShadow) ----
 let animateCount = 0, boxWrites = 0, boxVals = [];
+let transDurs = [];   // every fill transitionDuration written (only viz's paint() writes it)
 function makeEl() {
   const style = { _bs: '' };
   Object.defineProperty(style, 'boxShadow', { get() { return this._bs; }, set(v) { this._bs = v; boxWrites++; boxVals.push(v); } });
   Object.defineProperty(style, 'height', { set() {} });
+  Object.defineProperty(style, 'transitionDuration', { get() { return this._td; }, set(v) { this._td = v; transDurs.push(v); } });
   style.setProperty = () => {};
   return {
     dataset: {}, style, className: '', children: [],
@@ -159,6 +161,47 @@ function resetEvent() {
 }
 const rs = resetEvent();
 ok(rs.progPages === 0, 'a reset event clears every page back to unprogrammed');
+
+// ---- (d) fill-reveal transition duration scales with playback speed (setScale).
+// Pre-0024 the in-process player set fillEls[p].style.transitionDuration =
+// clamp(page-program-ns / scale, 110, 9000) per step; the worker rewrite dropped
+// viz's scale input so the reveal froze at the fixed CSS 180ms regardless of speed.
+// Assert the reveal duration now tracks scale (slow > fast), and the erase DRAIN
+// rides the event's own worker-computed ms. ----
+const PAGE_PROG_NS = 5937 * geometry.pageSize;   // FILL_REF_NS in viz.js
+const lastTransMs = () => parseFloat(transDurs[transDurs.length - 1]);   // strip 'ms'
+function revealMsAt(scale) {
+  const viz = mkViz();
+  viz.setScale(scale);
+  transDurs = [];
+  const pages = new Array(npages).fill(0); pages[0] = 256;   // reveal one page
+  viz.applyFrame({ shown: { pages } });
+  return lastTransMs();
+}
+const clamp = (v) => Math.max(110, Math.min(9000, v));
+const fastReveal = revealMsAt(1e8);          // ~no-delay end: floors at MIN_ANIM
+const midReveal = revealMsAt(1e6);           // ~real-time
+const slowReveal = revealMsAt(3000);         // deep slow-mo
+const nodelayReveal = revealMsAt(Infinity);  // no-delay = MIN_ANIM
+ok(slowReveal > midReveal && midReveal >= fastReveal,
+  `fill reveal duration scales with speed: fast ${fastReveal}ms <= mid ${midReveal}ms < slow ${slowReveal}ms (pre-fix: all frozen at the fixed CSS 180ms)`);
+ok(Math.abs(slowReveal - clamp(PAGE_PROG_NS / 3000)) < 1,
+  `slow-mo reveal = clamp(page-program-ns / scale) = ${clamp(PAGE_PROG_NS / 3000).toFixed(0)}ms (matches the pre-0024 per-page slot)`);
+ok(fastReveal === 110 && nodelayReveal === 110,
+  `fast + no-delay reveal floor at MIN_ANIM 110ms (got ${fastReveal}/${nodelayReveal})`);
+// erase drain rides ev.ms (scale-correct from the worker), not the reveal slot
+function drainMsFor(evMs) {
+  const viz = mkViz();
+  viz.setScale(3000);
+  const pages = new Array(npages).fill(0);
+  for (let k = 0; k < pagesPerSector; k++) pages[k] = 256;
+  viz.applyFrame({ shown: { pages } });
+  transDurs = [];
+  viz.applyFrame({ events: [{ id: 9, kind: 'erase', sector: 0, ms: evMs }] });
+  return lastTransMs();
+}
+ok(drainMsFor(7000) === 7000,
+  'erase drain transition uses the event ms (7000ms), not the reveal slot');
 
 if (failed) { console.error(`\nFAIL - ${failed} check(s) failed.`); process.exit(1); }
 console.log(`\nPASS - viz.js paints pulled FRAMEs (heat/shown/liveMap/events) as a pure renderer (${pass} checks).`);
