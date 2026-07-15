@@ -205,7 +205,10 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    csActive; off = faint, on = the live accent. */
 .fs-run{width:6px;height:6px;border-radius:50%;background:var(--txt-faint);margin-left:auto;flex:none}
 .fs-run.cs-on{background:var(--lead)}
-.fs-vital{display:flex;align-items:baseline;gap:6px}
+/* both totals show in both modes (spec/ui.md): two equal-weight .fs-stat
+   groups (flash time, then ops), each a value + its uppercase label. */
+.fs-vital{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.fs-stat{display:flex;align-items:baseline;gap:4px;min-width:0}
 .fs-v{font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--txt-dim)}
 .fs-l{font-size:8.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--txt-faint)}
 /* EMA throughput bar (A8): leader = 100% (--lead), others scaled to the leader. */
