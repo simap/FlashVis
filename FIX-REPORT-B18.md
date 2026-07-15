@@ -88,7 +88,40 @@ past on focus switch via the `{ newest: true, limit: 0 }` head-seed (B4/B11 path
 - The JOURNAL ring shares the identical off-by-one: `playground.js` feeds `journalHead` back
   as `journalSince` the same way, so the boundary tape line of each pull window is dropped
   too. Less visually obvious than a missing erase sweep, and touching the journal branch
-  risks the tape suite, so I left it. Recommend the same one-line bridge on the journal branch
-  of `handlePull`, or — cleaner and fixing both at once — redefine the mismatch in
-  `worker-rings.js` (make `since` inclusive of a head cursor) if that file is opened by a
-  future lane that owns it.
+  risks the tape suite, so I left it for B18. **Now fixed as B19 — see the follow-up below.**
+
+---
+
+# B19 follow-up — journal ring off-by-one (same root as B18)
+
+Logged as B19 after B18. Same root cause: `worker-rings.js` `head` = `nextId` (one-past-last),
+`since()` exclusive (`id > since`), consumer (`playground.js`) feeds `journalHead` back as
+`journalSince`. So the boundary tape line of every pull window is dropped; at slow-mo exactly
+one journal entry lands per window (= the dropped one), so tape lines go missing at slow speed.
+
+## The fix
+
+`session-worker.js` `handlePull`, JOURNAL branch — the same inclusive-lower-bound bridge B18
+applied to the events branch:
+
+    - journal.since(m.journal.since, m.journal.limit)
+    + journal.since((m.journal.since ?? 0) - 1, m.journal.limit)
+
+Kept it symmetric with the already-merged events bridge rather than refactoring the shared
+root in `worker-rings.js` (which would mean reverting the merged/verified events bridge and
+re-touching the events path — churn on a shipped surface for elegance, which the brief
+cautioned against). `worker-rings.js` was untouched.
+
+No duplicate tape lines: the bridge does not re-return already-seen ids across pulls (the next
+window is `id >= reported head`), and the consumer additionally dedups by monotonic id via
+`tapeSeen` (playground.js:235) — belt and suspenders.
+
+## Verification
+
+- Extended the B18 slow-mo regression (`session-worker-test.mjs` §8) to also pull the JOURNAL
+  stream with the `journalHead`-as-`since` cursor: asserts ~24 op lines (12 write + 12 gc)
+  surface at 33× slow-mo AND none is returned twice on the wire. Confirmed it FAILS pre-fix
+  (0/24 lines — every boundary line dropped) and PASSES post-fix (24/24, 0 duplicates).
+- Full suite battery green (real WASM: fastffs + littlefs): session-worker, worker-conformance,
+  coord-wire, lockstep-concurrency (§13), viz-frame, **tape-leak, playground-boot** (the two the
+  brief flagged as the reason B18 deferred this — both stay green).
