@@ -30,21 +30,18 @@ import { createViz } from './viz.js';
 import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 
 // FS registry (ADR-0015): fsId → display name. All live from page load
-// (ADR-0017). Static per-FS caps (ADR-0011/0021) used for control-gating —
-// caps are not on the wire today (TELEMETRY carries none), so this table
-// stands in; see LANE-REPORT.
+// (ADR-0017).
 const FS_REGISTRY = {
   fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS', jesfs: 'JesFS',
   fatfs: 'FAT+WL',
 };
-const FS_CAPS = {
-  fastffs: FF_CAP_GC | FF_CAP_LIVE_MAP,
-  littlefs: FF_CAP_LIVE_MAP,
-  spiffs: FF_CAP_LIVE_MAP,
-  jesfs: FF_CAP_LIVE_MAP,
-  fatfs: FF_CAP_LIVE_MAP,
-};
 const DEFAULT_FS = 'fastffs';
+// A3: caps ride the wire now (TelemetryMsg.caps, ADR-0011 ff_caps single
+// source of truth). Until the first TELEMETRY for a session lands (or if a
+// worker never emits it), fall back to "everything capable" (all bits set)
+// so we fail OPEN — a missing/stale caps read must not incorrectly hide a
+// control the FS actually supports.
+const CAPS_FALLBACK = FF_CAP_GC | FF_CAP_LIVE_MAP;
 
 // Auto-workload churn config, scaled to the 256 KiB (4096×64) device.
 const CHURN_SEED = 0x00c0ffee;
@@ -128,7 +125,23 @@ async function boot() {
 
   // Focused-session pull cursors (ADR-0024 §7). Reset on focus switch / epoch bump.
   let liveMapSince = 0, journalSince = 0, eventsSince = 0, attachedFresh = true;
+  // B4: don't animate the backlog on the first GENUINELY NEW frame after a
+  // (re)attach. `staleFrameRef` pins the proxy's frame object as of the
+  // switch — since a previously-focused, now-backgrounded session's `.frame`
+  // is left stale (unfocused sessions stream nothing), the very next
+  // renderTick can otherwise see that OLD frame and wrongly treat it as
+  // "the first frame", consuming the suppress flag before the real
+  // (re)attach response (the true events backlog) ever arrives.
+  let suppressEventsOnce = true;
+  let staleFrameRef = null;
   const tapeSeen = new Set();
+
+  // A3: gate controls off the FOCUSED session's real caps bitmask (falls
+  // back to "everything capable" if telemetry hasn't reported caps yet).
+  function capsFor(fsId) {
+    const c = sessions.get(fsId)?.proxy?.telemetry?.caps;
+    return typeof c === 'number' ? c : CAPS_FALLBACK;
+  }
 
   $('specLive').textContent = `loading ${Object.values(FS_REGISTRY).join(' + ')} (WASM)…`;
 
@@ -157,10 +170,20 @@ async function boot() {
     focusedFsId = fsId;
     viz.clear();
     liveMapSince = 0; journalSince = 0; eventsSince = 0; attachedFresh = true;
+    // B4: the (re)attach pull below asks for the whole events ring
+    // (since:0) so the worker knows what "current" is, but that ring is
+    // one-shot animation history (erase sweeps) already played once —
+    // ADR-0024 §7's (re)attach rule is events{newest,0} (head pointer
+    // only, never replayed). The worker still serves {since:0}, so we
+    // decouple on this side: the FIRST frame received after a switch
+    // advances eventsSince to its eventHead WITHOUT animating, and only
+    // frames after that animate genuinely-new events.
+    suppressEventsOnce = true;
+    staleFrameRef = sessions.get(fsId).proxy.frame;   // may be null (never focused) or a stale leftover
     tapeSeen.clear();
     $('tape').innerHTML = '';
     $('insp').innerHTML = '<span class="hint">Click a sector to inspect it.</span>';
-    applyCapsGating(FS_CAPS[fsId] ?? 0);
+    applyCapsGating(capsFor(fsId));
     renderLegend(fsId);
     renderFsSet();
     $('telName').textContent = FS_REGISTRY[fsId];
@@ -220,7 +243,11 @@ async function boot() {
       card.setAttribute('aria-pressed', String(snap.fsId === focusedFsId));
       const good = goodOf(snap);
       card.classList.toggle('leader', leaderGood > 0 && good >= leaderGood);
-      $('fsHold-' + snap.fsId).textContent = mode === 'race' ? '◷ waiting' : '◷ holding';
+      // B3: the label always reads "holding" — it's the debounced `holding`
+      // signal (spec/ui.md "Holding" card) that drives VISIBILITY (the
+      // `.fs.waiting` class toggle below, in the waitStates loop), not the
+      // mode. A mode-hardcoded "waiting" string could show even when
+      // nothing is actually waiting.
       $('fsV-' + snap.fsId).textContent = mode === 'race' ? String(snap.fileOpCount) : fmtTime(snap.simNs);
       $('fsL-' + snap.fsId).textContent = mode === 'race' ? 'ops done' : 'flash time';
       $('fsBar-' + snap.fsId).style.width = (leaderGood > 0 ? Math.round((good / leaderGood) * 100) : 0) + '%';
@@ -339,8 +366,24 @@ async function boot() {
     // Paint whatever the LAST pull returned (one frame of wire latency), then
     // issue the next pull.
     const f = proxy.frame;
-    if (f) {
-      viz.applyFrame(f);   // FRAME is protocol-conformant; viz consumes it directly
+    // Skip a frame object that's just the stale leftover from this session's
+    // PREVIOUS focus stint (see staleFrameRef comment) — it is not a
+    // response to this switch's (re)attach pull, so treating it as "the
+    // first frame" would consume suppressEventsOnce early and let the real
+    // backlog response (arriving next) animate uncontrolled (B4).
+    if (f && f !== staleFrameRef) {
+      // B4: the first frame after (re)attach carries the whole events ring
+      // as backlog (the worker doesn't yet offer a {newest} events
+      // selector, ADR-0024 §7) — apply it with events stripped so shown/
+      // heat/liveMap still snap-repaint, but no historical erase sweep
+      // replays. Advance the cursor to this frame's head so only events
+      // AFTER this point animate.
+      if (suppressEventsOnce) {
+        viz.applyFrame({ ...f, events: undefined });
+        suppressEventsOnce = false;
+      } else {
+        viz.applyFrame(f);   // FRAME is protocol-conformant; viz consumes it directly
+      }
       if (f.liveMap && f.liveMap.version != null) liveMapSince = f.liveMap.version;
       if (f.journalHead != null) journalSince = f.journalHead;
       if (f.eventHead != null) eventsSince = f.eventHead;
@@ -358,7 +401,10 @@ async function boot() {
   raf(renderTick);
 
   // ---- HUD + compare strip on the ~250ms cadence (telemetry heartbeat) ----
-  setInterval(() => { refreshHUD(); renderFsSet(); renderGap(); }, 250);
+  setInterval(() => {
+    refreshHUD(); renderFsSet(); renderGap();
+    applyCapsGating(capsFor(focusedFsId));   // A3: caps land on TELEMETRY, same ~250ms cadence
+  }, 250);
 
   // ---- standing-signal pins (spec/ui.md): the CS pin/status dot renders the
   // RAW per-frame `csActive` blinky (NO debounce); the fs-card "holding" label
