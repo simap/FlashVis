@@ -30,9 +30,10 @@
     "test:concurrency": "node scripts/lockstep-concurrency-test.mjs",
     "test:commanderror": "node scripts/command-error-test.mjs",
     "test:tapeleak": "node scripts/tape-leak-test.mjs",
-    "test:vizheat": "node scripts/viz-heat-test.mjs",
+    "test:vizframe": "node scripts/viz-frame-test.mjs",
+    "test:sessionclient": "node scripts/session-client-test.mjs",
     "test:opcount": "node scripts/opcount-test.mjs",
-    "test": "npm run test:fastffs && npm run test:integrity && npm run test:console && npm run test:domsmoke && npm run test:littlefs && npm run test:littlefs-integrity && npm run test:spiffs && npm run test:spiffs-integrity && npm run test:jesfs && npm run test:jesfs-integrity && npm run test:fatfs && npm run test:fatfs-integrity && npm run test:fatfs-render && npm run test:realsmoke && npm run test:bootformat && npm run test:concurrency && npm run test:commanderror && npm run test:tapeleak && npm run test:vizheat && npm run test:opcount",
+    "test": "npm run test:fastffs && npm run test:integrity && npm run test:console && npm run test:domsmoke && npm run test:littlefs && npm run test:littlefs-integrity && npm run test:spiffs && npm run test:spiffs-integrity && npm run test:jesfs && npm run test:jesfs-integrity && npm run test:fatfs && npm run test:fatfs-integrity && npm run test:fatfs-render && npm run test:realsmoke && npm run test:bootformat && npm run test:concurrency && npm run test:commanderror && npm run test:tapeleak && npm run test:vizframe && npm run test:sessionclient && npm run test:opcount",
     "ci": "npm run build && npm test"
   }
 }
