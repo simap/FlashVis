@@ -55,9 +55,10 @@ export function createHeatPlayer(geometry) {
   return {
     npages, pagesPerSector, sectorCount,
 
-    /** Apply ONE device event eagerly to shown/heat. Every page the op touches
-     *  gets its full HEAT_ADD (I8) — no per-page timed drain, the whole op lands
-     *  now. `reset` clears everything (a format / chip reset). */
+    /** Apply ONE device event eagerly to shown/heat (the whole op at once). Used by
+     *  the §9 prep bracket (instant, unmetered) and as the geometry-less fallback.
+     *  Every page the op touches gets its full HEAT_ADD (I8). `reset` clears
+     *  everything (a format / chip reset). */
     applyEvent(ev) {
       if (ev.op === 'reset') { this.reset(); return; }
       if (ev.op === 'erase') { eraseSector(ev.sector); return; }
@@ -66,6 +67,35 @@ export function createHeatPlayer(geometry) {
         if (ev.op === 'prog') progPage(p, ev.off, ev.len);
         else bump(p, 'read');
       }
+    },
+
+    /** Expand a device event into per-page PLAYBACK steps (ADR-0009 "multi-page ops
+     *  split to sweep page-by-page" — B17). A read/prog over N pages becomes N steps
+     *  of ns/N each, so the timed player lights one page per slot as it crosses the
+     *  op's playback span (the whole glow no longer lands in a single frame). An
+     *  erase stays one whole-sector step. The per-page ns sum to ev.ns exactly, so
+     *  playback timing is unchanged — this is intra-op granularity only. Apply each
+     *  returned step at the START of its slot via applyStep(). */
+    stepsFor(ev) {
+      if (ev.op === 'erase') return [{ ns: ev.ns || 0, op: 'erase', sector: ev.sector }];
+      const first = pageOf(ev.off), last = pageOf(ev.off + ev.len - 1);
+      const n = last - first + 1;
+      const per = (ev.ns || 0) / n;
+      const steps = new Array(n);
+      for (let k = 0; k < n; k++) {
+        const p = first + k;
+        steps[k] = ev.op === 'prog'
+          ? { ns: per, op: 'prog', page: p, off: ev.off, len: ev.len }
+          : { ns: per, op: 'read', page: p };
+      }
+      return steps;
+    },
+
+    /** Apply ONE per-page step (from stepsFor) to shown/heat — its full HEAT_ADD (I8). */
+    applyStep(ps) {
+      if (ps.op === 'prog') progPage(ps.page, ps.off, ps.len);
+      else if (ps.op === 'read') bump(ps.page, 'read');
+      else if (ps.op === 'erase') eraseSector(ps.sector);
     },
 
     /** Decay (closed-form since the last snapshot) then return the current heat

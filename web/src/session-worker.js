@@ -261,8 +261,18 @@ export function installWorkerHost(port, opts = {}) {
       if (last) { entriesDrained = entryIndex; dispFileOps += fileOps; }
       return;
     }
-    for (const ev of batch) { executedTapeNs += ev.ns || 0; pbQueue.push({ entryIndex, ns: ev.ns || 0, ev, fileOps: 0, last: false }); }
-    if (last) pbQueue.push({ entryIndex, ns: 0, ev: null, fileOps, last: true });
+    // Split each device event into per-page playback steps (B17 / ADR-0009 "multi-
+    // page ops split to sweep page-by-page"): a multi-page read/prog lights ONE page
+    // per slot as the metered player crosses it, instead of the whole glow landing at
+    // once. The per-page ns sum to the op's ns, so playback accounting is unchanged —
+    // this is intra-op granularity only. An erase stays one step (a whole-sector
+    // sweep). Falls back to the whole event if there is no heat player (geometry-less).
+    for (const ev of batch) {
+      executedTapeNs += ev.ns || 0;
+      const psteps = heat ? heat.stepsFor(ev) : [{ ns: ev.ns || 0, op: ev.op, whole: ev }];
+      for (const ps of psteps) pbQueue.push({ entryIndex, ns: ps.ns || 0, pstep: ps, fileOps: 0, last: false });
+    }
+    if (last) pbQueue.push({ entryIndex, ns: 0, pstep: null, fileOps, last: true });
   }
 
   // ---- real execution helpers (production path; require a runner) ----
@@ -536,10 +546,11 @@ export function installWorkerHost(port, opts = {}) {
     let stepBudget = MAX_OPS_PER_FRAME;
     while (pbQueue.length && stepBudget > 0) {
       const step = pbQueue[0];
-      if (!step.started) {                           // apply the op's heat/sweep at the START of its slot (viz parity)
-        if (step.ev) {
-          if (heat) heat.applyEvent(step.ev);
-          if (step.ev.op === 'erase' && events) events.push({ kind: 'erase', sector: step.ev.sector, ms: eraseMs(step.ev.ns) });
+      if (!step.started) {                           // apply the page's heat/sweep at the START of its slot (viz parity)
+        const ps = step.pstep;
+        if (ps) {
+          if (heat) { if (ps.whole) heat.applyEvent(ps.whole); else heat.applyStep(ps); }
+          if (ps.op === 'erase' && events) events.push({ kind: 'erase', sector: ps.sector, ms: eraseMs(ps.ns) });
         }
         step.curRem = step.ns; step.started = true; stepBudget--;
       }
