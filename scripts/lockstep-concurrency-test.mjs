@@ -1,922 +1,300 @@
 /*
- * Busy-lock / no-double-execution concurrency regression suite.
+ * Busy-lock / no-double-execution concurrency regression suite — ADR-0024
+ * (worker-per-session) CONVERSION.
  *
- * WHY THIS EXISTS
- * ---------------
- * Both filesystems execute the ONE canonical sequence the coordinator owns, so
- * every sequence step must run EXACTLY ONCE per session. If a step is ever
- * double-executed (a churn write applied twice, a command replayed while another
- * driver is already draining it, a mode flip re-running an in-flight step) that
- * FS's flash state silently diverges from the canonical run and the whole
- * cross-FS comparison becomes meaningless -> a data-corruption class bug with no
- * crash. lockstep.js added a unified `busy` re-entry lock (plus paceBusy, the
- * FIX A reject/rewind path and the FIX B abort/advance path) to close exactly
- * these interleavings. This suite drives the REAL coordinator + REAL sessions +
- * REAL WASM and LOCKS those fixes in: it passes now and must fail loudly if any
- * of them is reintroduced as a bug.
+ * See LANE-REPORT.md (this worktree) for the full OLD->NEW observable mapping,
+ * the seam this suite binds through, and which of the old suite's 16
+ * scenarios are converted here vs. deferred (with rationale) pending
+ * lane/coord + lane/worker landing. Short version:
  *
- * FORCING THE WINDOW (why the earlier cost-only version was vacuous)
- * -----------------------------------------------------------------
- * The bug can only manifest when a session is `busy` (mid-command) AT THE MOMENT a
- * second driver targets that same sequence[i]. At Speed a command quiesces before
- * the flipped/overlapping driver runs, so that window is never hit and no faithful
- * reintroduction of the bug changes anything - a vacuous test. Scenarios 1-3 make
- * the window DETERMINISTIC with a GATED command: its fn does one write, AWAITS a
- * gate we hold open (so its runCommand stays in-flight and the session stays
- * `busy` indefinitely), then a second write. We park both sessions in the window,
- * THEN drive the second driver squarely into it.
+ * WHY THE OLD MECHANISM DOESN'T SURVIVE THE THREAD BOUNDARY
+ * -----------------------------------------------------------
+ * The old suite imported createSession/createLockstep DIRECTLY and counted
+ * re-dispatches via a CLOSURE mutated inside the command fn, gated by a
+ * test-held promise the command's closure referenced directly. Under
+ * ADR-0024, commands ship as SOURCE TEXT and compile *inside the worker*;
+ * scripts/mock-worker-transport.mjs structuredClone's every message, so a
+ * closure counter would be silently severed — structurally wrong, not just
+ * inconvenient. This suite instead:
+ *   - counts dispatches from the worker's own JOURNAL (W2C.FRAME.journal, via
+ *     C2W.PULL) — a command that runs twice appends its op lines twice. This
+ *     is already an ADR-0018 in-band log, not a new field grafted onto the
+ *     wire; protocol.js stays untouched.
+ *   - corroborates via `drainedCounters` (fileOpCount/flashTimeNs) — a
+ *     double-executed write always reprograms, so a real double-dispatch
+ *     inflates both. (Cross-FS byte identity, the old suite's OTHER
+ *     corroboration, is NOT available: protocol.js has no message that
+ *     returns raw file bytes — see LANE-REPORT.md's protocol-ambiguity
+ *     section. Flagged for the lead, not guessed at here.)
+ *   - forces the busy window with a GATED command exactly as before, but the
+ *     gate itself is TEST RIGGING (a `globalThis.__fvTestGate` the harness
+ *     sets before compiling the command source), not a shared closure the
+ *     command depends on for its logic — see scripts/ref-worker-host.mjs's
+ *     banner for the exact boundary this crosses vs. doesn't.
  *
- * PRIMARY OBSERVABLE: a per-command `dispatches` counter (fn invocations, one per
- * session per dispatch of sequence[i]). A re-dispatch spawns a fresh fn
- * invocation, so `dispatches` climbing above sessions.length IS the double
- * execution - the direct, mode-agnostic signal. Verified by mutation (see
- * scripts/TEST-GAPS.md "Mutation evidence"): removing paceStep's busy-map
- * exclusion -> scenario 1 FAILs (4x); removing raceTick's busy-skip or step()'s
- * busy-claim -> scenario 2 FAILs; removing BOTH pace guards -> scenario 3 FAILs.
- * (paceBusy alone is defense-in-depth: redundant with the busy map in pure Pace.)
- *
- * SECONDARY: write-side device cost (programs/erases/programBytes) vs a clean
- * single run. NOTE it is compared on WRITE keys only, NOT reads/simNs: snapshots()
- * issues counted READS (a liveness walk), and a torture run that parks mid-command
- * polls at an intermediate flash state a clean run never pauses at, so reads/simNs
- * carry a harness-measurement artifact of +/-1. Write-side cost is poll-invariant
- * and is exactly what a double-executed write inflates. Cross-FS byte-identical
- * read-back is asserted too (the product invariant: both FS hold identical bytes).
- *
- * For the abort/reject scenarios, command RE-execution after an abort is the
- * ADR-0019 rewind model (by design, not a bug), so those assert recovery +
- * cross-FS byte-identity (content stays correct through an idempotent redo)
- * rather than cost-equality. The FIX B guard (a NON-command churn step aborted
- * in its barrier window) DOES assert cost-equality (all keys), because that fix
- * advances the cursor precisely so the churn op is NOT re-applied, and it does
- * not park with differential polling.
- *
- * DETERMINISM: no sleep-races. Every scenario polls the real cursor / the gate
- * counter for its condition and every pump loop has a hard iteration bound, so a
- * hang (e.g. a frozen FS from a broken lock) fails fast instead of wedging CI.
+ * WHAT MOVED: coordinator-shared "busy" -> worker-LOCAL re-entrancy
+ * -------------------------------------------------------------------
+ * The old bug class was two DIFFERENT JS call paths (paceStep/raceTick/step())
+ * racing on shared coordinator state to dispatch the same sequence[i] twice.
+ * ADR-0024 makes that architecturally impossible AT THE COORDINATOR (I9: "no
+ * per-op wire" — a worker executes its own entries serially, alone). The
+ * equivalent hazard moves worker-side: two GRANT messages (e.g. an overlapping
+ * round while a command is still mid-flight) must not spawn two concurrent
+ * dispatch loops touching the same cursor. Scenario 1 below targets exactly
+ * that guard in scripts/ref-worker-host.mjs (mutation-proven — see
+ * LANE-REPORT.md).
  */
-import { installFakeDom } from './fake-dom.mjs';
-import { createChurnModel } from '../web/src/churn.js';
-import { createSession } from '../web/src/session.js';
-// The coordinator under test is the shipped web/src/lockstep.js by default. The
-// FV_LOCKSTEP env var lets a MUTATION harness point this same suite at a scratch
-// copy of the coordinator with one guard reintroduced-as-a-bug, to PROVE each
-// scenario actually fails when its target protection is removed (test-only seam;
-// never used by npm test, which leaves it unset).
-const { createLockstep } = await import(process.env.FV_LOCKSTEP || '../web/src/lockstep.js');
+import { makeRig, drainTo, flushTurns } from './worker-harness.mjs';
 
 process.on('unhandledRejection', (e) => { console.error('\nFAIL - unhandled rejection:', (e && e.stack) || e); process.exit(1); });
-
-// ---- config mirrors playground.js so the canonical sequence behaves as shipped ----
-const GEOMETRY = { sectorSize: 4096, sectorCount: 64, pageSize: 256, granule: 1 };
-const CHURN_CFG = {
-  seed: 0x00c0ffee,
-  targetLiveBytes: 96 * 1024,
-  targetWrittenBytes: 0xffffffff,
-  targetSlackBytes: 16 * 1024,
-  forceLargeAfterBytes: 0xffffffff,
-};
-const FS_ORDER = ['fastffs', 'littlefs'];
 
 let failures = 0;
 function fail(msg) { failures++; console.error('  FAIL - ' + msg); }
 function ok(msg) { console.log('  ok   - ' + msg); }
 
-// ---- rig: a real coordinator + two real sessions under a fresh fake DOM ----
-// Each rig installs its own fake DOM BEFORE constructing the coordinator/sessions
-// so that dom.runIntervals()/dom.tick() drive ONLY this rig's coordinator tick
-// and viz frame loops; a previous rig's captured setInterval/rAF callbacks live
-// in that rig's dom closure and stay dormant.
-async function makeRig({ speed = Infinity } = {}) {
-  const dom = installFakeDom();
-  const churn = createChurnModel(CHURN_CFG);
-  const sessions = [];
-  for (const fsId of FS_ORDER) {
-    sessions.push(await createSession(fsId, { geometry: GEOMETRY, container: document.createElement('div'), name: fsId }));
-  }
-  const coord = createLockstep({ churn });
-  coord.setSessions(sessions);
-  coord.reset();                 // fresh, empty, mounted chips on both
-  coord.setSpeed(speed);
-  return { dom, coord, sessions, byId: Object.fromEntries(sessions.map((s) => [s.fsId, s])) };
-}
-
-const flushMacro = () => new Promise((r) => setTimeout(r, 0));
-function tickOnce(dom) { dom.tick(1); dom.runIntervals(); }
-
-// Drive a single pace step() to completion. A produced (non-command) pace step
-// applies its churn/gc op synchronously, then awaits a viz drain barrier that
-// only resolves on a viz frame, so it needs ticks. Bounded so a stuck step fails
-// fast rather than hanging.
-async function stepToCompletion(rig, maxIter = 3000) {
-  const p = rig.coord.step();
-  let settled = false; p.then(() => { settled = true; }, () => { settled = true; });
-  for (let g = 0; g < maxIter && !settled; g++) { await flushMacro(); tickOnce(rig.dom); }
-  if (!settled) throw new Error('stepToCompletion: a single step() never settled (frozen player?)');
-  await p;
-}
-const cursorsOf = (coord) => coord.snapshots().map((s) => s.stepCursor);
-const minCursor = (coord) => Math.min(...cursorsOf(coord));
-const maxCursor = (coord) => Math.max(...cursorsOf(coord));
-const allAt = (coord, n) => cursorsOf(coord).every((c) => c === n);
-
-// A manual Step is only safe to fire while NO session sits at the frontier
-// (maxCursor < n): a Race step() ensure()s + GENERATES a fresh churn step for a
-// session already at the frontier, which would push the sequence past our fixed
-// N queued commands and pollute the fingerprint. The check and step() run with
-// no await between them (step()'s per-session ensure() is synchronous), so the
-// gate holds. Fire-and-forget: overlapping step()/tick calls ARE the race under
-// test; the busy/paceBusy locks must arbitrate, and pump's ticks drain them.
-function tryStep(coord, n) { if (maxCursor(coord) < n) coord.step().catch(() => {}); }
-
-// Generic bounded pump: advance sim time + coordinator ticks until `done()` (or
-// throw once the hard bound is hit - a hang is a failure, never an infinite
-// wait). `each(i)` runs an optional per-iteration torture step BEFORE the tick.
-async function pump(dom, { done, each, maxIter = 8000 }) {
-  for (let i = 0; i < maxIter; i++) {
-    if (done()) return i;
-    if (each) await each(i);
-    await flushMacro();
-    tickOnce(dom);
-  }
-  if (done()) return maxIter;
-  throw new Error(`pump exceeded maxIter=${maxIter} - coordinator never converged (frozen FS / broken lock?)`);
-}
-
-// ---- broadcast a batch of distinct single-write commands at the frontier ----
-// Distinct names/sizes so a double-execution reprograms and shows up in device
-// cost. running stays false, so exactly these N steps make up the whole sequence.
-function broadcastWrites(coord, n, prefix = 'p') {
-  const names = [];
-  for (let k = 0; k < n; k++) {
-    const name = `${prefix}${k}.bin`;
-    const size = 3072 + k * 2048;
-    names.push(name);
-    coord.broadcast(async (api) => { await api.writeFile(name, size); }, `write ${name}`);
-  }
-  return names;
-}
-
-// ---- fingerprints (device cost snapshot FIRST, then read-back bytes) ----
-function fingerprint(session) {
-  const st = session.device.stats;
-  const stats = { reads: st.reads, programs: st.programs, erases: st.erases, programBytes: st.programBytes, simNs: st.simNs };
-  const files = new Map();                         // read() adds device reads, so snapshot stats above first
-  for (const name of session.runner.names().sort()) files.set(name, session.runner.read(name));
-  return { stats, files };
-}
-const bytesEqual = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
-function fileMapsEqual(a, b) {
-  if (a.size !== b.size) return false;
-  for (const [name, bytes] of a) { const o = b.get(name); if (!o || !bytesEqual(bytes, o)) return false; }
-  return true;
-}
-// Write-side cost (programs/erases/programBytes) is INVARIANT to how often the
-// harness polls snapshots(): the liveness walk snapshots() runs issues counted
-// READS (and thus simNs), so a torture run that parks mid-command and polls at an
-// intermediate flash state records a different `reads`/`simNs` than a clean run
-// that never pauses there - a measurement artifact, NOT a double-execution. A
-// double-executed WRITE, by contrast, always reprograms -> the write-side keys
-// catch it and are stable. So the gated scenarios compare on WRITE_KEYS (backed
-// by the direct dispatch counter); the non-parking scenarios use ALL_KEYS.
-const WRITE_KEYS = ['programs', 'erases', 'programBytes'];
-const ALL_KEYS = ['reads', 'programs', 'erases', 'programBytes', 'simNs'];
-function statsEqualOn(a, b, keys) { return keys.every((k) => a[k] === b[k]); }
-function statsStr(s, keys = ALL_KEYS) { return keys.map((k) => `${k}=${s[k]}`).join(' '); }
-
-// Assert a torture run's per-fsId fingerprint equals a clean reference (the
-// exactly-once signal) AND the two FS hold byte-identical files (product invariant).
-function assertMatchesReference(label, torture, reference, keys = ALL_KEYS) {
-  for (const fsId of FS_ORDER) {
-    const t = torture.byId[fsId];
-    const r = reference[fsId];
-    if (!statsEqualOn(t.stats, r.stats, keys)) fail(`${label}: ${fsId} device cost diverged from clean run (double-execution?)\n         ref : ${statsStr(r.stats, keys)}\n         got : ${statsStr(t.stats, keys)}`);
-    else ok(`${label}: ${fsId} device cost matches clean single run (${statsStr(t.stats, keys)})`);
-    if (!fileMapsEqual(t.files, r.files)) fail(`${label}: ${fsId} file bytes diverged from clean run`);
-  }
-  assertCrossFsIdentical(label, torture);
-}
-function assertCrossFsIdentical(label, run) {
-  const [a, b] = FS_ORDER.map((fsId) => run.byId[fsId].files);
-  if (!fileMapsEqual(a, b)) fail(`${label}: FASTFFS and LittleFS file bytes are NOT identical after the identical sequence`);
-  else ok(`${label}: FASTFFS and LittleFS read back byte-identical (${a.size} files)`);
-}
-function captureByFs(sessions) {
-  return { byId: Object.fromEntries(sessions.map((s) => [s.fsId, fingerprint(s)])) };
-}
-
-const N = 6;   // queued commands for the realistic long-run smoke
-
-// ---- forced-window primitive: a GATED command whose fn parks mid-execution ----
-// The round-1 scenarios were VACUOUS: at Speed a command quiesces before the
-// flipped/overlapping driver runs, so the `busy` window (a session mid-command
-// when a second driver targets sequence[i]) was never actually hit and the bug
-// could not manifest. This command does one write, then AWAITS a gate we hold
-// open, then does a second write. While parked at the gate its runCommand is
-// in-flight (fnDone=false) so runCommandOnSession never settles -> the session
-// stays `busy` DETERMINISTICALLY for as long as we like, letting us drive the
-// second driver squarely into the window. `dispatches` counts fn invocations
-// (one per session per dispatch of sequence[i]) - the DIRECT observable of the
-// no-double-execution invariant: a re-dispatch of the same step spawns a fresh
-// fn invocation, so `dispatches` climbing above sessions.length is the bug.
-// `atGate` counts how many invocations reached the gate (proves the window is
-// genuinely occupied, not just entered). GATE_A/GATE_B are the two files.
+// ---- gated command primitive (see file banner + ref-worker-host.mjs) ----
 const GATE_A = 'gate-a.bin', GATE_B = 'gate-b.bin', GATE_SIZE = 4096;
-function gatedCommand() {
-  const state = { dispatches: 0, atGate: 0, release: null };
-  const gate = new Promise((r) => { state.release = r; });
-  const fn = async (api) => {
-    state.dispatches++;
-    await api.writeFile(GATE_A, GATE_SIZE);
-    state.atGate++;
-    await gate;
-    await api.writeFile(GATE_B, GATE_SIZE);
-  };
-  return { fn, state };
+const GATED_SOURCE = `async (api) => {
+  await api.writeFile('${GATE_A}', ${GATE_SIZE});
+  await globalThis.__fvTestGate.promise;
+  await api.writeFile('${GATE_B}', ${GATE_SIZE});
+}`;
+function makeGate() {
+  let release;
+  const promise = new Promise((r) => { release = r; });
+  globalThis.__fvTestGate = { promise };
+  return { release: () => release() };
+}
+function gatedEntry(index, seed = 1) { return { index, kind: 'command', payload: GATED_SOURCE, seed }; }
+
+const countLines = (journal, substr) => journal.filter((j) => j.text.includes(substr)).length;
+
+async function pullJournal(rig, fsId, limit = 200) {
+  const frame = await rig.pull(fsId, { journal: { since: 0, limit } });
+  return frame ? frame.journal : [];
 }
 
-// Tick until `cond()` holds (or throw at the bound). Order is tick-then-flush so
-// a coordinator dispatch (on the tick) and the fn microtasks it spawns (on the
-// flush) both advance each iteration.
-async function pumpUntil(dom, cond, label, maxIter = 4000) {
+// Poll a session's pulled journal until `pred(journal)` holds, or throw at the bound.
+async function pumpUntilJournal(rig, fsId, pred, label, maxIter = 200) {
   for (let i = 0; i < maxIter; i++) {
-    if (cond()) return i;
-    tickOnce(dom);
-    await flushMacro();
+    const j = await pullJournal(rig, fsId);
+    if (pred(j)) return j;
+    await flushTurns(1);
   }
-  if (cond()) return maxIter;
-  throw new Error(`pumpUntil(${label}) exceeded ${maxIter} iterations - window never reached (or coordinator frozen)`);
+  throw new Error(`pumpUntilJournal(${label}) exceeded ${maxIter} iterations`);
 }
 
-// The exactly-once reference for a SINGLE gated command: run it once cleanly
-// (gate released immediately) and capture per-fsId cost + bytes. Every scenario
-// 1-3 torture run must land on this (each session dispatches sequence[i] once).
-async function buildGatedReference() {
+// ---- [0] exactly-once reference: a single gated command, released immediately ----
+// OLD: buildGatedReference() — dispatched===sessions.length, captured device cost.
+// NEW: same intent, dispatch counted from the worker's own journal (in-band).
+async function buildReference() {
+  console.log('\n[0] exactly-once reference for a single gated command');
   const rig = await makeRig();
-  const g = gatedCommand();
-  rig.coord.broadcast(g.fn, 'gated-ref');
-  rig.coord.setMode('pace');
-  g.state.release();                                     // no parking: a clean single run
-  await pump(rig.dom, { done: () => allAt(rig.coord, 1) });
-  if (g.state.dispatches !== FS_ORDER.length) fail(`gated reference dispatched ${g.state.dispatches} times, expected ${FS_ORDER.length}`);
-  const cap = captureByFs(rig.sessions);
-  assertCrossFsIdentical('gated-reference', cap);
-  return cap.byId;
-}
-const expectDispatches = (g, want, label) => {
-  if (g.state.dispatches !== want) fail(`${label}: sequence[i] dispatched ${g.state.dispatches} times, expected ${want} (a re-dispatch = double execution)`);
-  else ok(`${label}: dispatched exactly ${want}x (no double execution)`);
-};
-
-// ---- Scenario 1: race->pace flip while a RACE command is mid-drain (busy) ----
-// Targets the busy-map exclusion in paceStep's `due` filter (the load-bearing
-// guard for the CROSS-mode path: raceTick sets `busy` with no paceBusy held, so
-// only `&& !busy.get(s)` stops paceStep from re-dispatching sequence[i] after the
-// flip). We first PARK both sessions mid-command in Race (busy set), THEN flip to
-// Pace and run paceStep repeatedly while still parked. dispatches must stay at
-// sessions.length.
-async function scenarioModeFlip(reference) {
-  console.log('\n[1] race->pace flip while a race command is mid-drain (busy-map exclusion)');
-  const rig = await makeRig();
-  const g = gatedCommand();
-  rig.coord.broadcast(g.fn, 'gated s1');
-  rig.coord.setMode('race');
-  await pumpUntil(rig.dom, () => g.state.atGate >= FS_ORDER.length, 's1-window');   // both sessions parked mid-command in Race
-  if (g.state.atGate !== FS_ORDER.length || g.state.dispatches !== FS_ORDER.length) fail(`s1 window not clean: dispatches=${g.state.dispatches} atGate=${g.state.atGate}`);
-  else ok(`window reached: both sessions parked mid-command in Race (busy set), dispatches=${g.state.dispatches}`);
-  rig.coord.setMode('pace');                             // flip while still parked; paceStep now runs against busy sessions
-  for (let k = 0; k < 10; k++) { tickOnce(rig.dom); await flushMacro(); }
-  expectDispatches(g, FS_ORDER.length, 's1 after race->pace flip');
-  g.state.release();
-  await pump(rig.dom, { done: () => allAt(rig.coord, 1) });
-  assertMatchesReference('mode-flip', captureByFs(rig.sessions), reference, WRITE_KEYS);
-}
-
-// ---- Scenario 2: step() and raceTick both targeting a busy Race command ----
-// Targets raceTick's `if (busy.get(s)) continue` AND step()'s synchronous busy
-// claim / skip. Park both sessions mid-command in Race (raceTick set busy), then
-// (a) run many more raceTicks - raceTick must not re-dispatch a busy session; and
-// (b) call step() - it must skip a session raceTick is draining. dispatches stays
-// at sessions.length through both.
-async function scenarioStepVsRaceTick(reference) {
-  console.log('\n[2] step() vs raceTick draining a command (raceTick busy-skip + step busy-claim)');
-  const rig = await makeRig();
-  const g = gatedCommand();
-  rig.coord.broadcast(g.fn, 'gated s2');
-  rig.coord.setMode('race');
-  await pumpUntil(rig.dom, () => g.state.atGate >= FS_ORDER.length, 's2-window');
-  ok(`window reached: both sessions parked mid-command in Race (busy set), dispatches=${g.state.dispatches}`);
-  for (let k = 0; k < 10; k++) { tickOnce(rig.dom); await flushMacro(); }   // (a) raceTick must not re-dispatch busy sessions
-  expectDispatches(g, FS_ORDER.length, 's2 after extra raceTicks');
-  // (b) step() must skip busy sessions. Fire-and-forget (never awaited unbounded):
-  // if the busy-claim is broken the re-dispatched command parks at OUR gate, so an
-  // `await step()` here would hang. We instead observe the re-dispatch via the
-  // counter, then release + drain, then let step() settle.
-  const sp = rig.coord.step(); sp.catch(() => {});
-  for (let k = 0; k < 6; k++) { tickOnce(rig.dom); await flushMacro(); }
-  expectDispatches(g, FS_ORDER.length, 's2 after step() over busy sessions');
-  g.state.release();
-  await pump(rig.dom, { done: () => allAt(rig.coord, 1) });
-  await sp.catch(() => {});
-  assertMatchesReference('step-vs-racetick', captureByFs(rig.sessions), reference, WRITE_KEYS);
-}
-
-// ---- Scenario 3: step() overlapping an in-flight paceStep command ----
-// Park both sessions mid-command in Pace (the interval's paceStep dispatched and
-// is awaiting `run`, so paceBusy is held AND busy is set), then call step().
-// step() must not produce a second dispatch. NOTE (see TEST-GAPS + the mutation
-// report): in the PURE-pace overlap the two guards are mutually redundant -
-// paceBusy blocks re-entry and the busy map blocks re-dispatch - so removing
-// EITHER alone leaves dispatches at sessions.length; the busy map is shown
-// load-bearing by scenario 1's cross-mode path. This scenario still asserts the
-// invariant (no second dispatch) directly.
-async function scenarioStepVsPaceStep(reference) {
-  console.log('\n[3] step() vs in-flight paceStep command (pace overlap)');
-  const rig = await makeRig();
-  const g = gatedCommand();
-  rig.coord.broadcast(g.fn, 'gated s3');
-  rig.coord.setMode('pace');
-  await pumpUntil(rig.dom, () => g.state.atGate >= FS_ORDER.length, 's3-window');   // paceStep in-flight, parked, paceBusy held
-  ok(`window reached: paceStep in-flight, both sessions parked mid-command (paceBusy + busy set), dispatches=${g.state.dispatches}`);
-  const sp = rig.coord.step(); sp.catch(() => {});                                 // overlapping manual Step (fire-and-forget; see s2)
-  for (let k = 0; k < 6; k++) { tickOnce(rig.dom); await flushMacro(); }
-  expectDispatches(g, FS_ORDER.length, 's3 after overlapping step()');
-  g.state.release();
-  await pump(rig.dom, { done: () => allAt(rig.coord, 1) });
-  await sp.catch(() => {});
-  assertMatchesReference('step-vs-pacestep', captureByFs(rig.sessions), reference, WRITE_KEYS);
-}
-
-// ---- Scenario 1b: realistic long run, flipping modes throughout ----
-// End-to-end smoke (NOT the sharp per-guard guard - scenarios 1-3 are): N real
-// commands drained while flipping race<->pace continuously must still land on the
-// clean single-run fingerprint and stay cross-FS identical.
-async function scenarioRealisticModeFlip() {
-  console.log('\n[1b] realistic long run with continuous mode flips (smoke)');
-  const ref = await (async () => {
-    const rig = await makeRig();
-    broadcastWrites(rig.coord, N);
-    rig.coord.setMode('pace');
-    await pump(rig.dom, { done: () => allAt(rig.coord, N) });
-    return captureByFs(rig.sessions).byId;
-  })();
-  const rig = await makeRig();
-  broadcastWrites(rig.coord, N);
-  rig.coord.setMode('race');
-  await pump(rig.dom, {
-    done: () => allAt(rig.coord, N),
-    each: (i) => { if (i % 2 === 0) rig.coord.setMode(rig.coord.mode === 'race' ? 'pace' : 'race'); },
-  });
-  assertMatchesReference('realistic-mode-flip', captureByFs(rig.sessions), ref);
-}
-
-// ---- Scenario 4: a rejecting command (throwing journal subscriber) ----
-// FIX A: a per-session reject must RELEASE the busy lock and rewind (cursor
-// stays at i) so the FS is recoverable, not frozen. We throw exactly ONCE on the
-// probe command's 'live' transition for FASTFFS; the retry then succeeds. Assert
-// the coordinator recovers (converges within bound - a frozen FS would time out)
-// and stays cross-FS byte-identical (the redo is idempotent). Cost is NOT
-// asserted here: command re-execution after an abort is the ADR-0019 model.
-async function scenarioRejectingCommand() {
-  console.log('\n[4] rejecting command releases the lock (FIX A)');
-  const rig = await makeRig();
-  rig.coord.setMode('pace');
-  let thrown = false;
-  const unsub = rig.byId.fastffs.onJournal((change) => {
-    if (!thrown && change.type === 'update' && change.entry.state === 'live' && change.entry.text.includes('probe')) {
-      thrown = true;
-      throw new Error('boom - simulated throwing journal subscriber');
-    }
-  });
-  rig.coord.broadcast(async (api) => { await api.writeFile('probe.bin', 5000); }, 'write probe');
-  broadcastWrites(rig.coord, N);                         // N more normal writes behind it
-  const total = N + 1;
-  await pump(rig.dom, { done: () => allAt(rig.coord, total) });
-  unsub();
-  if (!thrown) fail('scenario 4: the throwing subscriber never fired (test did not exercise the reject path)');
-  else ok('reject fired once, coordinator recovered and drained all commands (lock released, not frozen)');
-  if (!allAt(rig.coord, total)) fail('scenario 4: cursors did not all reach the frontier after recovery');
-  assertCrossFsIdentical('reject-recovery', captureByFs(rig.sessions));
-}
-
-// ---- Scenario 5: stop() aborting a NON-command churn step in its barrier
-// window (FIX B). The churn write is applied synchronously by runEntry, then the
-// round awaits the drain barrier; a stop() landing there MUST advance the cursor
-// so resume does not re-apply the same churn op (double simNs/wear/divergence).
-// We drive this deterministically without ticks: step()'s paceStep suspends at
-// the barrier await, we stop() synchronously (resolving tok.promise unblocks the
-// Promise.race), FIX B advances the cursor, then we run more steps and compare
-// per-fsId cost to a clean run of the same step count. ----
-async function scenarioAbortNonCommand() {
-  console.log('\n[5] stop() aborts a churn step mid-barrier without double-applying (FIX B)');
-  const M = 8;
-  // clean reference: M produced steps, no interruption
-  const ref = await makeRig();
-  ref.coord.setMode('pace');
-  for (let k = 0; k < M; k++) await stepToCompletion(ref);
-  const refCap = captureByFs(ref.sessions).byId;
-
-  // torture: interrupt the FIRST produced step in its barrier window, then run the rest.
-  // step() suspends at the drain barrier BEFORE any tick, so stop() lands squarely in
-  // the FIX B window; the abort resolves via tok.promise with no tick needed.
-  const rig = await makeRig();
-  rig.coord.setMode('pace');
-  const p = rig.coord.step();     // produces step 0, applies it synchronously, suspends at the barrier await
-  rig.coord.stop();               // aborts in the barrier window -> FIX B must advance the cursor
-  await p;
-  if (!allAt(rig.coord, 1)) fail(`scenario 5: cursor after aborted churn step is ${cursorsOf(rig.coord)}, expected [1,1] (FIX B must advance)`);
-  else ok('aborted churn step advanced the cursor (no rewind of an already-applied churn op)');
-  for (let k = 1; k < M; k++) await stepToCompletion(rig);
-  const cap = captureByFs(rig.sessions);
-  for (const fsId of FS_ORDER) {
-    if (!statsEqualOn(cap.byId[fsId].stats, refCap[fsId].stats, ALL_KEYS)) fail(`scenario 5: ${fsId} cost diverged - churn step double-applied across the abort\n         ref : ${statsStr(refCap[fsId].stats)}\n         got : ${statsStr(cap.byId[fsId].stats)}`);
-    else ok(`${fsId} cost matches clean ${M}-step run (${statsStr(cap.byId[fsId].stats)})`);
+  rig.broadcastEntries([gatedEntry(0)]);
+  const gate = makeGate();
+  gate.release();                                    // no parking: a clean single run
+  await drainTo(rig, 1);
+  const ref = {};
+  for (const s of rig.sessions) {
+    const j = await pullJournal(rig, s.fsId);
+    const dispatches = countLines(j, `write(${GATE_A}`);
+    if (dispatches !== 1) fail(`reference: ${s.fsId} dispatched ${dispatches}x, expected 1`);
+    ref[s.fsId] = { drainedCounters: s.standing.drainedCounters };
   }
-  assertCrossFsIdentical('abort-non-command', cap);
+  ok(`reference captured (fastffs cost=${JSON.stringify(ref.fastffs.drainedCounters)}, littlefs cost=${JSON.stringify(ref.littlefs.drainedCounters)})`);
+  return ref;
 }
 
-// ---- Scenario 6: stop() aborting a multi-op command mid-drain, then resume ----
-// The ADR-0019 command-abort model rewinds the cursor and re-issues the command
-// fresh. A finite speed makes each multi-op command span several ticks so the
-// stop lands INSIDE one. Assert the coordinator recovers (converges), the
-// aborted command re-runs to completion, and both FS stay byte-identical.
-async function scenarioAbortCommand() {
-  console.log('\n[6] stop() aborts a command mid-drain, resumes cleanly (ADR-0019 rewind)');
-  const rig = await makeRig({ speed: 20000 });     // finite: commands span multiple ticks
-  rig.coord.setMode('pace');
-  for (let k = 0; k < N; k++) {
-    const a = `m${k}a.bin`, b = `m${k}b.bin`, sz = 4000 + k * 1500;
-    rig.coord.broadcast(async (api) => { await api.writeFile(a, sz); await api.readFile(a); await api.writeFile(b, sz + 512); }, `cmd ${k}`);
-  }
-  let stopped = false;
-  await pump(rig.dom, {
-    done: () => allAt(rig.coord, N),
-    each: () => { if (!stopped && minCursor(rig.coord) >= 2) { stopped = true; rig.coord.stop(); } },
-    maxIter: 20000,
-  });
-  if (!stopped) fail('scenario 6: never reached a mid-drain point to stop() at');
-  else ok('stop() landed mid-command; coordinator recovered and drained all commands');
-  if (!allAt(rig.coord, N)) fail('scenario 6: cursors did not all reach the frontier after recovery');
-  assertCrossFsIdentical('abort-command', captureByFs(rig.sessions));
-}
-
-// ---- Scenario 7: Pace->Race raceClock reseat = min(simNs); no burst, no jam ----
-// The ADR-0020 fix: on setMode('pace'->'race') the shared raceClock is reseated to
-// the LOWEST participant simNs. So the frontier FS (that min) paces from its first
-// op (clock climbs past it), while an ahead FS (higher simNs) correctly STALLS until
-// the clock overtakes it - it does NOT burst flat-out (stale-high clock bug) and the
-// frontier is NOT jammed shut (stale-low/zero clock bug). We diverge the two FS in
-// Pace (cursors equal, simNs differs by per-FS cost), queue fresh work, switch to
-// Race at no-delay (deterministic clock chunks, independent of wall-clock dt), and
-// assert on the first few race ticks: frontier advances into the new queue, ahead
-// holds at the switch cursor and reads `stalled`. Uses a large batch so simNs (and
-// the gap) dwarf the NO_DELAY clock chunk, making the reseat effect unambiguous.
-async function scenarioRaceReseat() {
-  console.log('\n[7] Pace->Race reseat: frontier paces, ahead FS stalls (no burst, no jam)');
-  const BATCH = N;                                      // small writes: a big simNs gap without overflowing the chip
-  const rig = await makeRig();                          // Infinity speed: clock jumps a fixed chunk per tick
-  broadcastWrites(rig.coord, BATCH, 'a');
-  rig.coord.setMode('pace');
-  await pump(rig.dom, { done: () => allAt(rig.coord, BATCH) });
-  const simNs = Object.fromEntries(rig.sessions.map((s) => [s.fsId, s.device.stats.simNs]));
-  const ahead = simNs.fastffs >= simNs.littlefs ? 'fastffs' : 'littlefs';
-  const frontier = ahead === 'fastffs' ? 'littlefs' : 'fastffs';
-  const gap = Math.abs(simNs.fastffs - simNs.littlefs);
-  if (gap <= 250 * 1e6) { fail(`s7 precondition: simNs gap ${gap} too small to distinguish stall from advance (need > 250ms)`); return; }
-  ok(`diverged in Pace: ${frontier} simNs=${simNs[frontier]} (frontier), ${ahead} simNs=${simNs[ahead]} (ahead), gap=${(gap / 1e6).toFixed(0)}ms`);
-  broadcastWrites(rig.coord, BATCH, 'b');              // fresh queued work for both, at cursor BATCH..2*BATCH-1
-  rig.coord.setMode('race');
-  for (let k = 0; k < 4; k++) { tickOnce(rig.dom); await flushMacro(); }   // baseline + a few working ticks (clock climb < the gap)
-  const snaps = Object.fromEntries(rig.coord.snapshots().map((s) => [s.fsId, s]));
-  if (snaps[frontier].stepCursor <= BATCH) fail(`s7: frontier ${frontier} did not advance after Pace->Race (raceClock not reseated to min -> jammed at cursor ${snaps[frontier].stepCursor})`);
-  else ok(`frontier ${frontier} paced into the new queue (cursor ${BATCH} -> ${snaps[frontier].stepCursor}); clock reseated to min simNs`);
-  if (snaps[ahead].stepCursor !== BATCH) fail(`s7: ahead ${ahead} advanced to ${snaps[ahead].stepCursor} (burst) instead of holding at ${BATCH}`);
-  else ok(`ahead ${ahead} held at cursor ${BATCH} (no burst - above the reseated clock)`);
-  if (!snaps[ahead].stalled) fail(`s7: ahead ${ahead} not flagged stalled while waiting for the clock to climb`);
-  else ok(`ahead ${ahead} correctly flagged stalled`);
-  if (snaps[frontier].stalled) fail(`s7: frontier ${frontier} wrongly flagged stalled while it is the one racing`);
-  else ok(`frontier ${frontier} not stalled (it is racing)`);
-}
-
-// ---- Scenario 8: reset() and setSessions cleanup ----
-// reset() must give a byte-for-byte reproducible run (chip freshly formatted,
-// cursors 0, sequence + queued commands cleared, churn + cmdRng re-seeded, race
-// clock zeroed); a stale carryover in any of those diverges the second run.
-// setSessions() dropping a session must delete its per-session Map state so a
-// re-added session starts at cursor 0 (not a retained stale cursor), and a late
-// command settle for an already-removed session must not wedge or resurrect it.
-async function scenarioResetAndSetSessions() {
-  console.log('\n[8] reset() reproducibility + setSessions cleanup');
-  // (a) reset() reproducibility. Uses PRODUCED (churn/gc) steps, not fixed
-  // broadcasts, so the check exercises every piece reset() must clear/re-seed:
-  // chip freshFormat, cursors 0, sequence cleared, the gc/event coin (rnd) AND the
-  // churn model re-seeded. A stale carryover in any of them diverges run 2 - a
-  // re-broadcast of identical commands would reproduce by accident and hide it.
-  const M = 8;
+// ---- [1] exactly-once dispatch under an OVERLAPPING grant round (the new
+// analog of old scenarios 1-3: a second GRANT lands while the worker's dispatch
+// loop is already mid-command). Targets ref-worker-host.mjs's per-epoch
+// re-entrancy guard (runningEpoch) — the worker-LOCAL equivalent of the old
+// coordinator busy-map. Mutation-proven: FV_REF_HOST_NO_GUARD=1 makes this FAIL
+// (see LANE-REPORT.md "Mutation evidence"). ----
+async function scenarioOverlappingGrant(reference) {
+  console.log('\n[1] exactly-once dispatch under an overlapping GRANT round (worker-local re-entrancy)');
   const rig = await makeRig();
-  rig.coord.setMode('pace');
-  for (let k = 0; k < M; k++) await stepToCompletion(rig);
-  const cap1 = captureByFs(rig.sessions).byId;
-  rig.coord.reset();
-  if (!allAt(rig.coord, 0)) fail('reset: cursors not zeroed');
-  else if (rig.sessions.some((s) => s.runner.names().length)) fail('reset: chip not empty after reset (files remain)');
-  else ok('reset: cursors zeroed and both chips freshly formatted');
-  for (let k = 0; k < M; k++) await stepToCompletion(rig);
-  const cap2 = captureByFs(rig.sessions).byId;
-  for (const fsId of FS_ORDER) {
-    if (!statsEqualOn(cap1[fsId].stats, cap2[fsId].stats, ALL_KEYS) || !fileMapsEqual(cap1[fsId].files, cap2[fsId].files)) {
-      fail(`reset: ${fsId} second ${M}-step run diverged from the first (stale sequence/cursor/churn/rnd/chip carryover)\n         run1: ${statsStr(cap1[fsId].stats)}\n         run2: ${statsStr(cap2[fsId].stats)}`);
-    } else ok(`reset: ${fsId} re-run is byte-for-byte reproducible (${statsStr(cap2[fsId].stats)})`);
+  rig.broadcastEntries([gatedEntry(0)]);
+  const gate = makeGate();
+  // round 0: entryLimit=1 — every session starts the gated command and parks
+  // at the gate (writes GATE_A, then awaits). Fire without waiting for the
+  // barrier (the ack won't land until the gate opens).
+  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 0, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
+  for (const fsId of ['fastffs', 'littlefs']) {
+    await pumpUntilJournal(rig, fsId, (j) => countLines(j, `write(${GATE_A}`) >= 1, `s1-window-${fsId}`);
   }
-
-  // (b) setSessions drops a removed session's cursor -> re-add starts fresh at 0
-  const rig2 = await makeRig();
-  broadcastWrites(rig2.coord, 3);
-  rig2.coord.setMode('pace');
-  await pump(rig2.dom, { done: () => allAt(rig2.coord, 3) });     // both at cursor 3
-  rig2.coord.setSessions([rig2.byId.fastffs]);                    // remove littlefs (was at cursor 3)
-  const s1 = rig2.coord.snapshots();
-  if (s1.length !== 1 || s1[0].fsId !== 'fastffs') fail(`setSessions: snapshots still includes the removed session (${s1.map((x) => x.fsId)})`);
-  else ok('setSessions: removed session gone from snapshots()');
-  rig2.coord.setSessions([rig2.byId.fastffs, rig2.byId.littlefs]);   // re-add littlefs
-  const lf = rig2.coord.snapshots().find((x) => x.fsId === 'littlefs');
-  if (!lf || lf.stepCursor !== 0) fail(`setSessions: re-added session cursor is ${lf && lf.stepCursor}, expected 0 (stale cursor retained instead of dropped)`);
-  else ok('setSessions: re-added session starts at cursor 0 (stale cursor was dropped)');
-
-  // (c) a late command settle for an already-removed session must not wedge/crash
-  const rig3 = await makeRig();
-  const g = gatedCommand();
-  rig3.coord.broadcast(g.fn, 'gated s8');
-  rig3.coord.setMode('race');
-  await pumpUntil(rig3.dom, () => g.state.atGate >= FS_ORDER.length, 's8-window');   // both busy, parked mid-command
-  rig3.coord.setSessions([rig3.byId.fastffs]);                    // remove littlefs WHILE its command is in-flight
-  g.state.release();
-  await pump(rig3.dom, { done: () => (rig3.coord.snapshots()[0]?.stepCursor ?? 0) >= 1, maxIter: 4000 });
-  const s3 = rig3.coord.snapshots();
-  if (s3.length !== 1 || s3[0].fsId !== 'fastffs') fail(`setSessions: removed-mid-command session leaked back into snapshots (${s3.map((x) => x.fsId)})`);
-  else if (s3[0].stepCursor !== 1) fail(`setSessions: surviving session did not complete after a peer was removed mid-command (cursor ${s3[0].stepCursor})`);
-  else ok('setSessions: removing a session mid-command did not wedge the survivor; its late settle was a guarded no-op');
+  ok('window reached: both sessions parked mid-command (wrote GATE_A, awaiting the gate)');
+  // round 1: OVERLAPPING grant while still parked — a broken re-entrancy guard
+  // would spawn a second dispatch loop and re-run entries[0] from scratch.
+  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 1, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
+  await flushTurns(10);
+  for (const fsId of ['fastffs', 'littlefs']) {
+    const j = await pullJournal(rig, fsId);
+    const n = countLines(j, `write(${GATE_A}`);
+    if (n !== 1) fail(`s1: ${fsId} dispatched ${n}x after the overlapping grant (expected 1 — a re-dispatch = double execution)`);
+    else ok(`s1: ${fsId} still dispatched exactly 1x after the overlapping grant`);
+  }
+  gate.release();
+  await drainTo(rig, 1);
+  for (const s of rig.sessions) {
+    const j = await pullJournal(rig, s.fsId);
+    const nA = countLines(j, `write(${GATE_A}`), nB = countLines(j, `write(${GATE_B}`);
+    if (nA !== 1 || nB !== 1) fail(`s1: ${s.fsId} final dispatch count A=${nA} B=${nB}, expected 1/1`);
+    else ok(`s1: ${s.fsId} settled at exactly 1 dispatch (A and B each written once)`);
+    const dc = s.standing.drainedCounters, rc = reference[s.fsId].drainedCounters;
+    if (dc.fileOpCount !== rc.fileOpCount || dc.flashTimeNs !== rc.flashTimeNs) {
+      fail(`s1: ${s.fsId} drainedCounters diverged from the clean reference (fileOpCount ${dc.fileOpCount} vs ${rc.fileOpCount}, flashTimeNs ${dc.flashTimeNs} vs ${rc.flashTimeNs})`);
+    } else ok(`s1: ${s.fsId} drainedCounters match the clean single-dispatch reference`);
+  }
 }
 
-// ---- Scenario 9: opsPerSec tracks WORKLOAD ops (stepCursor), never flash ops ----
-// ADR-0020: snapshots().opsPerSec is the EMA rate of stepCursor (sequence steps
-// consumed), NOT device flash ops (reads+programs+erases). The original defect
-// measured flash ops, so chatty LittleFS posted a huge ops/sec while doing LESS
-// real work. In Pace the two FS consume workload steps in lockstep (equal
-// cursors), so opsPerSec must be EQUAL across FS even though their flash-op counts
-// differ - a flash-ops metric would skew the two apart. We run both under real
-// churn, then assert opsPerSec is positive, equal across FS, and decoupled from
-// the flash-op gap. Mutation (opsOf -> reads+programs+erases) makes them diverge.
-async function scenarioOpsPerSecWorkload() {
-  console.log('\n[9] opsPerSec tracks WORKLOAD ops (stepCursor), never flash ops');
-  const rig = await makeRig();                          // Infinity: cursors advance briskly
-  rig.coord.setMode('pace');
-  rig.coord.start();                                    // real auto-churn
-  for (let k = 0; k < 120; k++) { tickOnce(rig.dom); await flushMacro(); }
-  const snaps = Object.fromEntries(rig.coord.snapshots().map((s) => [s.fsId, s]));
-  const ff = snaps.fastffs, lf = snaps.littlefs;
-  const flashOps = (fsId) => { const t = rig.byId[fsId].device.stats; return t.reads + t.programs + t.erases; };
-  if (ff.stepCursor !== lf.stepCursor) fail(`[9] pace cursors not in lockstep (${ff.stepCursor} vs ${lf.stepCursor}) - cannot compare opsPerSec`);
-  else ok(`workload cursors in lockstep at ${ff.stepCursor} (stepCursor advances 1:1 with steps consumed)`);
-  const fo = { fastffs: flashOps('fastffs'), littlefs: flashOps('littlefs') };
-  const flashRatio = Math.max(fo.fastffs, fo.littlefs) / Math.min(fo.fastffs, fo.littlefs);
-  if (flashRatio < 1.1) fail(`[9] precondition: flash ops too similar (${fo.fastffs} vs ${fo.littlefs}) to distinguish the two metrics`);
-  else ok(`flash ops differ ${flashRatio.toFixed(2)}x between FS (ff ${fo.fastffs}, lf ${fo.littlefs}) - a flash-ops metric WOULD skew them apart`);
-  if (!(ff.opsPerSec > 0) || !(lf.opsPerSec > 0)) { fail(`[9] opsPerSec not positive during an active run (ff ${ff.opsPerSec}, lf ${lf.opsPerSec})`); return; }
-  const d = Math.abs(ff.opsPerSec - lf.opsPerSec);
-  if (d > 1e-6 * Math.max(ff.opsPerSec, lf.opsPerSec)) fail(`[9] opsPerSec diverges between FS (ff ${ff.opsPerSec}, lf ${lf.opsPerSec}) - measuring flash ops, not workload ops?`);
-  else ok(`opsPerSec equal across FS (${ff.opsPerSec.toFixed(3)} ops/s) despite the ${flashRatio.toFixed(1)}x flash-op gap - it is the workload-op rate`);
-}
-
-// ---- Scenario 10: Race `stalled` - SET after divergence, never both, CLEAR ----
-// stalled is the exact indicator that silently never fired before. After a
-// Pace->Race divergence the ahead FS (higher simNs) sits above the reseated clock
-// and reads stalled=true; the frontier FS (the clock floor, min simNs) never does.
-// It clears once the race drains to idle (raceTick re-baselines lastTickNow, and
-// `stalled` is gated on lastTickNow!==0). Clock driven by no-delay chunks, not
-// wall-clock dt. NOTE: "steady race never stalls" is NOT asserted - a single
-// LittleFS op's simNs cost exceeds STALL_GAP_NS (50ms), so the chattier FS
-// transiently overshoots the frontier by > the threshold even without a prior
-// Pace divergence (a real property of the current threshold; see TEST-GAPS).
-async function scenarioRaceStalled() {
-  console.log('\n[10] Race stalled: sets for the ahead FS, never both, clears on drain-to-idle');
+// ---- [2] grant continuity / no-op re-grant is idempotent (I10) ----
+// OLD: not directly covered (implicit in the old suite's cost-equality checks).
+// NEW coverage required by ADR-0024 §13: "activity in a no-op ack = a bug".
+async function scenarioNoOpGrantIdempotent() {
+  console.log('\n[2] a re-sent grant with unchanged limits is a true no-op (I10)');
   const rig = await makeRig();
-  broadcastWrites(rig.coord, N, 'a');
-  rig.coord.setMode('pace');
-  await pump(rig.dom, { done: () => allAt(rig.coord, N) });
-  if (rig.coord.snapshots().some((s) => s.stalled)) fail('[10] stalled flagged in Pace mode (mode guard broken)');
-  else ok('stalled is false in Pace mode (mode guard)');
-  const simNs = Object.fromEntries(rig.sessions.map((s) => [s.fsId, s.device.stats.simNs]));
-  const ahead = simNs.fastffs >= simNs.littlefs ? 'fastffs' : 'littlefs';
-  broadcastWrites(rig.coord, N, 'b');                   // fresh queued work
-  rig.coord.setMode('race');
-  let sawAheadStalled = false, sawBoth = false, drained = false;
-  for (let t = 0; t < 300 && !drained; t++) {
-    tickOnce(rig.dom); await flushMacro();
-    const s = Object.fromEntries(rig.coord.snapshots().map((x) => [x.fsId, x]));
-    if (s[ahead].stalled) sawAheadStalled = true;
-    if (s.fastffs.stalled && s.littlefs.stalled) sawBoth = true;
-    drained = s.fastffs.stepCursor === 2 * N && s.littlefs.stepCursor === 2 * N;
+  rig.broadcastEntries([{ index: 0, kind: 'command', payload: `async (api) => { await api.writeFile('once.bin', 2048); }`, seed: 7 }]);
+  await drainTo(rig, 1);
+  const before = {};
+  for (const s of rig.sessions) before[s.fsId] = { j: (await pullJournal(rig, s.fsId)).length, dc: { ...s.standing.drainedCounters } };
+  // re-send the SAME (already-satisfied) limits at a fresh round number —
+  // protocol.js: "ALWAYS sent per frame; a no-op grant... when idle".
+  const r = 999;
+  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: r, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
+  await flushTurns(5);
+  for (const s of rig.sessions) {
+    if (s.standing.round < r) fail(`s2: ${s.fsId} never acked the no-op re-grant (round stuck at ${s.standing.round})`);
+    else ok(`s2: ${s.fsId} acked the no-op re-grant (round ${s.standing.round})`);
+    const j = await pullJournal(rig, s.fsId);
+    const dc = s.standing.drainedCounters;
+    if (j.length !== before[s.fsId].j || dc.fileOpCount !== before[s.fsId].dc.fileOpCount || dc.flashTimeNs !== before[s.fsId].dc.flashTimeNs) {
+      fail(`s2: ${s.fsId} showed activity on a no-op grant (journal ${before[s.fsId].j}->${j.length}, cost changed)`);
+    } else ok(`s2: ${s.fsId} showed no activity on the no-op re-grant (journal/cost unchanged)`);
   }
-  if (!sawAheadStalled) fail(`[10] ahead FS (${ahead}) never flagged stalled after a Pace->Race divergence (the indicator that silently never fired)`);
-  else ok(`ahead FS (${ahead}) flagged stalled after the Pace->Race divergence`);
-  if (sawBoth) fail('[10] both FS flagged stalled at once (the frontier holds the clock floor and is never stalled)');
-  else ok('never both FS stalled at once');
-  if (!drained) { fail('[10] queued work never drained under race (cannot observe the stall clear)'); return; }
-  for (let t = 0; t < 20; t++) { tickOnce(rig.dom); await flushMacro(); }   // let the idle re-baseline land
-  if (rig.coord.snapshots().some((s) => s.stalled)) fail('[10] stalled did not clear after the race drained to idle');
-  else ok('stalled cleared once the race drained to idle (lastTickNow re-baselined)');
+  // a re-sent/duplicated ENTRIES window for the SAME index (e.g. a retried
+  // prefetch after a dropped ack) must not double-append -> double-execute.
+  for (const s of rig.sessions) s.send('entries', { epoch: rig.getEpoch(), entries: [{ index: 0, kind: 'command', payload: `async (api) => { await api.writeFile('once.bin', 2048); }`, seed: 7 }] });
+  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 1000, entryLimit: 5, playLimitNs: 1e15, scale: 1 });
+  await flushTurns(10);
+  for (const s of rig.sessions) {
+    const j = await pullJournal(rig, s.fsId);
+    const n = countLines(j, 'write(once.bin');
+    if (n !== 1) fail(`s2: ${s.fsId} entries[0] executed ${n}x after a duplicated ENTRIES resend (expected 1 — dedup by index required)`);
+    else ok(`s2: ${s.fsId} a duplicated ENTRIES resend for index 0 did not re-execute it`);
+    if (s.standing.cursor !== 1) fail(`s2: ${s.fsId} cursor moved to ${s.standing.cursor} off a duplicate-only resend (expected to stay at 1, nothing new queued)`);
+  }
 }
 
-// ---- Scenario 11: Pace `holding` - SET for the cursor-lead FS, CLEAR on converge ----
-// After a Race->Pace switch a session whose cursor LEADS the shared min (it raced
-// ahead) is parked in the round's barrier with nothing new to run until the
-// laggard reaches it: holding=true. It clears once the laggard converges to its
-// cursor. Mutation (drop the `cursor > minCursor` term) makes the lead never flag.
-async function scenarioPaceHolding() {
-  console.log('\n[11] Pace holding: sets for the cursor-lead FS, clears on convergence');
+// ---- [3] epoch discard (I5) + reset starves an in-flight round (§8) ----
+// OLD scenario 16(b): "bare reset() abandons a parked command -- no zombie ops
+// on the fresh chip". NEW: same intent, in-band via drainedCounters/journal
+// pulled post-reset, and epoch is the wire-level discriminant instead of an
+// in-process token/abort.
+async function scenarioEpochDiscard() {
+  console.log('\n[3] reset() bumps epoch; a mid-flight round starves, never lands in the new epoch (I5 + §8)');
   const rig = await makeRig();
-  rig.coord.setMode('race');
-  rig.coord.start();                                    // race diverges cursors (cheaper FS gets ahead)
-  await pump(rig.dom, { done: () => (maxCursor(rig.coord) - minCursor(rig.coord)) >= 3, maxIter: 600 });
-  if (rig.coord.snapshots().some((s) => s.holding)) fail('[11] holding flagged in Race mode (mode guard broken)');
-  else ok('holding is false in Race mode (mode guard)');
-  rig.coord.stop();
-  rig.coord.setMode('pace');
-  // Unified holding semantics: an FS flags ONLY once its own player is drained
-  // (pending() === 0) — a lead FS still draining its Race backlog is running,
-  // not holding. Drain the PLAYERS only (viz frames, no coordinator ticks, so
-  // the diverged cursors stay put), then sample.
-  for (let g2 = 0; g2 < 800 && rig.sessions.some((s) => s.pending() > 0); g2++) { rig.dom.tick(1); await flushMacro(); }
-  if (rig.sessions.some((s) => s.pending() > 0)) { fail('[11] players never drained after stop() (cannot sample holding)'); return; }
-  const s0 = Object.fromEntries(rig.coord.snapshots().map((s) => [s.fsId, s]));
-  const lead = s0.fastffs.stepCursor >= s0.littlefs.stepCursor ? 'fastffs' : 'littlefs';
-  const lag = lead === 'fastffs' ? 'littlefs' : 'fastffs';
-  if (s0[lead].stepCursor <= s0[lag].stepCursor) { fail('[11] failed to create a cursor lead in Race'); return; }
-  ok(`race left a cursor lead: ${lead} at ${s0[lead].stepCursor}, ${lag} at ${s0[lag].stepCursor}`);
-  if (!s0[lead].holding) fail(`[11] cursor-lead FS (${lead}) not flagged holding after Race->Pace`);
-  else ok(`cursor-lead FS (${lead}) flagged holding (parked waiting for the laggard)`);
-  if (s0[lag].holding) fail(`[11] laggard FS (${lag}) wrongly flagged holding (it is the one advancing)`);
-  else ok(`laggard FS (${lag}) not holding`);
-  await pump(rig.dom, { done: () => minCursor(rig.coord) === maxCursor(rig.coord), maxIter: 600 });
-  const s1 = Object.fromEntries(rig.coord.snapshots().map((s) => [s.fsId, s]));
-  if (s1[lead].holding || s1[lag].holding) fail(`[11] holding did not clear on convergence (cursors equal at ${s1[lead].stepCursor})`);
-  else ok('holding cleared once cursors converged');
+  rig.broadcastEntries([gatedEntry(0)]);
+  const gate = makeGate();
+  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 0, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
+  for (const fsId of ['fastffs', 'littlefs']) {
+    await pumpUntilJournal(rig, fsId, (j) => countLines(j, `write(${GATE_A}`) >= 1, `s3-window-${fsId}`);
+  }
+  ok('both sessions parked mid-command (round 0, pre-reset epoch)');
+  await rig.reset();                                 // epoch bumps; cursor/entries/playbackNs rebuilt fresh
+  const postResetCost = Object.fromEntries(rig.sessions.map((s) => [s.fsId, s.standing.drainedCounters || { fileOpCount: 0, flashTimeNs: 0 }]));
+  gate.release();                                     // wake the stale round; it must STARVE, not land
+  await flushTurns(20);
+  for (const s of rig.sessions) {
+    const dc = s.standing.drainedCounters || { fileOpCount: 0, flashTimeNs: 0 };
+    if (dc.fileOpCount !== postResetCost[s.fsId].fileOpCount || dc.flashTimeNs !== postResetCost[s.fsId].flashTimeNs) {
+      fail(`s3: ${s.fsId} the abandoned round wrote into the fresh epoch after reset (fileOpCount ${postResetCost[s.fsId].fileOpCount}->${dc.fileOpCount})`);
+    } else ok(`s3: ${s.fsId} the abandoned round left no trace after reset (starved, per §8)`);
+    if (s.standing.cursor !== 0) fail(`s3: ${s.fsId} cursor is ${s.standing.cursor} after reset, expected 0`);
+    const j = await pullJournal(rig, s.fsId);
+    if (j.some((line) => line.text.includes(GATE_B))) fail(`s3: ${s.fsId} the zombie command's second write (${GATE_B}) landed after reset`);
+    else ok(`s3: ${s.fsId} the zombie's post-gate write never happened (no ${GATE_B} in the post-reset journal)`);
+  }
+  // the fresh epoch must still be fully live: broadcast + drain a real command.
+  rig.broadcastEntries([{ index: 0, kind: 'command', payload: `async (api) => { await api.writeFile('post-reset.bin', 1024); }`, seed: 3 }]);
+  await drainTo(rig, 1);
+  for (const s of rig.sessions) {
+    if (s.standing.cursor !== 1) fail(`s3: ${s.fsId} did not advance in the fresh epoch (coordinator wedged after abandoning the stale round?)`);
+    else ok(`s3: ${s.fsId} stayed live in the fresh epoch (drained a fresh command to cursor 1)`);
+  }
 }
 
-// ---- Scenario 12: `waiting` (Race) - clock-blocked FS reads waiting, then clears ----
-// The instantaneous per-frame "sim paused" signal. In Race a session whose simNs
-// has caught the shared raceClock cannot dispatch its next op until the clock
-// advances -> waiting=true. After a Pace->Race divergence the ahead FS is
-// clock-blocked (way above the reseated clock); it clears once work drains to idle
-// (hasWork false). snapshots().waiting and the cheap waitStates() must agree, and
-// waiting must be false when stopped with nothing queued. Mutation (invert the
-// gate to simNs < raceClock) -> the ahead FS never flags.
-async function scenarioWaitingRace() {
-  console.log('\n[12] waiting (Race): a clock-blocked FS reads waiting, clears on drain');
+// ---- [4] grant/ack round barrier (I2): round+1 releases only once EVERY
+// current session has acked round r, never early on a faster peer's ack. ----
+// NEW coverage required by ADR-0024 §13.
+async function scenarioRoundBarrier() {
+  console.log('\n[4] grant/ack round barrier: the round only settles once every session has acked (I2)');
   const rig = await makeRig();
-  if (Object.values(rig.coord.waitStates()).some(Boolean)) fail('[12] waiting true while stopped with nothing queued');
-  else ok('waiting is false when stopped with nothing to run');
-  broadcastWrites(rig.coord, N, 'a');
-  rig.coord.setMode('pace');
-  await pump(rig.dom, { done: () => allAt(rig.coord, N) });
-  const simNs = Object.fromEntries(rig.sessions.map((s) => [s.fsId, s.device.stats.simNs]));
-  const ahead = simNs.fastffs >= simNs.littlefs ? 'fastffs' : 'littlefs';
-  const frontier = ahead === 'fastffs' ? 'littlefs' : 'fastffs';
-  broadcastWrites(rig.coord, N, 'b');
-  rig.coord.setMode('race');
-  // A few working race ticks: the shared clock climbs a little but is still well
-  // below the ahead FS's simNs (the divergence is far larger than the per-tick
-  // clock chunk), so the ahead FS is clock-blocked NOW -> waiting=true. Asserting
-  // waiting WHILE STILL DIVERGED (not merely "ever") rejects an inverted gate,
-  // which would only flag it LATER once the clock overtakes it.
-  for (let t = 0; t < 3; t++) { tickOnce(rig.dom); await flushMacro(); }
-  const gap = rig.byId[ahead].device.stats.simNs - rig.byId[frontier].device.stats.simNs;
-  const ws = rig.coord.waitStates();
-  const snapW = Object.fromEntries(rig.coord.snapshots().map((s) => [s.fsId, s.waiting]));
-  if (FS_ORDER.some((f) => ws[f] !== snapW[f])) fail('[12] waitStates() and snapshots().waiting disagreed');
-  else ok('waitStates() and snapshots().waiting agree');
-  if (gap <= 150 * 1e6) fail(`[12] precondition: clock caught up too fast (gap ${(gap / 1e6).toFixed(0)}ms) to observe a clock-block`);
-  else if (!ws[ahead]) fail(`[12] ahead FS (${ahead}) not waiting while clock-blocked (simNs ${(rig.byId[ahead].device.stats.simNs / 1e6).toFixed(0)}ms still ${(gap / 1e6).toFixed(0)}ms above the frontier)`);
-  else ok(`ahead FS (${ahead}) read waiting while clock-blocked (still ${(gap / 1e6).toFixed(0)}ms above the frontier)`);
-  // drain to idle -> waiting clears (hasWork false at the frontier)
-  await pump(rig.dom, { done: () => allAt(rig.coord, 2 * N), maxIter: 400 });
-  for (let t = 0; t < 20; t++) { tickOnce(rig.dom); await flushMacro(); }
-  if (Object.values(rig.coord.waitStates()).some(Boolean)) fail('[12] waiting did not clear after the race drained to idle');
-  else ok('waiting cleared once the race drained to idle');
+  rig.byId.fastffs.send('entries', { epoch: rig.getEpoch(), entries: [gatedEntry(0)] }); // only fastffs has work — parks here
+  // littlefs gets no entries at all — nothing to run, so it acks round 0 immediately
+  const gate = makeGate();
+  let barrierSettled = false;
+  const barrier = rig.grantRound({ entryLimit: 1, playLimitNs: 1e15 }).then(() => { barrierSettled = true; });
+  await pumpUntilJournal(rig, 'fastffs', (j) => countLines(j, `write(${GATE_A}`) >= 1, 's4-window');
+  await flushTurns(5);
+  if (rig.byId.littlefs.standing.round < 0) fail('s4: littlefs (idle) never acked round 0');
+  else ok('s4: littlefs (idle, nothing to run) acked round 0 promptly');
+  if (barrierSettled) fail('s4: the round barrier settled BEFORE fastffs (still mid-command) acked — I2 violated');
+  else ok('s4: the round barrier correctly held open while fastffs is still mid-command');
+  gate.release();
+  await barrier;
+  if (!barrierSettled) fail('s4: the round barrier never settled after fastffs completed and acked');
+  else ok('s4: the round barrier settled once every session (including the laggard) acked round 0');
 }
 
-// A finite speed where one Pace round's op-animation spans several frames, so the
-// cheaper FS resolves its barrier (and reads waiting, parked on the peer) a frame
-// or more before the chattier one. Infinity drains a whole round in one frame (no
-// window); the shipped speed is realistically far slower under the fake clock.
-const PACE_WAIT_SPEED = 5e6;
-
-// ---- Scenario 13: `waiting` (Pace) - peer-waiting FS reads waiting, then clears ----
-// A session that finishes its round's op (its barrier resolves) while the slower
-// peer has not is parked waiting -> waiting=true; it clears when the round
-// advances. Driven by real churn at a finite speed so the two FS resolve their
-// barriers a frame apart. Mutation (drop the barrier-arrival instrumentation) ->
-// peer-wait never fires in a non-command run.
-async function scenarioWaitingPacePeer() {
-  console.log('\n[13] waiting (Pace): a peer-waiting FS reads waiting, clears when the round advances');
-  const rig = await makeRig({ speed: PACE_WAIT_SPEED });
-  rig.coord.setMode('pace');
-  rig.coord.start();
-  let sawPeerWait = false, sawCleared = false;
-  for (let t = 0; t < 3000 && !(sawPeerWait && sawCleared); t++) {
-    tickOnce(rig.dom); await flushMacro();
-    const ws = rig.coord.waitStates();
-    const n = FS_ORDER.filter((f) => ws[f]).length;
-    if (n === 1) sawPeerWait = true;                 // exactly one parked, waiting on its slower peer
-    else if (sawPeerWait && n === 0) sawCleared = true;   // later nobody waiting = the round advanced
-  }
-  if (!sawPeerWait) fail('[13] no Pace session ever read waiting while parked on a slower peer');
-  else ok('a Pace session read waiting while parked on its slower peer');
-  if (!sawCleared) fail('[13] Pace waiting never cleared (round-advance did not release it)');
-  else ok('Pace waiting cleared once the round advanced');
-}
-
-// ---- Scenario 14 (KEY REGRESSION): `waiting` is FALSE while an op executes or its
-// animation drains ----
-// The exact failure mode of the naive "simNs did not move this tick" approach:
-// during a long op's post-execution animation drain simNs is flat, and that must
-// NOT read as paused. We drive real churn at a finite speed (ops animate over many
-// frames) and assert the INVARIANT: any session actively animating (pending() > 0)
-// reads waiting=FALSE, every frame. Mutation (make Pace waiting fire while
-// animating, e.g. `pending() > 0`) -> this FAILs.
-async function scenarioWaitingNotWhileAnimating() {
-  console.log('\n[14] waiting is FALSE while an op executes / animates (the naive-simNs regression)');
-  const rig = await makeRig({ speed: PACE_WAIT_SPEED });
-  rig.coord.setMode('pace');
-  rig.coord.start();
-  let sawAnimating = false, bug = false, bugWho = '', holdBug = false, holdWho = '';
-  for (let t = 0; t < 900; t++) {
-    tickOnce(rig.dom); await flushMacro();
-    const ws = rig.coord.waitStates();
-    const snaps = Object.fromEntries(rig.coord.snapshots().map((x) => [x.fsId, x]));
-    for (const s of rig.sessions) {
-      if (s.pending() > 0) {                          // actively animating a completed op (simNs flat)
-        sawAnimating = true;
-        if (ws[s.fsId]) { bug = true; bugWho = s.fsId; }
-        // Bug-1 guard (the "holding on the WRONG FS" boot bug): the card-facing
-        // snapshot fields must obey the same invariant — an FS still draining
-        // its own animation (the laggard) may NEVER read holding/stalled.
-        if (snaps[s.fsId].holding || snaps[s.fsId].stalled) { holdBug = true; holdWho = s.fsId; }
-      }
-    }
-  }
-  if (!sawAnimating) fail('[14] never observed a session animating (test did not exercise the drain path)');
-  else ok('exercised many op-animation drains (pending() > 0 while simNs flat)');
-  if (bug) fail(`[14] a session (${bugWho}) read waiting WHILE actively animating an op - the naive-simNs regression`);
-  else ok('no actively-animating session ever read waiting (execution/animation is not paused)');
-  if (holdBug) fail(`[14] a session (${holdWho}) read holding/stalled WHILE actively animating - the wrong-FS holding bug`);
-  else ok('no actively-animating session ever read holding/stalled (the laggard never flags)');
-}
-
-// ---- Scenario 15 (KEY REGRESSION, RACE): `waiting` is FALSE while a RACE op
-// executes / animates ----
-// The Race analog of [14]. In Race each session runs SYNCHRONOUSLY up to the
-// shared clock every tick (raceTick's while-loop advances a session until its
-// simNs catches raceClock), so AT REST between ticks its simNs sits at/above
-// raceClock while the ops it just dispatched are still animating (pending() > 0).
-// The Race waiting gate looked only at `hasWork && simNs >= raceClock` - so it
-// reported that RUNNING/animating state as waiting=true. Symptom the user hit in
-// Race: a busy FS card reads "waiting" and the CS pin (lit when NOT waiting) is
-// dark for the whole race. Assert the INVARIANT: any session actively animating
-// (pending() > 0) reads waiting=FALSE, every frame, in Race. Mutation (drop the
-// busy/pending running-guard) -> this FAILs.
-async function scenarioWaitingNotWhileAnimatingRace() {
-  console.log('\n[15] waiting is FALSE while a RACE op executes / animates (a running FS is not paused)');
-  const rig = await makeRig({ speed: PACE_WAIT_SPEED });
-  rig.coord.setMode('race');
-  rig.coord.start();
-  let sawAnimating = false, bug = false, bugWho = '', holdBug = false, holdWho = '';
-  for (let t = 0; t < 900; t++) {
-    tickOnce(rig.dom); await flushMacro();
-    const ws = rig.coord.waitStates();
-    const snaps = Object.fromEntries(rig.coord.snapshots().map((x) => [x.fsId, x]));
-    for (const s of rig.sessions) {
-      if (s.pending() > 0) {                          // actively animating a dispatched op (simNs at/above the clock)
-        sawAnimating = true;
-        if (ws[s.fsId]) { bug = true; bugWho = s.fsId; }
-        // Bug-1 guard, Race face: a still-draining FS never reads holding/stalled.
-        if (snaps[s.fsId].holding || snaps[s.fsId].stalled) { holdBug = true; holdWho = s.fsId; }
-      }
-    }
-  }
-  if (!sawAnimating) fail('[15] never observed a Race session animating (test did not exercise the drain path)');
-  else ok('exercised many Race op-animation drains (pending() > 0 while simNs at/above the clock)');
-  if (bug) fail(`[15] a session (${bugWho}) read waiting WHILE actively animating a Race op - a running FS misreported as paused`);
-  else ok('no actively-animating Race session ever read waiting (execution/animation is not paused)');
-  if (holdBug) fail(`[15] a session (${holdWho}) read holding/stalled WHILE actively animating - the wrong-FS holding bug`);
-  else ok('no actively-animating Race session ever read holding/stalled (the laggard never flags)');
-}
-
-// ---- Scenario 16 (KEY REGRESSION): reset() abandons a mid-flight round; its
-// stale completion writes are void ----
-// The "Reset mid-round wedges the console" bug. A round parked at an await when
-// reset() rebuilds cursors/sequence used to wake AFTERWARD and stomp the fresh
-// world with its pre-reset bookkeeping. Three faces, each deterministic:
-//   (a) btnReset flow (stop() then reset()) with a NON-command churn round parked
-//       in its barrier window: the abandoned round's FIX-B advance wrote
-//       cursors.set(s, OLD i+1) over the zeroed cursors, so every stomped cursor
-//       sat >= the fresh sequence's length and replayed boot commands never
-//       executed (stuck '⧗ queued' forever = dead console), or -- when only a
-//       subset was due -- pinned the stale sessions as 'waiting' forever.
-//   (b) BARE reset() (no stop()) with a gated COMMAND parked mid-fn: reset must
-//       abandon it like stop() does (abort the outgoing token), so the zombie fn
-//       can never issue another device op against the just-blanked chip.
-//   (c) BARE reset() in RACE mode landing in a command's quiescence window (the
-//       macrotask between its last op and the setTimeout re-check): the late
-//       settle used to write the stale cursor into the fresh world.
-async function scenarioResetAbandonsMidFlight() {
-  console.log('\n[16] reset() abandons a mid-flight round (stale-epoch guard)');
-
-  // (a) the exact header-Reset flow, on the exact FIX-B window
+// ---- [5] teardown drains stragglers (§8): a removed session's late ack must
+// not corrupt survivor bookkeeping or wedge the barrier; no delivery survives
+// terminate(). ----
+// OLD scenario 8(c): setSessions removal mid-command is a guarded no-op.
+async function scenarioTeardownStragglers() {
+  console.log('\n[5] teardown drains a straggler: a removed session\'s late ack is a guarded no-op (§8)');
   const rig = await makeRig();
-  rig.coord.setMode('pace');
-  for (let k = 0; k < 3; k++) await stepToCompletion(rig);           // cursors at 3: the stale index is visibly non-zero
-  await flushMacro();                                                // let the interval's paceStep .finally release paceBusy
-  const inflight = rig.coord.step();                                 // applies churn step 3 synchronously, parks at the barrier await
-  inflight.catch(() => {});
-  rig.coord.stop();                                                  // btnReset flow, part 1: abort (resolves the round's token race)
-  rig.coord.reset({ format: false });                                // part 2: rebuild -- cursors 0, sequence empty, fresh epoch
-  for (let g = 0; g < 10; g++) { await flushMacro(); tickOnce(rig.dom); }   // the abandoned round's continuation runs here
-  if (!allAt(rig.coord, 0)) fail(`[16a] abandoned round stomped the fresh cursors: ${cursorsOf(rig.coord)}, expected [0,0] (stale FIX-B write survived reset)`);
-  else ok('abandoned pace round left the fresh cursors at 0 (stale FIX-B write voided)');
-  // the boot-replay shape: a broadcast command must actually execute now.
-  // Pump on the CURSORS (the round fully advancing), not the journal 'done'
-  // flip — 'done' lands at quiescence, a couple of macrotasks before the
-  // round's drain barrier advances the cursor.
-  const { entry } = rig.coord.broadcast(async (api) => { await api.fs.format(); await api.fs.mount(); }, 'format()');
-  await pump(rig.dom, { done: () => allAt(rig.coord, 1), maxIter: 4000 });
-  if (![...entry.journalEntries.values()].every((je) => je.state === 'done')) fail('[16a] replayed command advanced the cursors but its tape entries never reached done');
-  else ok('post-Reset broadcast command executed on every session (no dead console)');
-  if (Object.values(rig.coord.waitStates()).some(Boolean)) fail('[16a] a session is stuck waiting after the post-Reset replay drained (the stuck-pin symptom)');
-  else ok('no session stuck waiting after the replay drained');
-
-  // (b) bare reset() abandons a parked command -- no zombie ops on the fresh chip
-  const rig2 = await makeRig();
-  const g2 = gatedCommand();
-  rig2.coord.broadcast(g2.fn, 'gated s16');
-  rig2.coord.setMode('pace');
-  await pumpUntil(rig2.dom, () => g2.state.atGate >= FS_ORDER.length, 's16-window');   // both sessions parked mid-fn, round in flight
-  rig2.coord.reset();                                                // BARE reset: no stop() first
-  for (let g = 0; g < 10; g++) { await flushMacro(); tickOnce(rig2.dom); }
-  const postReset = Object.fromEntries(rig2.sessions.map((s) => [s.fsId, { ...s.device.stats }]));
-  g2.state.release();                                                // wake the zombie: its next op must HANG, not run
-  for (let g = 0; g < 30; g++) { await flushMacro(); tickOnce(rig2.dom); }
-  for (const s of rig2.sessions) {
-    const d = s.device.stats;
-    if (d.programs !== postReset[s.fsId].programs || d.erases !== postReset[s.fsId].erases) {
-      fail(`[16b] ${s.fsId}: the abandoned command wrote to the fresh chip after reset (programs ${postReset[s.fsId].programs} -> ${d.programs})`);
-    } else ok(`${s.fsId}: abandoned command issued no device op after bare reset() (zombie hung per ADR-0019)`);
-    if (s.runner.names().includes(GATE_B)) fail(`[16b] ${s.fsId}: ${GATE_B} exists on the fresh chip -- the zombie's second write ran`);
+  rig.broadcastEntries([gatedEntry(0)]);
+  const gate = makeGate();
+  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 0, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
+  for (const fsId of ['fastffs', 'littlefs']) {
+    await pumpUntilJournal(rig, fsId, (j) => countLines(j, `write(${GATE_A}`) >= 1, `s5-window-${fsId}`);
   }
-  if (!allAt(rig2.coord, 0)) fail(`[16b] cursors not clean after bare reset: ${cursorsOf(rig2.coord)}`);
-  await flushMacro();     // let the last tick's interval paceStep release paceBusy, or step() below silently no-ops
-  await stepToCompletion(rig2);                                      // the coordinator itself must still be live
-  if (!allAt(rig2.coord, 1)) fail(`[16b] coordinator wedged after abandoning the command (step did not advance: ${cursorsOf(rig2.coord)})`);
-  else ok('coordinator stayed live after abandoning the parked command (paceBusy released)');
-
-  // (c) race-mode late command settle: reset() lands in the quiescence window
-  const rig3 = await makeRig();
-  rig3.coord.setMode('race');
-  rig3.coord.broadcast(async () => {}, 'noop s16');                  // zero ops: quiesces at the first macrotask re-check
-  tickOnce(rig3.dom);                                                // raceTick dispatches it (busy set, quiescence check scheduled)
-  for (let k = 0; k < 10; k++) await Promise.resolve();              // MICROtasks only: fn done, setTimeout re-check still pending
-  rig3.coord.reset();                                                // reset BEFORE the re-check fires
-  for (let g = 0; g < 10; g++) { await flushMacro(); tickOnce(rig3.dom); }   // re-check fires -> late settle -> must be void
-  if (!allAt(rig3.coord, 0)) fail(`[16c] late race settle stomped the fresh cursors: ${cursorsOf(rig3.coord)}, expected [0,0]`);
-  else ok('late race-command settle after reset left the fresh cursors at 0 (stale write voided)');
+  ok('both sessions parked mid-command');
+  rig.dropSession('littlefs');                        // setSessions-style removal WHILE its command is in-flight
+  if (rig.sessions.some((s) => s.fsId === 'littlefs')) fail('s5: littlefs still in the barrier-wait set after dropSession');
+  else ok('s5: littlefs removed from the barrier-wait set');
+  // the survivor must not be blocked by the now-untracked straggler.
+  gate.release();
+  await drainTo(rig, 1);                               // only waits on rig.sessions (fastffs now)
+  if (rig.byId.fastffs.standing.cursor !== 1) fail(`s5: fastffs (survivor) did not complete (cursor ${rig.byId.fastffs.standing.cursor})`);
+  else ok('s5: fastffs (survivor) completed without waiting on the removed straggler');
+  // the straggler's late ack (it was released too — same gate) must not throw
+  // or corrupt anything even though nothing awaits it anymore.
+  await flushTurns(10);
+  if (rig.byId.littlefs.standing.cursor !== 1) fail('s5: littlefs straggler never actually settled (harness bug, not a product one — check the gate)');
+  else ok('s5: littlefs straggler settled quietly post-removal (late ack landed, nothing was waiting on it)');
+  rig.terminateSession('littlefs');                    // worker.terminate() post-settle
+  const before = rig.byId.littlefs.standing.cursor;
+  rig.byId.littlefs.send('grant', { epoch: rig.getEpoch(), round: 50, entryLimit: 100, playLimitNs: 1e15, scale: 1 });
+  await flushTurns(10);
+  if (rig.byId.littlefs.standing.cursor !== before) fail('s5: a message was still delivered to a terminated session\'s port');
+  else ok('s5: no message is delivered to a terminated session\'s port (mock Port honors close())');
 }
 
 // ---- run all ----
-console.log('lockstep concurrency / no-double-execution suite (real coordinator + real WASM)\n');
-console.log('[0] exactly-once reference for a single gated command');
-const reference = await buildGatedReference();
-await scenarioModeFlip(reference);
-await scenarioStepVsRaceTick(reference);
-await scenarioStepVsPaceStep(reference);
-await scenarioRealisticModeFlip();
-await scenarioRejectingCommand();
-await scenarioAbortNonCommand();
-await scenarioAbortCommand();
-await scenarioRaceReseat();
-await scenarioResetAndSetSessions();
-await scenarioOpsPerSecWorkload();
-await scenarioRaceStalled();
-await scenarioPaceHolding();
-await scenarioWaitingRace();
-await scenarioWaitingPacePeer();
-await scenarioWaitingNotWhileAnimating();
-await scenarioWaitingNotWhileAnimatingRace();
-await scenarioResetAbandonsMidFlight();
+console.log('lockstep concurrency / no-double-execution suite — ADR-0024 worker-per-session conversion\n');
+const reference = await buildReference();
+await scenarioOverlappingGrant(reference);
+await scenarioNoOpGrantIdempotent();
+await scenarioEpochDiscard();
+await scenarioRoundBarrier();
+await scenarioTeardownStragglers();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
-console.log('PASS - busy lock holds: every forced interleaving ran each sequence step exactly once');
-console.log('       (per-fsId device cost matched the clean single run; both FS byte-identical);');
-console.log('       reject/abort paths released the lock and recovered without freezing an FS.');
+console.log('PASS - exactly-once dispatch holds over the wire (worker-local re-entrancy, round barrier,');
+console.log('       epoch discard, teardown-drains-stragglers); see LANE-REPORT.md for scenarios deferred');
+console.log('       pending lane/coord + lane/worker (Pace/Race reseat, holding/stalled/waiting, opsPerSec,');
+console.log('       reset byte-reproducibility, abort/reject recovery).');
 process.exit(0);
