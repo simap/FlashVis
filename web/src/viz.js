@@ -1,48 +1,37 @@
 /*
- * The die renderer + timed player.
+ * The die renderer (ADR-0024 §6/§7): a PURE main-thread paint layer.
  *
- * Device ops arrive in synchronous bursts (one FASTFFS call → many read/prog/
- * erase events, each carrying a simulated flash-time cost `ns`). We play them
- * back over REAL time, scaled by `scale` (sim-ns spent per real-ms):
+ * Accumulation, pacing, and the timed per-op player all moved worker-side
+ * (ADR-0024 §6 "Relocations" — the mechanism is unchanged, only the locus
+ * moved). This module never touches a device or a runner and never drives
+ * its own animation-frame loop: it paints whatever the coordinator hands it
+ * via `applyFrame(frame)`, once per pulled FRAME (nominally once/rAF for the
+ * focused session — ADR-0024 §4 PULL). Heat arrives FULLY DECAYED, full-state,
+ * every frame (ADR-0022's heat-conservation invariant, I8, holds by
+ * construction: only the accumulation locus moved) — this file's job is to
+ * turn that snapshot into pixels, in O(active cells) per call for the render
+ * writes and O(geometry) for the scan that finds them (ADR-0024 §6: "pull
+ * O(geometry), not O(ops)").
  *
- *  - Each op is split into per-page steps, so a large read/program sweeps across
- *    its pages instead of flashing at once.
- *  - A step is animated at the START of its time slot, then we hold for the slot's
- *    duration before the next — so an erase's 21 ms shows before any following read.
- *  - Animation duration tracks the slot, so slow-mo genuinely looks slow.
- *  - `scale = Infinity` means no simulated delay: drain the queue as fast as the
- *    loop runs (execution speed only).
- *
- * `shown[page]` = bytes displayed as programmed, rebuilt from played-back events.
+ * The erase sweep is the one thing that still needs a discrete TRIGGER (not
+ * just a state snapshot) — a `Element.animate()` per sector erase, so it
+ * reads as a theatrical one-shot event, not a state diff. `applyFrame` reads
+ * those triggers off `frame.events` (see the ASSUMPTION note below `applyEvents`).
  */
-// Animation duration = the op's real-time slot (step.ns / scale), so at slow
-// speeds a 1 s op animates for ~1 s. MIN keeps real-time-and-faster visible;
-// MAX is just a sanity ceiling above the slowest single op (a ~7 s erase).
+// Animation duration for the erase sweep. Ideally the worker-computed slot
+// duration rides along on the triggering event (ev.ms — see applyEvents);
+// MIN/MAX bound it the same way the old in-process player did, and also serve
+// as the fallback when an event arrives with no duration hint.
 const MIN_ANIM = 110, MAX_ANIM = 9000;
 
-// ---- per-frame drain cap (drain-pacing knob) ----
-// Max low-level device steps (per-page runStep calls) the player simulates in ONE
-// animation frame. A huge burst — e.g. a no-delay compaction of ~30k tiny reads —
-// otherwise drains its entire queue in a single frame; this spreads it across
-// frames instead. Excess steps are CARRIED to the next frame(s) via the persisted
-// cur/curStep/queue — nothing is dropped, sampled, or coalesced; every op still
-// runs and still contributes its heat exactly as before. This paces the DRAIN, it
-// does not limit animation. Applies to BOTH drain paths (no-delay and timed) as a
-// single shared per-frame ceiling. Sentinel: Infinity (or <= 0) ⇒ unlimited /
-// disabled, so the default is byte-for-byte the current unbounded behavior.
-// NOTE: a slower drain raises pending() (queue length), which the coordinator's
-// raceGate/BACKLOG_CAP keys on — see the report; the coupling is benign back-
-// pressure (bounds the backlog), not a regression, but keep the cap generous.
-const MAX_OPS_PER_FRAME = 500;
-
 // ---- per-cell read/prog "heat" (glow coalescence) tunables ----
-// A read/prog burst used to create one Element.animate() per op; at no-delay a
-// LittleFS compaction spun up ~30k of them in one un-yielded frame (native WA
-// servicing froze the thread, and every glow expired before a frame painted).
-// Instead each op now just ADDS to a per-cell intensity the frame() loop renders
-// and decays — cost is O(active cells)/frame, never O(ops). Erase (sweep) and
-// the fill height keep their own animations untouched.
-//   heat[p] += HEAT_ADD per op; each frame heat[p] *= 0.5^(dt/halfLife).
+// Unchanged from the pre-0024 renderer (ADR-0022): heat is additive per-cell
+// intensity rendered across two channels (read/prog) so an overlap blends
+// instead of one overwriting the other. What changed is WHERE it accumulates
+// and decays — worker-side now (ADR-0024 §6) — this file only paints the
+// full-state snapshot `applyFrame` is handed.
+//   heat[p] is the DECAYED value the worker sends each frame; nothing here
+// multiplies it down over time anymore.
 // The glow renders across TWO layers so the bloom sits UNIFORMLY above every
 // border: the BLOOM (core + outer box-shadow) on a per-cell .glow layer lifted to
 // z-index:5 (above every cell/sector body), and the heat RING on the cell body
@@ -51,11 +40,6 @@ const MAX_OPS_PER_FRAME = 500;
 // fast-attack presence curve (so it also fades smoothly as heat decays). The
 // log-compressed "burst" then pushes 30 / 300 / 30000 larger and whiter from
 // that floor, so they stay distinct and 30k is a bright near-white flare.
-const HEAT_ADD = 1;                 // intensity added per read/prog page op
-const HEAT_HALF_MS = 500;           // unscaled glow half-life (real ms); tune here
-const HEAT_HALF_MIN = 50;          // floor so a burst stays visible at max speed
-const HEAT_HALF_MAX = 3000;         // ceiling so a slow-mo glow can't linger forever
-const HEAT_SCALE_REF = 20000;       // scale at which the half-life is exactly HEAT_HALF_MS
 const HEAT_EPS = 0.04;              // below this a cell reverts to its resting CSS ring
 const HEAT_KNEE = 0.5;              // heat for ~86% presence: single op attacks fast, fades smooth
 const HEAT_ALPHA_GAIN = 1.0;       // so a single op (presence 0.86) already glows at ~full alpha
@@ -67,7 +51,7 @@ const HEAT_SPREAD_ADD = 10;          // extra outer-glow spread a full burst add
 // Op-glow base colors are DEFAULTS ONLY; the live values are re-sourced from
 // the active theme's CSS custom properties by resolveTheme() (see createViz),
 // so switching [data-theme] recolors the glow without touching the heat model.
-// The defaults apply when there is no DOM/getComputedStyle (the viz-heat test).
+// The defaults apply when there is no DOM/getComputedStyle (tests).
 const DEFAULT_READ_RGB = [99, 230, 255];   // --read (cool scan)
 const DEFAULT_PROG_RGB = [255, 106, 26];   // --program (warm write), unified with the CSS var
 // ---- ring (resting 1px edge) — tied to the SAME heat as the glow, not its own
@@ -85,10 +69,8 @@ const HEAT_CORE_BLUR = 4;           // tight blur (px) — a hard center, not an
 const HEAT_CORE_SPREAD = 0.5;       // tiny spread so it reads as a core, not a second ring
 
 // Animations run via the Web Animations API so their duration is a direct JS
-// argument (curAnimMs) — CSS `animation:` shorthand doesn't reliably honor a
-// per-trigger duration, which is why erase used to flash at a fixed rate.
-// Read/prog glow is no longer keyframed per op — it coalesces into per-cell heat
-// (see glow() + the frame() render pass). Only erase keeps its Element.animate().
+// argument — CSS `animation:` shorthand doesn't reliably honor a per-trigger
+// duration, which is why erase used to flash at a fixed rate (ADR-0009).
 const DEFAULT_ERASE_RGB = [185, 120, 255]; // --erase sweep
 const DEFAULT_MIX_RGB = [61, 255, 176];    // --mix: the designed read+program overlap color (Aurora mint)
 const DEFAULT_SECTOR_BG = '#0c141b';       // sector resting background the sweep restores to (theme --sector-bg)
@@ -118,7 +100,7 @@ function parseColor(s) {
   return null;
 }
 // Read a :root CSS custom property, falling back when there is no DOM /
-// getComputedStyle (the viz-heat test's fake DOM) or the value is missing.
+// getComputedStyle (a fake-DOM test) or the value is missing.
 function cssVar(name) {
   try {
     const root = typeof document !== 'undefined' && document.documentElement;
@@ -131,8 +113,7 @@ const cssStr = (name, fallback) => cssVar(name) || fallback;
 
 // Build the erase-sweep keyframes from the theme's erase color: the glow uses
 // the erase hue; the sector background tints toward it mid-sweep and restores
-// to the sector's resting background. Same shape / offsets / opacity as before —
-// only the source color is theme-driven now.
+// to the sector's resting background.
 const hex2 = (n) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, '0');
 const tintHex = (rgb, base, t) => '#' + [0, 1, 2].map((i) => hex2(base[i] + (rgb[i] - base[i]) * t)).join('');
 function buildEraseKF(rgb, sectorBg) {
@@ -146,46 +127,43 @@ function buildEraseKF(rgb, sectorBg) {
   ];
 }
 
-export function createViz(device) {
-  const { sectorSize, sectorCount, pageSize } = device;
+/**
+ * @param {Object} geometry  { sectorSize, sectorCount, pageSize } — the same
+ *   shape sent as InitMsg.geometry (ADR-0024 §4). No device/runner reference:
+ *   this renderer never touches simulated flash, only what it's PULLED.
+ */
+export function createViz(geometry) {
+  const { sectorSize, sectorCount, pageSize } = geometry;
   const pagesPerSector = sectorSize / pageSize;
   const npages = sectorCount * pagesPerSector;
   const sectorCols = Math.ceil(Math.sqrt(sectorCount));
   const pageCols = Math.ceil(Math.sqrt(pagesPerSector));
 
-  const shown = new Uint16Array(npages);
+  const shown = new Uint16Array(npages);     // last-applied FRAME.shown.pages
+  const wearArr = new Uint32Array(sectorCount); // last-applied FRAME.shown.wear
   const cellEls = new Array(npages);
   const fillEls = new Array(npages);
   const glowEls = new Array(npages);   // the glow's own DOM layer (see mountDie) — a sibling
                                         // appended AFTER .fillwrap so it paints ABOVE .fill
   const sectorEls = new Array(sectorCount);
 
-  // Read/prog glow "heat" (coalescence — see HEAT_* tunables above). TWO
-  // additive channels per cell, `readHeat` and `progHeat`, so a read and a
-  // program landing on the SAME cell BLEND instead of one overwriting the other
-  // (the old single-channel glowKind let the last op win the whole cell). Total
-  // heat `readHeat[p] + progHeat[p]` drives all the intensity math unchanged;
-  // the two channels only decide the COLOR (see drawHeat's blend toward the
-  // theme --mix). `glowHot` is still the small set of cells with live heat the
-  // frame() loop decays + renders — a burst of thousands of ops is still one
-  // summed glow per cell, O(active cells)/frame, never a per-op animate().
+  // Read/prog glow "heat" (ADR-0022) — mirrors of the LAST-APPLIED frame's
+  // decayed per-cell intensity (worker-computed; see applyHeat). `glowHot` is
+  // the small set of cells with live-or-fading heat, so the render pass stays
+  // O(active cells) even though the scan that finds them is O(geometry) — the
+  // pull itself is already O(geometry) (ADR-0024 §6), so that scan is free.
   const readHeat = new Float32Array(npages);
   const progHeat = new Float32Array(npages);
   const glowHot = new Set();
 
-  const queue = [];
-  let scale = 20000;         // sim-ns spent per real-ms (Infinity ⇒ no delay)
-  let cur = null;            // steps of the op currently playing
-  let curStep = 0, curRem = 0, curAnimMs = MIN_ANIM, lastNow = 0;
-  let rafId = 0, stopped = false;  // the frame loop's rAF handle + a stop flag (teardown)
-  let heat = false, selected = -1, inspectorEl = null, onSelectCb = null;
+  let curAnimMs = MIN_ANIM;
+  let heatmapOn = false, selected = -1, inspectorEl = null, onSelectCb = null;
   let lastMap = null;
-  let prep = false;          // setup mode (ADR-0014): suppress animation, drain synchronously
 
   // Theme-sourced glow colors (re-resolved from the active [data-theme]'s CSS
   // custom properties on switch, via the exposed refreshTheme()). Defaults apply
   // when there is no DOM (tests). This re-SOURCES color only — the heat model
-  // (coalescence, desaturate-to-white, ring/bloom split, decay) is unchanged.
+  // (coalescence, desaturate-to-white, ring/bloom split) is unchanged.
   let readRGB = DEFAULT_READ_RGB, progRGB = DEFAULT_PROG_RGB, ringHot = DEFAULT_RING_HOT, mixRGB = DEFAULT_MIX_RGB;
   let eraseKF = buildEraseKF(DEFAULT_ERASE_RGB, DEFAULT_SECTOR_BG);
   function resolveTheme() {
@@ -198,21 +176,11 @@ export function createViz(device) {
   resolveTheme();
 
   const reduced = matchMedia('(prefers-reduced-motion:reduce)').matches;
-  const pageOf = (off) => Math.floor(off / pageSize);
-  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
   // ---- rendering primitives ----
-  // A cell's live-map tag is a pure function of the last map AND its animated
+  // A cell's live-map tag is a pure function of the last-applied map AND its
   // fill state: a page not yet programmed (shown 0), or one with no map yet,
-  // carries NO tag so it reads as erased substrate; once programmed it takes
-  // its class from the last map. Deriving it here (not only in applyLiveMap)
-  // is what keeps the tint honest: applyLiveMap runs at most once per flash
-  // change — fired synchronously at op-execution, BEFORE the timed animation
-  // has drawn the op's pages — so any page the animation programs after that
-  // single application would otherwise keep dataset.live='' and render as a
-  // full gold live-data bar (the default .cell .fill), even where the map says
-  // slack/metadata. paint() runs on every prog/erase step, so re-deriving the
-  // tag here stamps the correct class the instant the animation reveals a page.
+  // carries NO tag so it reads as erased substrate.
   function liveTag(p) {
     if (!lastMap || shown[p] === 0) return '';
     return LIVE_NAME[lastMap[p]] ?? 'meta';
@@ -223,31 +191,16 @@ export function createViz(device) {
     fillEls[p].style.height = has ? (shown[p] / pageSize * 100) + '%' : '0';
     cellEls[p].dataset.live = liveTag(p);
   }
-  // Read/prog glow: coalesce, don't animate. Each op just BUMPS this cell's heat
-  // (O(1), no object allocated) and marks it live; the frame() loop decays and
-  // renders it. So a compaction's thousands of tiny reads sum into one bright,
-  // sustained flare on that sector instead of thousands of stacked, thread-
-  // freezing Element.animate() calls that all expire before a frame paints.
-  function glow(p, kind) {
-    if (reduced || prep) return;
-    if (kind === 'ping') readHeat[p] += HEAT_ADD;   // read channel
-    else progHeat[p] += HEAT_ADD;                    // program channel
-    glowHot.add(p);
-  }
   // Render one cell's heat across TWO layers so the bloom sits UNIFORMLY above
-  // every border (the screenshot fix): the BLOOM (white core + outer glow) goes on
-  // the .glow layer (glowEls[p], z-index:5 — above every cell/sector body), and the
-  // heat RING (border) goes on the cell BODY itself, BELOW that bloom. Keeping the
-  // ring and the bloom on the same element at the same z made each cell's ring
-  // interleave with neighbor blooms by DOM paint order — a later cell's bloom
-  // covered its border but not the top-left corner (earlier neighbors), so borders
-  // peeked through directionally. With every bloom at z:5 over every body-level
-  // ring, no border can ever paint over the bloom, from any grid position/state.
+  // every border: the BLOOM (white core + outer glow) goes on the .glow layer
+  // (glowEls[p], z-index:5 — above every cell/sector body), and the heat RING
+  // (border) goes on the cell BODY itself, BELOW that bloom.
   //   `pres` is a fast-attack presence: a single op already glows at ~old full
-  // strength and fades smoothly as heat decays. `burst` is the log-compressed sum
-  // that pushes larger + whiter, and drives the white core near saturation. The
-  // ring shares this same `h`, on its own earlier-clamping curve. Returns true once
-  // faded back to the resting ring so the frame loop can drop the cell.
+  // strength and fades smoothly as heat decays (worker-side now). `burst` is
+  // the log-compressed sum that pushes larger + whiter, and drives the white
+  // core near saturation. The ring shares this same `h`, on its own
+  // earlier-clamping curve. Returns true once faded back to the resting ring
+  // so the caller can drop the cell from glowHot.
   function drawHeat(p) {
     const rh = readHeat[p], ph = progHeat[p];
     const h = rh + ph;                                           // total heat drives ALL intensity math, unchanged
@@ -259,11 +212,9 @@ export function createViz(device) {
     const burst = Math.min(1, Math.log10(1 + h) / HEAT_BURST_LOG_MAX);
     const w = Math.pow(burst, 1.5);                              // whiten with the sum (base hue -> white)
     // COLOR = which channels are present. Pure read → readRGB, pure program →
-    // progRGB (both byte-identical to the old single-channel render). When BOTH
-    // are present, pull the dominant hue toward the DESIGNED per-theme mix by
-    // co-presence `co` (a tent: 0 when one dominates, 1 when the two heats are
-    // equal) — so an overlapped read+program reads as its own thing, routed
-    // through the mix hue instead of muddying along the read↔program grey axis.
+    // progRGB. When BOTH are present, pull the dominant hue toward the
+    // DESIGNED per-theme mix by co-presence `co` (a tent: 0 when one
+    // dominates, 1 when the two heats are equal).
     const co = 2 * Math.min(rh, ph) / h;                         // 0..1, peaks when comparable
     const dom = ph >= rh ? progRGB : readRGB;                    // the leading channel's pure color
     const base = co > 0 ? lerp3(dom, mixRGB, co) : dom;          // continuous at rh==ph (both give mixRGB)
@@ -275,7 +226,6 @@ export function createViz(device) {
     const a = Math.min(1, pres * HEAT_ALPHA_GAIN).toFixed(2);
     // Ring -> cell BODY (below the bloom). Same heat, own curve — clamps earlier
     // (HEAT_RING_KNEE < HEAT_KNEE) and holds, capped under 1 so it never overblows.
-    // Inline overrides the resting CSS ring while hot; cleared to '' on fade above.
     const ringPres = 1 - Math.exp(-h / HEAT_RING_KNEE);
     const ringA = (Math.min(1, ringPres) * HEAT_RING_ALPHA_MAX).toFixed(2);
     const ringRGB = shown[p] > 0 ? ringHot : [r, g, b];    // keep the programmed cell's hot edge under a glow
@@ -289,15 +239,10 @@ export function createViz(device) {
     glowEl.style.boxShadow = `${core}0 0 ${blur}px ${spread}px rgba(${r},${g},${b},${a})`;
     return false;
   }
-  // Glow half-life tracks the speed scale like the per-op durations do (longer in
-  // slow-mo, floored so a burst is visible at any speed; the floor at no-delay).
-  function glowHalfMs() {
-    if (!isFinite(scale)) return HEAT_HALF_MIN;
-    return clamp(HEAT_HALF_MS * HEAT_SCALE_REF / scale, HEAT_HALF_MIN, HEAT_HALF_MAX);
-  }
-  function sweep(s) {
-    const el = sectorEls[s];
-    if (reduced || prep || !el.animate) return;
+  function sweep(sector, ms) {
+    curAnimMs = Math.max(MIN_ANIM, Math.min(MAX_ANIM, ms || MIN_ANIM));
+    const el = sectorEls[sector];
+    if (!el || reduced || !el.animate) return;
     el.animate(eraseKF, { duration: curAnimMs, easing: 'linear' });
   }
   function wearColor(w, ref) {
@@ -308,123 +253,70 @@ export function createViz(device) {
     const c = a.map((v, k) => Math.round(v + (b[k] - v) * lt));
     return `rgb(${c[0]},${c[1]},${c[2]})`;
   }
-  function refreshHeat() {
-    let ref = 1; for (let s = 0; s < sectorCount; s++) ref = Math.max(ref, device.wear[s]);
+  function refreshHeatmap() {
+    let ref = 1; for (let s = 0; s < sectorCount; s++) ref = Math.max(ref, wearArr[s]);
     for (let s = 0; s < sectorCount; s++)
-      sectorEls[s].style.setProperty('--wc', wearColor(device.wear[s], ref));
+      sectorEls[s].style.setProperty('--wc', wearColor(wearArr[s], ref));
   }
 
-  // ---- per-page step animations ----
-  function progPage(p, off, len) {
-    const ps = p * pageSize, pe = ps + pageSize;
-    shown[p] = Math.min(pageSize, shown[p] + (Math.min(pe, off + len) - Math.max(ps, off)));
-    fillEls[p].style.transitionDuration = curAnimMs + 'ms';
-    paint(p); glow(p, 'prog');
-  }
-  function eraseSector(sector) {
+  // Sector base for an erase clear — the same page-range clear the old timed
+  // player did per erase step, now driven by the event trigger instead of a
+  // device 'erase' op (see applyEvents / ASSUMPTION note there).
+  function eraseSectorLocal(sector) {
     const base = sector * pagesPerSector;
-    for (let k = 0; k < pagesPerSector; k++) {
-      fillEls[base + k].style.transitionDuration = curAnimMs + 'ms'; // drain over the erase's slot
-      shown[base + k] = 0; paint(base + k);
-    }
-    sweep(sector);
-    if (heat) refreshHeat();
+    for (let k = 0; k < pagesPerSector; k++) { shown[base + k] = 0; paint(base + k); }
   }
 
-  // expand a device event into per-page steps [{ ns, run }]
-  function stepsFor(ev) {
-    if (ev.op === 'erase') return [{ ns: ev.ns, run: () => eraseSector(ev.sector) }];
-    const first = pageOf(ev.off), last = pageOf(ev.off + ev.len - 1);
-    const n = last - first + 1, per = ev.ns / n, steps = new Array(n);
-    for (let k = 0; k < n; k++) {
-      const p = first + k;
-      steps[k] = ev.op === 'prog'
-        ? { ns: per, run: () => progPage(p, ev.off, ev.len) }
-        : { ns: per, run: () => glow(p, 'ping') };
-    }
-    return steps;
-  }
-  function runStep(i) {
-    const step = cur[i];
-    curAnimMs = isFinite(scale) ? clamp(step.ns / scale, MIN_ANIM, MAX_ANIM) : MIN_ANIM;
-    step.run();
-    curRem = step.ns;
+  function resetDie() {
+    shown.fill(0); wearArr.fill(0);
+    readHeat.fill(0); progHeat.fill(0); glowHot.clear();
+    lastMap = null;
+    for (let p = 0; p < npages; p++) { paint(p); cellEls[p].style.boxShadow = ''; glowEls[p].style.boxShadow = ''; }
+    if (heatmapOn) refreshHeatmap();
   }
 
-  // ---- intake ----
-  device.onEvent((ev) => {
-    if (ev.op === 'reset') {
-      for (const q of queue) if (q.op === 'barrier') q.resolve();   // don't leave awaiters hanging
-      queue.length = 0; cur = null; shown.fill(0);
-      readHeat.fill(0); progHeat.fill(0); glowHot.clear();
-      lastMap = null;   // drop the stale map BEFORE the repaint: paint() derives the tag via liveTag(), so with no map every cell tags '' — no separate dataset.live writer needed
-      for (let p = 0; p < npages; p++) { paint(p); cellEls[p].style.boxShadow = ''; glowEls[p].style.boxShadow = ''; }
-      if (heat) refreshHeat(); return;
+  // ---- FRAME application (ADR-0024 §4/§7) --------------------------------
+  // `frame.shown`   = { pages: Array<number>[npages], wear: Array<number>[sectorCount] }  (~2.3KB on the wire)
+  // `frame.heat`    = { read: Array<number>[npages], prog: Array<number>[npages] }        (~8KB, full state, already decayed)
+  // `frame.liveMap` = { version, classes: Array<number>[npages] } | undefined             (~1KB, only iff version > since)
+  // `frame.events`  = Array<{ id, kind: 'erase'|'reset', sector?, ms? }>                   (ASSUMPTION — see note)
+  //
+  // ASSUMPTION (flagged in the lane report — protocol.js does not pin the
+  // shape of a FRAME.events entry): a per-sector-erase trigger is needed here
+  // because the erase sweep is a discrete Element.animate() event, not a
+  // state diff a full-snapshot pull can represent. `kind:'reset'` carries the
+  // full-chip clear (format/reset) the same way the old 'reset' device event
+  // did. `ms` is the worker-computed animated slot duration; MIN_ANIM is used
+  // if absent.
+  function applyShown(s) {
+    if (!s) return;
+    const pages = s.pages, wear = s.wear;
+    for (let p = 0; p < npages; p++) {
+      const v = pages[p] || 0;
+      if (shown[p] !== v) { shown[p] = v; paint(p); }
     }
-    queue.push(ev);
-  });
-
-  // ---- timed frame loop ----
-  function frame(now) {
-    if (!lastNow) lastNow = now;
-    let dt = now - lastNow; lastNow = now;
-    if (dt > 100) dt = 100;
-    const noDelay = !isFinite(scale);
-    let budget = noDelay ? Infinity : dt * scale;
-    // Per-frame drain cap (see MAX_OPS_PER_FRAME): a step ceiling shared by both
-    // paths. Infinity when disabled, so the loop below is byte-identical to the
-    // uncapped drain (Infinity - 1 === Infinity, `stepBudget > 0` always true).
-    let stepBudget = MAX_OPS_PER_FRAME > 0 ? MAX_OPS_PER_FRAME : Infinity;
-    let guard = 200000;
-    while (guard-- > 0) {
-      if (stepBudget <= 0) break;          // per-frame cap hit — carry the rest (cur/curStep/queue persist) to next frame
-      if (!cur) {
-        if (!queue.length) break;
-        const ev = queue.shift();
-        if (ev.op === 'barrier') { ev.resolve(); continue; }  // op fully played → resolve its await
-        cur = stepsFor(ev);
-        curStep = 0; runStep(0); stepBudget--;
-      }
-      if (noDelay) {                       // finish this op's remaining steps, up to the frame cap
-        while (stepBudget > 0 && ++curStep < cur.length) { runStep(curStep); stepBudget--; }
-        if (curStep >= cur.length) { cur = null; continue; }  // op done → next op
-        break;                             // cap hit mid-op: curStep/curRem intact, resume next frame
-      }
-      if (budget >= curRem) {
-        budget -= curRem;
-        if (++curStep < cur.length) { runStep(curStep); stepBudget--; }
-        else cur = null;
-      } else { curRem -= budget; break; }
-    }
-    // Decay + render the read/prog glow heat. Cost is O(live cells), independent
-    // of how many ops the drain above enqueued — a 30k-read burst is one summed
-    // intensity per cell, not 30k animation objects. Deleting the current entry
-    // mid-iteration is safe over a Set.
-    if (glowHot.size) {
-      const k = Math.pow(0.5, dt / glowHalfMs());
-      for (const p of glowHot) {
-        readHeat[p] *= k; progHeat[p] *= k;                     // decay BOTH channels on the same half-life
-        if (drawHeat(p)) { readHeat[p] = 0; progHeat[p] = 0; glowHot.delete(p); }  // drop only when both < EPS
-      }
-    }
-    if (selected >= 0) renderInspector(selected);
-    if (!stopped) rafId = requestAnimationFrame(frame);   // don't reschedule once stopped (teardown)
+    if (wear) for (let s2 = 0; s2 < sectorCount; s2++) wearArr[s2] = wear[s2] || 0;
+    if (heatmapOn) refreshHeatmap();
   }
-
-  // Setup mode (ADR-0014): drain the whole queue to the die NOW, with no timed
-  // pacing and no glow/sweep animation (the `prep` guard suppresses those), so
-  // bulk console ops run at full speed while the die stays current. Fills snap
-  // (curAnimMs = 0). Barriers still resolve so no awaiter is left hanging.
-  function flushQueue() {
-    while (queue.length || cur) {
-      if (!cur) {
-        const ev = queue.shift();
-        if (ev.op === 'barrier') { ev.resolve(); continue; }
-        cur = stepsFor(ev); curStep = 0;
-      }
-      curAnimMs = 0;
-      for (; curStep < cur.length; curStep++) cur[curStep].run();
-      cur = null;
+  function applyHeat(h) {
+    if (!h) return;
+    const rh = h.read, ph = h.prog;
+    for (let p = 0; p < npages; p++) if ((rh[p] || 0) > 0 || (ph[p] || 0) > 0) glowHot.add(p);
+    for (const p of glowHot) {
+      readHeat[p] = rh[p] || 0; progHeat[p] = ph[p] || 0;
+      if (drawHeat(p)) glowHot.delete(p);
+    }
+  }
+  function applyLiveMapFrame(lm) {
+    if (!lm) return;
+    lastMap = lm.classes;
+    for (let p = 0; p < npages; p++) cellEls[p].dataset.live = liveTag(p);
+  }
+  function applyEvents(events) {
+    if (!events) return;
+    for (const ev of events) {
+      if (ev.kind === 'erase') { eraseSectorLocal(ev.sector); sweep(ev.sector, ev.ms); if (heatmapOn) refreshHeatmap(); }
+      else if (ev.kind === 'reset') resetDie();
     }
   }
 
@@ -436,15 +328,15 @@ export function createViz(device) {
       const p = base + k;
       if (shown[p] > 0) { progPages++; bytes += shown[p]; }
       // WL (class 4) and any unknown higher class count as metadata here, same
-      // as applyLiveMap's rendering fallback — EXCEPT slack (5), allocated but
-      // empty, which is tracked separately (never metadata, spec/ui.md).
+      // as applyLiveMapFrame's rendering fallback — EXCEPT slack (5), allocated
+      // but empty, which is tracked separately (never metadata, spec/ui.md).
       if (lastMap) { const c = lastMap[p]; if (c === 3) live++; else if (c === 2) obs++; else if (c === 5) slack++; else if (c === 1 || c >= 4) meta++; }
     }
     // Slack outranks 'in-flight' in the role fallback: a sector that is
     // programmed but all-slack is "allocated, empty", not mid-operation.
     const role = meta > live + obs ? 'index / metadata' : obs > live ? 'obsolete' :
       live > 0 ? 'live data' : slack > 0 ? 'allocated, empty' : progPages > 0 ? 'in-flight' : 'erased';
-    return { progPages, bytes, live, obs, meta, slack, role, wear: device.wear[s] };
+    return { progPages, bytes, live, obs, meta, slack, role, wear: wearArr[s] };
   }
   function renderInspector(s) {
     if (!inspectorEl) return;
@@ -477,8 +369,7 @@ export function createViz(device) {
           // z-index and — because no ancestor up to .diewrap makes a stacking
           // context — ALL blooms paint in the diewrap's context above EVERY opaque
           // cell/sector body AND above every cell's border (the heat ring lives on
-          // the cell body, below this layer), in one layer, regardless of DOM order
-          // (bloom-on-bloom blends, so their order never matters). See the CSS.
+          // the cell body, below this layer), in one layer, regardless of DOM order.
           const fillwrap = document.createElement('i'); fillwrap.className = 'fillwrap';
           const fill = document.createElement('i'); fill.className = 'fill'; fillwrap.appendChild(fill);
           const glowEl = document.createElement('i'); glowEl.className = 'glow';
@@ -491,54 +382,34 @@ export function createViz(device) {
         });
         dieEl.appendChild(sec); sectorEls[s] = sec;
       }
-      rafId = requestAnimationFrame(frame);
     },
 
-    /** Stop the frame loop for good — cancels the pending rAF and blocks any
-     *  reschedule, so a torn-down session's player stops pinning its device +
-     *  WASM module and detached cells instead of animating forever (ADR-0015). */
-    stop() {
-      stopped = true;
-      if (rafId) cancelAnimationFrame(rafId);
-      rafId = 0;
-      // Resolve any queued barriers before going dark, mirroring the reset
-      // intake — else a torn-down session removed mid-paceStep() leaves the
-      // coordinator's Promise.all(barrier) awaiter hanging forever (paceBusy
-      // wedged, Pace frozen), since this player will never drain them.
-      for (const q of queue) if (q.op === 'barrier') q.resolve();
-      queue.length = 0;
+    /** Apply one pulled FRAME (ADR-0024 §4/§7): full-state repaint of shown
+     *  bytes/wear, the decayed heat field, an (optional) liveMap tint update,
+     *  and any discrete events (erase sweep trigger, full reset) since the
+     *  last pull. Idempotent-ish per call — always safe to call once/rAF. */
+    applyFrame(frame) {
+      if (!frame) return;
+      applyEvents(frame.events);
+      applyShown(frame.shown);
+      applyHeat(frame.heat);
+      applyLiveMapFrame(frame.liveMap);
+      if (selected >= 0) renderInspector(selected);
     },
 
     attachInspector(el) { inspectorEl = el; },
     onSelect(cb) { onSelectCb = cb; },
-    /** scale = simulated nanoseconds spent per real millisecond (Infinity ⇒ no delay). */
-    setScale(simNsPerRealMs) { scale = simNsPerRealMs; },
-    setHeatmap(on, dieEl) { heat = on; dieEl.classList.toggle('heat', on); if (on) refreshHeat(); },
+    setHeatmap(on, dieEl) { heatmapOn = on; dieEl.classList.toggle('heat', on); if (on) refreshHeatmap(); },
     /** Re-source the op-glow + erase-sweep colors from the active theme's CSS
      *  custom properties (called on palette switch). Color only — the heat
-     *  mechanism is untouched; live cells pick up the new hue on the next frame. */
+     *  mechanism is untouched; live cells pick up the new hue on the next
+     *  applyFrame. */
     refreshTheme() { resolveTheme(); },
-    pending() { return queue.length + (cur ? 1 : 0); },
-    /** Resolve once the player has finished everything queued up to this point. */
-    barrier() { return new Promise((resolve) => queue.push({ op: 'barrier', ns: 0, resolve })); },
-    /** Setup mode: when on, ops animate nothing and paced awaits flush synchronously (ADR-0014). */
-    setPrep(v) { prep = v; },
-    /** Drain the queue to the die immediately, no animation — the prep-mode paced-await path. */
-    flush() { flushQueue(); },
 
-    applyLiveMap(states) {
-      // Store the map, then re-tag every currently-programmed cell from it (a
-      // page not yet shown stays untagged — the animation stamps it via paint()
-      // as it reveals it; see liveTag). Driver-declared extra classes (FAT+WL):
-      // 4 = WL/FTL bookkeeping (a shade of metadata), 5 = slack — allocated but
-      // carrying no data, which must READ as erased/blank (spec/ui.md). Slack
-      // pages are physically programmed (shown > 0), so an untagged cell would
-      // keep the default full-height gold fill — pixel-identical to live data;
-      // the 'slack' tag + index.html's [data-live="slack"] rules suppress the
-      // fill + hot edge so the cell shows the erased substrate instead.
-      lastMap = states;
-      for (let p = 0; p < npages; p++) cellEls[p].dataset.live = liveTag(p);
-    },
+    /** { erased, metadata, obsolete, live } page counts over the LAST-APPLIED
+     *  liveMap and shown state — a die-level readout (TELEMETRY carries the
+     *  authoritative worker-side livenessCounts; this stays for the
+     *  inspector/legend and for tests that want it off the renderer alone). */
     liveCounts() {
       const t = [0, 0, 0, 0, 0];
       // WL (4) is a species of metadata for every counter that predates it;
