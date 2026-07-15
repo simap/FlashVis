@@ -1,15 +1,15 @@
 /*
- * mock-worker.mjs — a faithful, minimal session WORKER for the ADR-0024 wire.
+ * mock-worker.mjs: a faithful, minimal session WORKER for the ADR-0024 wire.
  *
  * Lives on the `workerPort` of mock-worker-transport.mjs and speaks ONLY protocol.js
- * messages. It is NOT the real session (no WASM, no runner) — it is the smallest thing
+ * messages. It is NOT the real session (no WASM, no runner); it is the smallest thing
  * that HONORS the §2 gate so the coordinator's grant/ack/round algebra can be exercised
  * end to end over structuredClone + async delivery:
  *
  *   - executes an entry's ops one at a time while `playbackNs < playLimitNs` AND
  *     `cursor < entryLimit` (the §2 gate, one-op overshoot tolerated);
  *   - a command entry's ops meter under the same gate but its cursor only advances at
- *     the LAST op — quiescence — so the ack that reports it IS command completion (I1);
+ *     the LAST op (quiescence), so the ack that reports it IS command completion (I1);
  *   - playbackNs is the currency (advances with metered execution); exec_simNs mirrors
  *     it as telemetry; a per-worker `unit` cost makes a "cheap" vs "pricey" FS diverge
  *     in step count under an identical playback ceiling (the Race comparison);

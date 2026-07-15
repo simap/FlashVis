@@ -1,8 +1,8 @@
 /*
- * playground-boot-test.mjs — end-to-end boot of the REAL web/src/playground.js
+ * playground-boot-test.mjs: end-to-end boot of the REAL web/src/playground.js
  * on the ADR-0024 worker-per-session wire, headless: a fake DOM (fake-dom.mjs)
  * + one in-realm worker host per session (createWorkerHost over
- * mock-worker-transport.mjs, with the stub runner — no real WASM). Drives the
+ * mock-worker-transport.mjs, with the stub runner, no real WASM). Drives the
  * whole page the way a browser would and asserts it boots, renders the focused
  * die from pulled FRAMEs, populates the compare strip from TELEMETRY, switches
  * focus, injects console commands, and gates churn with Run/Pause.
@@ -17,7 +17,7 @@ import { createStubRunner } from './worker-stub-runner.mjs';
 import { C2W } from '../web/src/protocol.js';
 
 const dom = installFakeDom();
-const fail = (msg) => { console.error('FAIL —', msg); dom.uninstall(); process.exit(1); };
+const fail = (msg) => { console.error('FAIL:', msg); dom.uninstall(); process.exit(1); };
 let checks = 0;
 const ok = (c, m) => { if (c) { checks++; console.log('  ok   -', m); } else fail(m); };
 
@@ -45,7 +45,7 @@ await import('../web/src/playground.js');   // starts boot()
 // ---- pump: fake macrotasks (transport delivery + worker timers) + fake rAF
 // (the render loop) + fake intervals (HUD/compare). The mock transport delivers
 // on setTimeout(0); the coordinator + worker use setInterval; the render/hold
-// loops use rAF — all captured by fake-dom, driven here. ----
+// loops use rAF, all captured by fake-dom, driven here. ----
 async function pump(turns = 1) {
   for (let i = 0; i < turns; i++) {
     await new Promise((r) => setTimeout(r, 0));   // let queued transport messages land
@@ -105,14 +105,14 @@ ok(dom.getEl('sFiles').textContent !== '0', `telemetry shows a file after the in
 const bothStats = () => ({ time: dom.getEl('fsTime-fastffs').textContent, ops: dom.getEl('fsOps-fastffs').textContent });
 {
   const s = bothStats();   // boot default is Pace
-  ok(s.time !== '—' && /(ms|s)$/.test(s.time), `Pace: fs card shows the flash-time total (${s.time})`);
+  ok(s.time !== 'n/a' && /(ms|s)$/.test(s.time), `Pace: fs card shows the flash-time total (${s.time})`);
   ok(/^\d+$/.test(s.ops), `Pace: fs card shows the ops total alongside it (${s.ops})`);
 }
 dom.dispatch('modeWheel');   // Pace -> Race
 for (let i = 0; i < 20; i++) await pump(1);
 {
   const s = bothStats();
-  ok(s.time !== '—' && /(ms|s)$/.test(s.time), `Race: fs card STILL shows the flash-time total (${s.time})`);
+  ok(s.time !== 'n/a' && /(ms|s)$/.test(s.time), `Race: fs card STILL shows the flash-time total (${s.time})`);
   ok(/^\d+$/.test(s.ops), `Race: fs card STILL shows the ops total (${s.ops})`);
 }
 dom.dispatch('modeWheel');   // Race -> Pace (restore boot default for the rest of the run)
@@ -150,15 +150,15 @@ dom.dispatch('fsCard-spiffs');
 for (let i = 0; i < 40; i++) await pump(1);
 const fresh = spiffsPulls.slice(nBefore).filter((p) => p.events);
 const firstEvents = fresh[0]?.events;
-// B11/B4: the (re)attach pull asks for HEAD-ONLY events — never the whole ring.
+// B11/B4: the (re)attach pull asks for HEAD-ONLY events, never the whole ring.
 ok(firstEvents && firstEvents.newest === true && firstEvents.limit === 0,
   `first pull after focus asks HEAD-ONLY events (no erase-replay backlog): ${JSON.stringify(firstEvents)}`);
 ok(!fresh.some((p) => p.events.since === 0 && !p.events.newest),
-  'no pull requests the whole events ring (since:0) on switch — historical erases never replay');
+  'no pull requests the whole events ring (since:0) on switch, historical erases never replay');
 // B12: after the fresh frame seeds the cursor, later pulls carry it FORWARD, so
 // genuinely-new events for the WATCHED fs are requested (not over-suppressed).
 ok(fresh.some((p) => p.events.since != null && !p.events.newest),
-  'after attach the events cursor carries forward (watched FS still gets new events — B12)');
+  'after attach the events cursor carries forward (watched FS still gets new events, B12)');
 
 for (const h of hosts) h._stop?.();
 dom.uninstall();

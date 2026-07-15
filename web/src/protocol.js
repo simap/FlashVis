@@ -1,10 +1,10 @@
 /*
- * protocol.js — the worker-per-session wire contract (ADR-0024).
+ * protocol.js: the worker-per-session wire contract (ADR-0024).
  *
  * THIS FILE IS THE CROSS-LANE CONTRACT. The coordinator (main thread, "C") and
  * each session worker ("worker") exchange ONLY the messages defined here. No lane
  * may add a field, a message type, or a synchronous back-channel without changing
- * this file first — a change here is a contract change and is the lead's to make.
+ * this file first: a change here is a contract change and is the lead's to make.
  *
  * Terms are ADR-0024's, by their protocol name (not single-letter symbols):
  *   baseline        per-session, coordinator-internal, NEVER sent
@@ -13,11 +13,11 @@
  *   entriesDrained  highest entry index executed AND tape-drained
  *   round           grant id
  *   playbackNs      the protocol's currency (limits, acks, baselines, standings)
- *   simNs           telemetry-only in this protocol — NEVER the currency
+ *   simNs           telemetry-only in this protocol, NEVER the currency
  *   chunk (Delta)   = scale / targetFPS
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * §2 CLOCK-RELEASE ALGEBRA (normative — C computes, worker obeys)
+ * §2 CLOCK-RELEASE ALGEBRA (normative: C computes, worker obeys)
  *
  *   watermark:  playLimitNs_s = baseline_s + rel
  *               rel = MAX over s in S of (acked_s - baseline_s) + chunk
@@ -27,13 +27,13 @@
  *   gate:       worker executes while playbackNs < playLimitNs_s
  *               (one-op overshoot tolerated)
  *
- * Load-bearing properties (do not "optimize" away — each is a rejected-counter-model):
+ * Load-bearing properties (do not "optimize" away: each is a rejected-counter-model):
  *   DERIVED, NOT ACCUMULATED. rel is recomputed from acked playbackNs every round;
  *     never `playLimitNs += chunk`. Unconsumed grant is revoked for free; the
  *     ADR-0020 idle-burst bug cannot re-enter (no consumption => rel pinned at chunk).
  *   MAX, NOT MIN. Laggard headroom = rel - (acked_s - baseline_s) >= chunk; leader
  *     headroom = chunk. min would pin the ceiling to slowest+chunk and stall the
- *     leader — that lockstep is PACE's join (§3), never this inequality.
+ *     leader, that lockstep is PACE's join (§3), never this inequality.
  *   chunk = scale / targetFPS => coordination cost per real-second ~ constant at
  *     every scale; at slow-mo chunk << one op so cross-FS pacing stays sub-op-fine.
  *   ADDITIVE differential: extra headroom / higher-scale range goes to whoever is
@@ -75,7 +75,7 @@ export const W2C = Object.freeze({
 });
 
 // JOURNAL_MAX >= 400 (ADR-0024 §4). Current in-process session uses 2000; the ring
-// bound is worker-local — this constant is the contract floor, not a cap.
+// bound is worker-local: this constant is the contract floor, not a cap.
 export const JOURNAL_MIN = 400;
 
 /*
@@ -137,7 +137,7 @@ export const JOURNAL_MIN = 400;
  * @property {number} playbackNs      last acked playback position (the currency)
  * @property {number} cursor          this session's sequence cursor
  * @property {number} entriesDrained  highest index executed AND tape-drained
- * @property {object} drainedCounters {fileOpCount, flashTimeNs} (ADR-0023) — NEVER exec numbers
+ * @property {object} drainedCounters {fileOpCount, flashTimeNs} (ADR-0023), NEVER exec numbers
  *   EVERY grant acked on receipt (idle = parked playbackNs); re-acked at frame
  *   cadence / on limit / at quiescence. Idempotent per round; coordinator keeps max.
  *   For a command entry, the ack that reports quiescence IS command completion (I1).
@@ -157,7 +157,7 @@ export const JOURNAL_MIN = 400;
  * @property {Uint8Array} classes      per-page class code [pageCount] (per-FS taxonomy)
  *
  * @typedef {Object} EventEntry       a discrete viz-event (§7 logs; ring, monotonic id)
- *   The two triggers a full-state snapshot CANNOT represent — one-shot sector
+ *   The two triggers a full-state snapshot CANNOT represent: one-shot sector
  *   animations. Everything continuous (read/prog glow) rides `heat`, not events.
  * @property {number}  id              monotonic per epoch (I6); served {since|newest,limit}
  * @property {'erase'|'reset'} kind
@@ -182,7 +182,7 @@ export const JOURNAL_MIN = 400;
  * @property {object} fsinfo             {files, bytes}
  * @property {object} livenessCounts     {live, obsolete, metadata}
  * @property {number} exec_fileOpCount
- * @property {number} exec_simNs         telemetry only — never the currency
+ * @property {number} exec_simNs         telemetry only, never the currency
  * @property {number} programBytes       cumulative bytes programmed to flash (write-amp numerator)
  * @property {number} hostBytes          cumulative bytes the host asked to write (write-amp denominator)
  * @property {number} caps               runner.caps bitmask (ADR-0011 ff_caps single-source-of-truth;
@@ -212,7 +212,7 @@ export const isW2C = (t) => W2C_SET.has(t);
 
 /**
  * Build a typed message envelope. Every message is `{type, ...payload}` and every
- * payload carries `epoch`. Kept deliberately thin — a constructor, not a framework.
+ * payload carries `epoch`. Kept deliberately thin: a constructor, not a framework.
  * @param {string} type  one of C2W / W2C
  * @param {object} payload  must include `epoch`
  */

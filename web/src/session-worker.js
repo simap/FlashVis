@@ -1,42 +1,42 @@
 /*
- * session-worker.js — the worker-per-session executor (ADR-0024). Speaks
+ * session-worker.js: the worker-per-session executor (ADR-0024). Speaks
  * ONLY protocol.js's wire: INIT/ENTRIES/GRANT/PULL/RESET in, GRANT_ACK/FRAME/
  * TELEMETRY out. On INIT it builds runner ⊕ device ⊕ heat ⊕ journal/event
  * rings for one session; ENTRIES prefetch (authorize nothing); GRANT is the
  * whole control plane (entryLimit + playLimitNs + scale); PULL returns render
  * data for a focused session; RESET halts and rebuilds.
  *
- * EXECUTION MODEL (ADR-0024 §2/§5/§6 — the WORKER-SIDE TIMED PLAYER, relocated
+ * EXECUTION MODEL (ADR-0024 §2/§5/§6: the WORKER-SIDE TIMED PLAYER, relocated
  * from viz.js's frame() drain + session.js's timed()/runCommand). Two layers,
  * exactly ADR-0009's split, now both worker-side:
  *
- *   1. EXECUTION — synchronous, eager. A churn event / gc step / command runs
+ *   1. EXECUTION: synchronous, eager. A churn event / gc step / command runs
  *      to completion in WASM the instant it is authorized (cursor < entryLimit,
  *      bounded only by TAPE_CAP/BACKLOG so it can't outrun playback without
- *      limit — I3). simNs (device telemetry) vaults on a sync WASM call; that's
+ *      limit (I3). simNs (device telemetry) vaults on a sync WASM call; that's
  *      fine, simNs is NEVER the currency. Every device op the run emits is
- *      CAPTURED (per op, for the tape's time+breakdown line — B5) and QUEUED
+ *      CAPTURED (per op, for the tape's time+breakdown line, B5) and QUEUED
  *      onto the playback queue, not applied to heat yet.
- *   2. PLAYBACK — a metered ~16ms tick (relocated viz.frame()). Each tick spends
+ *   2. PLAYBACK: a metered ~16ms tick (relocated viz.frame()). Each tick spends
  *      a real-time budget realBudgetMs × grant.scale, CAPPED at playLimitNs
  *      (§2), draining the queue CONTINUOUSLY intra-event (a 21ms erase holds
- *      across frames, not one flash — curRem carries forward) and applying heat
- *      as it drains. playbackNs — the §2 currency reported in grantAck — advances
+ *      across frames, not one flash, curRem carries forward) and applying heat
+ *      as it drains. playbackNs, the §2 currency reported in grantAck, advances
  *      only here, so it paces to real-time: 5× slow-mo ⇒ ~1/5 real-time, no-delay
  *      ⇒ flat-out but chunked at MAX_OPS_PER_FRAME (ADR-0022 drain pacing,
- *      carry-forward — paces the drain, drops nothing; the I8 heat veto holds).
+ *      carry-forward: paces the drain, drops nothing; the I8 heat veto holds).
  *      Race honours a finite scale because the same playLimitNs ceiling gates it
  *      (B9). entriesDrained = highest entry INDEX whose queued events have all
  *      drained; a Pace step ack needs entry executed ∧ metered playback drained.
  *
  * SYNTHETIC entries (message-level conformance suite: { costNs, ... } payloads,
- * no runner) have no device events, so they can't be metered by a real tick —
+ * no runner) have no device events, so they can't be metered by a real tick:
  * they COMMIT synchronously on GRANT against playLimitNs (per-entry, one-op
  * overshoot), which is execution==playback for a costless-to-run entry. The two
  * paths coexist; a session is all-synthetic (runner-less) or all-real.
  *
  * Transport-agnostic: installWorkerHost(port, opts) wires onto anything
- * MessagePort-shaped — a real dedicated Worker's `self`, the mock transport's
+ * MessagePort-shaped: a real dedicated Worker's `self`, the mock transport's
  * workerPort in tests. A bootstrap at the bottom self-attaches to `self`.
  *
  * Relocated from the (retired) main-thread session.js/viz.js: the ADR-0019
@@ -55,7 +55,7 @@ const TELEMETRY_MS = 250;           // W2C.TELEMETRY cadence (§4/§8: unconditi
 const JOURNAL_MAX = 2000;           // ring bound; protocol.js's JOURNAL_MIN (400) is the wire floor
 const MIN_ANIM = 110, MAX_ANIM = 9000;   // erase-sweep animated-slot bounds (viz.js parity), for EventEntry.ms
 // ADR-0022 drain pacing (relocated verbatim from viz.js): cap device steps drained
-// per playback tick, carrying the remainder forward — so a huge burst (a no-delay
+// per playback tick, carrying the remainder forward, so a huge burst (a no-delay
 // compaction of ~30k tiny reads) stays visibly lit across frames instead of mushing
 // into one decay flash. Paces the DRAIN; drops nothing (I8 veto holds).
 const MAX_OPS_PER_FRAME = 500;
@@ -65,8 +65,8 @@ const MS_PER_FRAME = 1000 / 60;     // coordinator grant cadence (chunk = scale 
 // still vault past this in one macrotask (accepted, ADR-0019/§5 I3); this only
 // stops the pump from starting the NEXT entry.
 //
-// At FINITE speed the cap is SCALE-RELATIVE — a few frames of paced PLAYBACK
-// (chunk = scale × MS_PER_FRAME) — so execution leads the metered player by a
+// At FINITE speed the cap is SCALE-RELATIVE: a few frames of paced PLAYBACK
+// (chunk = scale × MS_PER_FRAME), so execution leads the metered player by a
 // bounded REAL-TIME amount (~TAPE_CAP_FRAMES frames), matching §6 "the limit
 // leads the meter by ≈ one Δ." A fixed sim-ns cap instead let execution vault a
 // full sim-second ahead, which at deep slow-mo is ~50 real-seconds of un-played
@@ -83,10 +83,10 @@ const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(
 
 // Console help text (ADR-0019 buildConsoleApi parity, restored verbatim from the
 // retired playground.js HELP_TEXT). Worker-side because the wire ships RAW console
-// source (`help()`) that the sandbox compiles here — help() prints against the
+// source (`help()`) that the sandbox compiles here: help() prints against the
 // per-session api.print, so every per-FS tape shows it.
 const HELP_TEXT = [
-  'POKES  (friendly, all paced — prefix with await):',
+  'POKES  (friendly, all paced, prefix with await):',
   '  writeFile(name?, size?)  ·  readFile(name?)  ·  deleteFile(name?)  → {name,size}   ·   stat(name) → {name,size}|null',
   '    (no-arg read/delete lands on a tracked file; deleteFile also takes a prior result, e.g. deleteFile(last))',
   '  ls(prefix?)   ·   getFiles(prefix?) → [{name,size}]   ·   mkdir(path)  (mkdir -p; no-op on flat FASTFFS)',
@@ -99,7 +99,7 @@ const HELP_TEXT = [
   "example:  let f = await writeFile(); for (i=0;i<5;i++) await writeFile('n'+i, 64); await deleteFile(f)",
 ].join('\n');
 
-// ---- deterministic content generation (ADR-0015/0019) — pure, relocated verbatim ----
+// ---- deterministic content generation (ADR-0015/0019): pure, relocated verbatim ----
 function deterministicBytes(seed, n) {
   let s = seed >>> 0;
   const out = new Uint8Array(n);
@@ -131,7 +131,7 @@ const enc = new TextEncoder();
 const sizeOf = (d) => (typeof d === 'string' ? enc.encode(d).length : (d ? d.length : 0));
 
 // ---- ADR-0019 command sandbox (ported from playground.js's makeSandbox /
-// compileCommand — the wire ships RAW console source text; the worker compiles
+// compileCommand: the wire ships RAW console source text; the worker compiles
 // it). has-trap true for every name; get resolves api → per-invocation bag →
 // globalThis; set writes undeclared assignments to the bag. `with(scope){…}`
 // needs sloppy mode, hence new AsyncFunction (never a strict/module compile). ----
@@ -168,7 +168,7 @@ const isSyntheticCommand = (p) => p && typeof p === 'object' && (typeof p.costNs
  * @param {{postMessage:Function, onmessage:*}} port  the worker-side port (self, or a mock)
  * @param {Object} [opts]
  * @param {Function} [opts.createRunner]  injectable runner factory; defaults to
- *   runner.js's real WASM loader. A build failure is non-fatal — the session
+ *   runner.js's real WASM loader. A build failure is non-fatal: the session
  *   runs runner-less, which is exactly how the WASM-free conformance suite
  *   (synthetic-cost entries only) exercises the §2/§5/§9 state machine.
  */
@@ -182,9 +182,9 @@ export function installWorkerHost(port, opts = {}) {
   let cursor = 0;                                  // next unexecuted entry index (EXECUTION frontier)
   let entriesDrained = -1;                         // highest entry index whose playback has fully drained
   let entryLimit = 0, playLimitNs = 0, scale = 20000, round = -1;
-  let playbackNs = 0;                              // §2 currency — advances ONLY on the paced drain (or synthetic commit)
+  let playbackNs = 0;                              // §2 currency, advances ONLY on the paced drain (or synthetic commit)
   let dispFileOps = 0, dispFlashNs = 0;            // DISPLAYED drained counters (§9 zeroes these at prep(false))
-  let execFileOps = 0;                             // execution total (telemetry) — NOT reset by prep
+  let execFileOps = 0;                             // execution total (telemetry), NOT reset by prep
   let prepActive = false;
   let pendingTick = null;                          // synthetic multi-tick command settling: { index, rem }
   let realCmd = null;                              // real async command in flight: { index, done }
@@ -208,7 +208,7 @@ export function installWorkerHost(port, opts = {}) {
   const backpressured = () => (executedTapeNs - playbackNs) >= tapeCapNs() || pbQueue.length >= BACKLOG_CAP;
 
   // ---- liveness (ADR-0008/0015 §7): one reachability walk per flash change,
-  // throttled to ≥250ms since the last walk (§7/A4 — the walk is real work). ----
+  // throttled to ≥250ms since the last walk (§7/A4, the walk is real work). ----
   function ensureLiveness() {
     if (!mapDirty || !runner) return;
     const now = Date.now();
@@ -249,7 +249,7 @@ export function installWorkerHost(port, opts = {}) {
   }
 
   // Queue a captured batch of device events for paced playback (or, in prep,
-  // apply it eagerly — §9: instant, metering off, still measured). `last` closes
+  // apply it eagerly (§9: instant, metering off, still measured). `last` closes
   // the entry with a terminal marker carrying its file-op credit.
   function enqueueBatch(entryIndex, batch, last, fileOps) {
     if (prepActive) {
@@ -264,7 +264,7 @@ export function installWorkerHost(port, opts = {}) {
     // Split each device event into per-page playback steps (B17 / ADR-0009 "multi-
     // page ops split to sweep page-by-page"): a multi-page read/prog lights ONE page
     // per slot as the metered player crosses it, instead of the whole glow landing at
-    // once. The per-page ns sum to the op's ns, so playback accounting is unchanged —
+    // once. The per-page ns sum to the op's ns, so playback accounting is unchanged,
     // this is intra-op granularity only. An erase stays one step (a whole-sector
     // sweep). Falls back to the whole event if there is no heat player (geometry-less).
     for (const ev of batch) {
@@ -286,7 +286,7 @@ export function installWorkerHost(port, opts = {}) {
     captureBatch = []; entryFileOps = 0;
     let label = null, err = null;
     // B1: a churn op that throws (over-capacity write, ENOSPC, a remove of a
-    // missing file) must NOT crash the worker — the retired in-process path
+    // missing file) must NOT crash the worker: the retired in-process path
     // swallowed it. Journal the error, keep the session alive, advance past it.
     try {
       if (entry.kind === 'gc') { runner.gcStep(); label = 'gc()'; }
@@ -308,7 +308,7 @@ export function installWorkerHost(port, opts = {}) {
   function buildLocalApi(rng, entryIndex, myGen) {
     const guard = () => { if (myGen !== gen) throw new Error('epoch superseded'); if (!runner) throw new Error('no runner'); };
     // op(): a microtask hop keeps every op async (so quiescence's macrotask
-    // re-check has real boundaries — I1), then runs work() synchronously with a
+    // re-check has real boundaries, I1), then runs work() synchronously with a
     // timed() capture, journals its time+breakdown line, and queues its events.
     function op(label, work) {
       return Promise.resolve().then(() => {
@@ -324,7 +324,7 @@ export function installWorkerHost(port, opts = {}) {
       });
     }
     // Shared dir-scan (ADR-0019): opens a pooled handle, paces each dir.read
-    // individually (streaming ls) — real device traffic, driver order. `sorted`
+    // individually (streaming ls): real device traffic, driver order. `sorted`
     // (getFiles) sorts the RETURNED array at the JS boundary only (A1); the
     // streamed scan itself always plays driver order.
     async function scanDir(prefix, { printEach = false, sorted = false } = {}) {
@@ -346,7 +346,7 @@ export function installWorkerHost(port, opts = {}) {
     const randomSize = () => 1024 + Math.floor(rng() * (32 * 1024 - 1024));
     function pickExisting() {
       const names = runner.names().sort();
-      if (!names.length) throw new Error('no files yet — write one first');
+      if (!names.length) throw new Error('no files yet, write one first');
       return names[Math.floor(rng() * names.length)];
     }
     const resolveName = (arg) => (arg && typeof arg === 'object' ? arg.name : (arg ?? undefined)) ?? pickExisting();
@@ -445,12 +445,12 @@ export function installWorkerHost(port, opts = {}) {
         }
         // REAL command (SOURCE string): async, spans grants, executed at quiescence.
         if (!realCmd || realCmd.index !== cursor) {
-          if (!runner) return;                     // runner not ready — park; re-pump when it lands
+          if (!runner) return;                     // runner not ready, park; re-pump when it lands
           if (!prepActive && backpressured()) return;   // I3: don't outrun playback without bound
           startRealCommand(cursor, entry);
           return;                                  // parked until quiescence advances cursor + re-pumps
         }
-        return;                                    // command in flight — quiescence will advance cursor
+        return;                                    // command in flight, quiescence will advance cursor
       }
 
       // event / gc
@@ -461,7 +461,7 @@ export function installWorkerHost(port, opts = {}) {
         continue;
       }
       // REAL event/gc
-      if (!runner) return;                         // real entry needs a runner — park
+      if (!runner) return;                         // real entry needs a runner, park
       if (!prepActive && backpressured()) return;  // I3 backpressure
       execRealEntry(cursor, entry);                // executes, queues, advances cursor
     }
@@ -525,23 +525,23 @@ export function installWorkerHost(port, opts = {}) {
 
   // ---- the PLAYBACK metering step (relocated viz.js frame()) ----
   // Runs once per GRANT (and on command quiescence). Spends the granted headroom
-  // playLimitNs − playbackNs — which the coordinator advances by chunk = scale ×
-  // MS_PER_FRAME each frame, i.e. it IS this frame's realBudget × scale (§2/§6) —
+  // playLimitNs − playbackNs, which the coordinator advances by chunk = scale ×
+  // MS_PER_FRAME each frame, i.e. it IS this frame's realBudget × scale (§2/§6),
   // draining the queue CONTINUOUSLY intra-event with MAX_OPS_PER_FRAME carry-
-  // forward (ADR-0022). playbackNs — the §2 currency — advances only here, so it
+  // forward (ADR-0022). playbackNs, the §2 currency, advances only here, so it
   // paces to the coordinator's real (rAF) frame cadence: a 21ms erase holds across
   // frames, 5× slow-mo runs 1/5 real-time, no-delay flat-out but chunked. Driving
   // it off the GRANT (not a wall-clock timer) keeps progress deterministic under
   // the acceptance harness's macrotask-driven frames. Returns true iff it advanced.
   function drain() {
     if (!pbQueue.length) return false;
-    // No-delay (scale = Infinity) or prep: no TIME pacing — drain flat-out, bounded
+    // No-delay (scale = Infinity) or prep: no TIME pacing, drain flat-out, bounded
     // only by MAX_OPS_PER_FRAME (viz.js parity: `budget = noDelay ? Infinity : …`).
     // Finite scale: the granted headroom IS this frame's realBudget × scale (the
     // coordinator advanced playLimitNs by chunk = scale × MS_PER_FRAME).
     const noDelay = prepActive || !isFinite(scale);
     let budget = noDelay ? Infinity : (playLimitNs - playbackNs);
-    if (!(budget > 0)) return false;                 // watermark reached — hold (paces Race + slow-mo)
+    if (!(budget > 0)) return false;                 // watermark reached, hold (paces Race + slow-mo)
     const pb0 = playbackNs, ed0 = entriesDrained;
     let stepBudget = MAX_OPS_PER_FRAME;
     while (pbQueue.length && stepBudget > 0) {
@@ -560,7 +560,7 @@ export function installWorkerHost(port, opts = {}) {
         pbQueue.shift();
         if (step.last) { entriesDrained = step.entryIndex; dispFileOps += step.fileOps; }
       } else {
-        break;   // budget exhausted mid-step — carry curRem forward to the next frame (continuous intra-event)
+        break;   // budget exhausted mid-step, carry curRem forward to the next frame (continuous intra-event)
       }
     }
     if (playbackNs !== pb0 || entriesDrained !== ed0) { pump(); return true; }  // draining released I3 backpressure
@@ -585,7 +585,7 @@ export function installWorkerHost(port, opts = {}) {
     });
   }
 
-  // Reset the EXECUTION/protocol state — shared by INIT (after the runner is
+  // Reset the EXECUTION/protocol state, shared by INIT (after the runner is
   // built) and RESET (reusing the built runner/device, à la session.js
   // blankChip()). Journal/event ids stay monotonic across the clear.
   function resetLocalState(newEpoch) {
@@ -604,7 +604,7 @@ export function installWorkerHost(port, opts = {}) {
 
   // Wire the device's op stream. Device events are CAPTURED into the executing
   // entry's timed() batch (later queued for paced playback), NOT applied to heat
-  // here — the glow is PACED (§7: tint execution-current, glow paced). Only
+  // here: the glow is PACED (§7: tint execution-current, glow paced). Only
   // mapDirty (liveness tint, execution-current) is set eagerly; a 'reset' clears
   // the player. Subscribed once per device; `captureBatch`/`heat`/`events` are
   // read live so a RESET-rebuilt sink is picked up without re-subscribing.
@@ -644,7 +644,7 @@ export function installWorkerHost(port, opts = {}) {
   }
   function handleEntries(m) {
     for (const e of m.entries) {
-      if (e.index !== entries.length) continue;    // out-of-order / duplicate — drop (I6: gaps detectable)
+      if (e.index !== entries.length) continue;    // out-of-order / duplicate, drop (I6: gaps detectable)
       entries.push(e);
     }
     pump();                                          // execute newly-covered prefetch; ENTRIES itself never acks (I5 test)
@@ -664,7 +664,7 @@ export function installWorkerHost(port, opts = {}) {
       if (cachedMap && livenessGen > (m.liveMap.since ?? -1)) payload.liveMap = { version: livenessGen, classes: cachedMap.slice() };
     }
     // B19: the journal ring has the SAME one-past head / exclusive-since off-by-one
-    // as the events ring (B18) — the consumer feeds journalHead back as `since`
+    // as the events ring (B18): the consumer feeds journalHead back as `since`
     // (playground.js), so `id > since` drops the boundary tape line of every pull
     // window; at slow-mo exactly one entry lands per window and it IS the dropped
     // one, so tape lines go missing. Same inclusive-lower-bound bridge as events
@@ -675,14 +675,14 @@ export function installWorkerHost(port, opts = {}) {
       ? (m.journal.newest ? journal.newest(m.journal.limit) : journal.since((m.journal.since ?? 0) - 1, m.journal.limit))
       : [];
     // B18: the events cursor the consumer sends back is the eventHead we last
-    // reported — and eventHead is `nextId`, ONE PAST the highest id issued (§7).
+    // reported, and eventHead is `nextId`, ONE PAST the highest id issued (§7).
     // The ring's since() is EXCLUSIVE (id > since), so honoring that head verbatim
-    // skips the event whose id equals it — the very NEXT erase pushed. At fast/no-
+    // skips the event whose id equals it: the very NEXT erase pushed. At fast/no-
     // delay many erases land per frame so the dropped one is invisible; at slow-mo
     // exactly ONE erase lands between pulls and it IS the dropped one → the sweep
     // never surfaces (inverted visibility). Bridge the one-past head to an
     // inclusive lower bound: everything pushed at or after the reported head
-    // (id >= head) is genuinely new — no drop, and no historical replay (ids below
+    // (id >= head) is genuinely new: no drop, and no historical replay (ids below
     // head were already seen / reset past on focus switch via {newest,limit:0}).
     payload.events = m.events
       ? (m.events.newest ? events.newest(m.events.limit) : events.since((m.events.since ?? 0) - 1, m.events.limit))
@@ -692,7 +692,7 @@ export function installWorkerHost(port, opts = {}) {
     send(W2C.FRAME, payload);
   }
   function handleReset(m) {
-    gen++;                                          // I5: void in-flight state; stale awaits starve (incl. INIT's build — myGen check discards it)
+    gen++;                                          // I5: void in-flight state; stale awaits starve (incl. INIT's build: myGen check discards it)
     if (runner) {
       // Fast path (session.js blankChip): reuse the built runner/device.
       try { runner.unmount(); } catch { /* driver-specific */ }
@@ -711,7 +711,7 @@ export function installWorkerHost(port, opts = {}) {
   port.onmessage = (e) => {
     const m = e.data;
     if (!m || typeof m.type !== 'string') return;
-    // INIT and RESET both carry the epoch they TRANSITION TO — exempt from I5's
+    // INIT and RESET both carry the epoch they TRANSITION TO, exempt from I5's
     // equality discard; every in-epoch message is discarded on mismatch.
     if (m.type === C2W.INIT) { handleInit(m); return; }
     if (m.type === C2W.RESET) { handleReset(m); return; }
@@ -722,7 +722,7 @@ export function installWorkerHost(port, opts = {}) {
   };
 
   return {
-    /** Test/teardown hook — not part of the wire; stops the timers. */
+    /** Test/teardown hook, not part of the wire; stops the timers. */
     _stop() { stopTimers(); },
   };
 }

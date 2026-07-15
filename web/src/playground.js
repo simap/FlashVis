@@ -5,25 +5,25 @@
  * WHAT CHANGED FROM THE PRE-0024 PLAYGROUND
  *   - Each session is now a WORKER behind a Port. We spawn one Worker per FS,
  *     wrap it in a session-PROXY (web/src/session-proxy.js, the SINGLE owner of
- *     that Port — it receives GRANT_ACK/FRAME/TELEMETRY), and hand the proxies
+ *     that Port, it receives GRANT_ACK/FRAME/TELEMETRY), and hand the proxies
  *     to the coordinator (web/src/lockstep.js) via setSessions([...proxies]).
  *   - The die renders from PULLED FRAMEs, not synchronous device reads: a rAF
  *     loop calls focusedProxy.pull(sel) then viz.applyFrame(frame) for the ONE
  *     focused session (ADR-0017 focus-is-view; unfocused sessions stream
  *     nothing). Each session owns a COMPLETE separate UI state copy (its own
  *     viz+die, pull cursors and journal); focus switch swaps die VISIBILITY and
- *     re-renders the shared stats/tape from the focused session's own copy —
+ *     re-renders the shared stats/tape from the focused session's own copy:
  *     no singleton is repointed, so no FS's data bleeds into another (RC-A).
  *   - HUD + compare strip read TELEMETRY (proxy.telemetry) + coordinator
  *     snapshots(), the ~250ms heartbeat, for EVERY session at once.
  *   - The tape (console scrollback) is WORKER-OWNED and read via a journal
  *     PULL (frame.journal / journalHead), not flipped by the coordinator.
  *   - broadcast() ships RAW console SOURCE TEXT the worker compiles in its
- *     ADR-0019 sandbox, not a live closure — a closure can't cross the thread.
+ *     ADR-0019 sandbox, not a live closure: a closure can't cross the thread.
  *
  * The worker's FRAME payload is protocol.js-conformant (FrameMsg: heat.read/
  * prog, shown.pages/wear, liveMap.version/classes, erase/reset EventEntries in
- * `events`), so the render loop feeds the pulled FRAME straight to viz.js —
+ * `events`), so the render loop feeds the pulled FRAME straight to viz.js,
  * no field remap.
  */
 import { createChurnModel, CHURN_CLASS } from './churn.js';
@@ -42,7 +42,7 @@ const DEFAULT_FS = 'fastffs';
 // A3: caps ride the wire now (TelemetryMsg.caps, ADR-0011 ff_caps single
 // source of truth). Until the first TELEMETRY for a session lands (or if a
 // worker never emits it), fall back to "everything capable" (all bits set)
-// so we fail OPEN — a missing/stale caps read must not incorrectly hide a
+// so we fail OPEN: a missing/stale caps read must not incorrectly hide a
 // control the FS actually supports.
 const CAPS_FALLBACK = FF_CAP_GC | FF_CAP_LIVE_MAP;
 
@@ -65,13 +65,13 @@ const churnProfile = () => ({
 
 const $ = (id) => document.getElementById(id);
 const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)} ms` : `${(ms / 1000).toFixed(2)} s`; };
-const fmtPerOp = (ns, ops) => { if (!(ops > 0)) return '—'; const us = ns / 1000 / ops; return us < 1000 ? `${Math.round(us)} µs/op` : `${(us / 1000).toFixed(2)} ms/op`; };
+const fmtPerOp = (ns, ops) => { if (!(ops > 0)) return 'n/a'; const us = ns / 1000 / ops; return us < 1000 ? `${Math.round(us)} µs/op` : `${(us / 1000).toFixed(2)} ms/op`; };
 const fmtRate = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 
 /* ------------------------------------------------------------------------ *
  * COMMAND SOURCE (ADR-0024 §4: commands ship as RAW SOURCE)
  *
- * A console line ships to the worker AS TYPED — bare statements (`help()`,
+ * A console line ships to the worker AS TYPED: bare statements (`help()`,
  * `writeFile('cfg.bin')`, `for (i=0;i<3;i++) ls()`). The worker (session-
  * worker.js makeSandbox/compileSource) wraps it in its ADR-0019 sloppy-mode
  * `with(scope){…}` sandbox whose inner `api` provides every console helper
@@ -83,7 +83,7 @@ const fmtRate = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.ro
  * ------------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------------ *
- * WORKER CONNECTION SEAM — production spawns a real Worker; a headless test
+ * WORKER CONNECTION SEAM: production spawns a real Worker; a headless test
  * installs globalThis.__flashvisWorkerConnect to wire the mock transport +
  * an in-realm worker host with a stub runner (no real WASM). Returns
  * `{ port, terminate }`; the proxy owns port.onmessage.
@@ -97,7 +97,7 @@ function connectWorker(fsId, meta) {
 boot().catch((e) => {
   console.error(e);
   const el = $('specLive');
-  if (el) el.textContent = 'boot failed — ' + (e && e.message || e);
+  if (el) el.textContent = 'boot failed: ' + (e && e.message || e);
 });
 
 async function boot() {
@@ -115,8 +115,8 @@ async function boot() {
   const coordinator = createLockstep({ churn });
 
   // RC-A (ADR-0024 §7 PROPOSAL): UI state is a COMPLETE separate copy PER
-  // SESSION — its own viz+die, its own pull cursors, its own journal copy.
-  // THE INVARIANT: no cross-session data bleed — a session's pulled frame /
+  // SESSION: its own viz+die, its own pull cursors, its own journal copy.
+  // THE INVARIANT: no cross-session data bleed, a session's pulled frame /
   // journal only ever applies to ITS OWN state+die, never overlaid onto
   // another. Nothing shared is repointed on a focus switch (that singleton
   // repoint was the RC-A clobber); the ONE legitimate switch-time mutation is
@@ -139,7 +139,7 @@ async function boot() {
 
   // ---- spawn one worker per FS, wrap in a proxy, and give EACH session its
   // OWN viz + die node (ADR-0024 §7 PROPOSAL). All N dice mount into #dieStack;
-  // focus swaps VISIBILITY only (the `.hidden` class) — a hidden die keeps its
+  // focus swaps VISIBILITY only (the `.hidden` class): a hidden die keeps its
   // own rendered state and is NEVER re-rendered with another FS's data, so a
   // switch fires no CSS transitions. The flash-stats panel, journal, inspector
   // and legend are ONE shared DOM, re-rendered from the focused session's own
@@ -179,12 +179,12 @@ async function boot() {
     return coordinator.broadcast(userSrc, userSrc);   // RAW source; worker compiles it
   }
 
-  // ---- focus switch (ADR-0017 focus-is-view): a PURE view op — never logged,
+  // ---- focus switch (ADR-0017 focus-is-view): a PURE view op, never logged,
   // never touches worker state. It mutates NO shared UI state: it swaps die
   // VISIBILITY, flips per-session pull participation, and re-renders the shared
   // stats/journal/legend DOM FROM the newly-focused session's OWN state copy.
   // The focused session re-attaches FRESH (§7): the next pull seeds its cursors
-  // to its own current heads — full liveMap snapshot + head-only events, so no
+  // to its own current heads: full liveMap snapshot + head-only events, so no
   // historical erase sweep replays and no other FS's data can bleed in. ----
   function setFocus(fsId) {
     focusedFsId = fsId;
@@ -216,7 +216,7 @@ async function boot() {
     return 'out';
   }
   function appendTapeEntry(e) {
-    // internal command lifecycle markers carry text 'command' — not user-facing.
+    // internal command lifecycle markers carry text 'command', not user-facing.
     if ((e.kind === 'started' || e.kind === 'done') && e.text === 'command') return;
     const out = $('tape');
     const el = document.createElement('div');
@@ -278,7 +278,7 @@ async function boot() {
       card.setAttribute('aria-pressed', String(snap.fsId === focusedFsId));
       const good = goodOf(snap);
       card.classList.toggle('leader', leaderGood > 0 && good >= leaderGood);
-      // B3: the label always reads "holding" — it's the debounced `holding`
+      // B3: the label always reads "holding", it's the debounced `holding`
       // signal (spec/ui.md "Holding" card) that drives VISIBILITY (the
       // `.fs.waiting` class toggle below, in the waitStates loop), not the
       // mode. A mode-hardcoded "waiting" string could show even when
@@ -309,11 +309,11 @@ async function boot() {
 
   // ---- die-adjacent legend ----
   const FS_EXTRA_STATES = {
-    fatfs: [{ cls: 'wl', word: 'WL', title: 'metadata the FTL itself writes (config/state) — a shade of metadata' }],
+    fatfs: [{ cls: 'wl', word: 'WL', title: 'metadata the FTL itself writes (config/state), a shade of metadata' }],
   };
   function legendFor(fsId) {
     const erasedTitle = fsId === 'fatfs'
-      ? '0xFF, nothing written — or slack: allocated but carrying no data'
+      ? '0xFF, nothing written, or slack: allocated but carrying no data'
       : '0xFF, nothing written';
     return [
       { label: 'States', items: [
@@ -363,14 +363,14 @@ async function boot() {
   // ---- HUD (Flash Stats) from focused TELEMETRY + focused FRAME metrics.
   // NB (LANE-REPORT): device erase/read counts and programBytes/hostBytes
   // (write-amp) are NOT emitted by the worker today, so those fields show
-  // '—'. ----
+  // 'n/a'. ----
   function refreshHUD() {
     const t = proxyOf(focusedFsId).telemetry;
     const m = fviz().metrics();
     const lc = t.livenessCounts || { live: 0, obsolete: 0, metadata: 0 };
     const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
-    set('sAmp', t.wa != null ? t.wa.toFixed(1) + '×' : '—');
-    set('fAmp', t.wa != null ? t.wa.toFixed(1) + '×' : '—');
+    set('sAmp', t.wa != null ? t.wa.toFixed(1) + '×' : 'n/a');
+    set('fAmp', t.wa != null ? t.wa.toFixed(1) + '×' : 'n/a');
     set('fProg', Math.round(100 * m.displayedBytes / m.capacityBytes) + '%');
     set('fFree', m.erasedPages);
     set('sFiles', t.fsinfo ? t.fsinfo.files : 0);
@@ -387,15 +387,15 @@ async function boot() {
 
   setFocus(DEFAULT_FS);
   $('specGeo').textContent = `${(geometry.sectorSize * geometry.sectorCount / 1024) | 0} KB · ${geometry.sectorCount}×${geometry.sectorSize / 1024} KB · ESP32-S3 timing`;
-  $('specLive').textContent = 'formatted + mounted — empty and paused';
+  $('specLive').textContent = 'formatted + mounted, empty and paused';
   renderGeo();
 
   // ---- boot log: the ONE real format ships as a broadcast command AFTER the
-  // workers are init'd (ADR-0024 §8 — no format wire field). help() first so
+  // workers are init'd (ADR-0024 §8, no format wire field). help() first so
   // every per-FS tape shows the reference; both drain even while paused
   // (ADR-0020: Pause gates the churn GENERATOR only).
   //   B10 (spec/ui.md L11): the page-load boot ops are wrapped in the §9 prep
-  // bracket — prep(true) … boot ops … prep(false) — so the worker executes them
+  // bracket: prep(true) … boot ops … prep(false), so the worker executes them
   // INSTANTLY, with no metering and no animation, and the page lands usable.
   // prep(false) zeroes the displayed drained counters so boot doesn't count. A
   // prep entry ships as a synthetic-command payload object (never a source
@@ -423,7 +423,7 @@ async function boot() {
     const st = sessions.get(focusedFsId);
     const f = st.proxy.frame;
     // Process each frame once; ignore a stale leftover from a previous focus
-    // stint (st.lastFrame was pinned to it on switch) — wait for the fresh one.
+    // stint (st.lastFrame was pinned to it on switch), wait for the fresh one.
     if (f && f !== st.lastFrame) {
       st.lastFrame = f;
       st.viz.applyFrame(f);   // FRAME is protocol-conformant; the fresh-attach frame's events are empty
@@ -455,8 +455,8 @@ async function boot() {
   }, 250);
 
   // ---- standing-signal pins (spec/ui.md): the CS pin AND each fs-card status
-  // dot render the RAW per-frame `csActive` blinky (NO debounce, NO CSS smoothing
-  // — B15); the fs-card "holding" label renders the ALREADY-debounced (~300ms)
+  // dot render the RAW per-frame `csActive` blinky (NO debounce, NO CSS smoothing,
+  // B15); the fs-card "holding" label renders the ALREADY-debounced (~300ms)
   // `holding`. Both come from the coordinator per-fsId as waitStates()[fsId] =
   // { csActive, holding }; the debounce lives coordinator-side (lockstep.js). ----
   const pinCS = $('pinCS');
@@ -520,7 +520,7 @@ async function boot() {
 
   // ---- Reset (header): bump epoch (workers rebuild a fresh chip), then replay
   // the boot log. Never switches race/pace mode (spec/ui.md). Every session's
-  // OWN state (its die, cursors and journal copy) is reset — the coordinator
+  // OWN state (its die, cursors and journal copy) is reset, the coordinator
   // nulls each proxy.frame on reset, so a re-attach snaps to the fresh chip. ----
   $('btnReset')?.addEventListener('click', () => {
     setRunning(false);
@@ -532,7 +532,7 @@ async function boot() {
       st.journalEntries = []; st.tapeSeen.clear();
     }
     setFocus(focusedFsId);   // re-render the shared DOM from the (now empty) focused state
-    $('specLive').textContent = 'formatted + mounted — empty and paused';
+    $('specLive').textContent = 'formatted + mounted, empty and paused';
     bootSequence();          // B10: prep-wrapped, same as page-load boot
   });
 
@@ -563,7 +563,7 @@ async function boot() {
   $('gc').addEventListener('input', (e) => applyGc(+e.target.value));
 
   // heat-map toggle: a pure view (the wear overlay). It reads the wear the FRAME
-  // already carries, so it just flips each session's viz overlay flag — applied
+  // already carries, so it just flips each session's viz overlay flag, applied
   // to ALL dice so the setting persists across focus switches.
   $('heat').addEventListener('change', (e) => {
     for (const st of sessions.values()) st.viz.setHeatmap(e.target.checked, st.dieEl);
