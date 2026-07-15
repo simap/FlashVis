@@ -4,12 +4,12 @@
  * coalescence + shown fill — with every DOM/animation call stripped out. The
  * worker only ACCUMULATES; a PULL (FRAME) reads a decayed snapshot.
  *
- * Unlike viz.js this holds NO timed player/queue: each device op is applied
- * EAGERLY the instant it fires (the worker's playback currency + §2 gate live
- * in session-worker.js now, not here; the renderer handles animation timing
- * from the heat snapshot + erase EventEntries). Heat DECAY is computed
- * closed-form at snapshot time from wall-clock elapsed (ADR-0024 §7: "decay
- * closed-form at bump/pull, no worker rAF").
+ * This is the accumulator half; the timed player (queue + metering tick) lives
+ * in session-worker.js. applyEvent() is called from that player's DRAIN, one op
+ * at a time, as playback paces through the queue (§7: glow is PACED — tint leads
+ * glow) — NOT eagerly at execution. Every op still contributes its full HEAT_ADD
+ * (I8). Heat DECAY is computed closed-form at snapshot time from wall-clock
+ * elapsed (ADR-0024 §7: "decay closed-form at bump/pull, no worker rAF").
  *
  * ADR-0022 heat/render veto (I8): every op still contributes exactly HEAT_ADD
  * to its page — nothing here drops, throttles, samples, or coalesces an op

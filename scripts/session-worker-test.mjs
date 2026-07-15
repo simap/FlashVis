@@ -48,31 +48,36 @@ async function run() {
   }));
   await flushTurns(2);
 
-  // ---- 1. §2 gate: playLimitNs=1 lets exactly ONE entry execute (one-op
-  //         overshoot), then the gate shuts even though entryLimit permits more ----
+  // ---- 1. THE TWO-LAYER TIMED PLAYER (ADR-0024 §2/§6): EXECUTION is eager,
+  //         PLAYBACK is metered against playLimitNs. A tiny playLimitNs=1 must
+  //         hold playbackNs at the ceiling (paced) even though execution (cursor)
+  //         races ahead — playbackNs is the currency, NOT the executed op cost.
+  //         (This is the B6/B7/B8 fix: pre-fix, playbackNs vaulted to entry 0's
+  //         full ~24ms write cost on one-op overshoot.) ----
   mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round: 1, entryLimit: 2, playLimitNs: 1, scale: 20000 }));
-  await flushTurns(2);
+  await wait(80);   // let the ~16ms metering tick run several times
   const ack1 = inbox.grantAck.filter((a) => a.round === 1).pop();
   if (!ack1) fail('no grantAck for round 1 (I10)');
   else ok('round 1 acked (I10: every grant acked on receipt)');
-  if (ack1 && ack1.cursor === 1) ok('gate: exactly entry 0 executed (one-op overshoot past playLimitNs=1)');
-  else fail(`gate: expected cursor 1, got ${ack1 && ack1.cursor} (playLimitNs=1 not honored)`);
-  if (ack1 && ack1.playbackNs > 1) ok(`playbackNs (${ack1.playbackNs}) reflects entry 0's real flash cost (overshoot)`);
-  else fail(`playbackNs did not advance to entry 0's real cost (${ack1 && ack1.playbackNs})`);
-  if (ack1 && ack1.entriesDrained === ack1.cursor - 1) ok('entriesDrained = highest drained INDEX (cursor-1; execution == drain, this model)');
-  else fail(`entriesDrained (${ack1 && ack1.entriesDrained}) != cursor-1 (${ack1 && ack1.cursor - 1})`);
+  if (ack1 && ack1.cursor >= 1) ok(`execution ran eagerly despite playLimitNs=1 (cursor=${ack1.cursor}, decoupled from playback)`);
+  else fail(`execution did not run (cursor=${ack1 && ack1.cursor})`);
+  if (ack1 && ack1.playbackNs === 1) ok('PACED: playbackNs held exactly at playLimitNs=1 (continuous intra-event — NOT vaulted to entry 0\'s full flash cost)');
+  else fail(`playbackNs not paced to the ceiling: expected 1, got ${ack1 && ack1.playbackNs} (B7: sim outran the gate)`);
+  if (ack1 && ack1.entriesDrained === -1) ok('entriesDrained = -1: entry 0 executed but NOT yet drained (its ~24ms of flash has not played back under a 1ns budget)');
+  else fail(`entriesDrained should be -1 (entry 0 not drained), got ${ack1 && ack1.entriesDrained}`);
 
-  // ---- 2. open the gate + entryLimit: all 4 entries run, incl. the async
-  //         command (index 3) which completes only at quiescence (I1) ----
-  for (let round = 2; round <= 5; round++) {
-    mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round, entryLimit: 4, playLimitNs: 1_000_000_000, scale: 20000 }));
-    await flushTurns(3);   // macrotasks let the async command quiesce between grants
-  }
+  // ---- 2. open the gate + entryLimit at no-delay: all 4 entries EXECUTE, incl.
+  //         the async command (index 3, quiesces over macrotasks — I1), and the
+  //         metered player DRAINS the whole backlog flat-out-but-chunked ----
+  mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round: 2, entryLimit: 4, playLimitNs: 1e12, scale: Infinity }));
+  await wait(200);   // command quiesces + no-delay player drains the queue
   const ackLater = inbox.grantAck[inbox.grantAck.length - 1];
   if (ackLater.cursor === 4) ok('all 4 entries executed (churn ×2, gc, command) once the gate opened');
   else fail(`cursor did not reach 4 (got ${ackLater.cursor})`);
-  if (ackLater.entriesDrained === 3) ok('entriesDrained reached 3 = highest index (all 4 drained; command completed AND drained)');
+  if (ackLater.entriesDrained === 3) ok('entriesDrained reached 3 = highest index (all 4 drained; command completed AND metered-drained — §6)');
   else fail(`entriesDrained not 3 (${ackLater.entriesDrained})`);
+  if (ackLater.playbackNs > 1) ok(`playbackNs advanced to real flash time once drained (${(ackLater.playbackNs / 1e6).toFixed(1)} ms)`);
+  else fail(`playbackNs did not advance after drain (${ackLater.playbackNs})`);
   if (ackLater.drainedCounters.fileOpCount >= 4) ok(`fileOpCount accrued from real ops (${ackLater.drainedCounters.fileOpCount}: 2 churn + 2 command writes; gc excluded)`);
   else fail(`fileOpCount too low (${ackLater.drainedCounters.fileOpCount})`);
 
