@@ -144,16 +144,35 @@ export const JOURNAL_MIN = 400;
  */
 
 /**
+ * @typedef {Object} FrameHeat        full per-cell heat state (~8KB), already-decayed
+ * @property {Float32Array} read       per-page read-glow channel  [pageCount]
+ * @property {Float32Array} prog       per-page program-glow channel [pageCount]
+ *
+ * @typedef {Object} FrameShown       shown ⊕ wear (~2.3KB), full-state
+ * @property {Uint16Array} pages       per-page used-bytes / fill state [pageCount]
+ * @property {Uint32Array} wear        per-sector erase count [sectorCount]
+ *
+ * @typedef {Object} FrameLiveMap     liveMap ⊕ version (~1KB); present iff version > since
+ * @property {number}     version      stamps the WALK, not the mutation (§7)
+ * @property {Uint8Array} classes      per-page class code [pageCount] (per-FS taxonomy)
+ *
+ * @typedef {Object} EventEntry       a discrete viz-event (§7 logs; ring, monotonic id)
+ *   The two triggers a full-state snapshot CANNOT represent — one-shot sector
+ *   animations. Everything continuous (read/prog glow) rides `heat`, not events.
+ * @property {number}  id              monotonic per epoch (I6); served {since|newest,limit}
+ * @property {'erase'|'reset'} kind
+ * @property {number} [sector]         erase: the swept sector
+ * @property {number} [ms]             erase: worker-computed animated slot duration at scale
+ *
  * @typedef {Object} FrameMsg         W2C.FRAME   (render payload; §4/§7)
- * @property {number}   epoch
- * @property {*}        heat           ~8KB full per-cell heat state
- * @property {*}        shown          shown ⊕ wear (~2.3KB)
- * @property {*}        [liveMap]      liveMap ⊕ version (~1KB, only iff version > since)
- * @property {Array}    journal
- * @property {Array}    events
- * @property {number}   journalHead
- * @property {number}   eventHead
- *   heat is full-state per frame => the first pull after focus IS the snap repaint.
+ * @property {number}       epoch
+ * @property {FrameHeat}    heat        full-state per frame => first pull after focus IS the snap repaint
+ * @property {FrameShown}   shown
+ * @property {FrameLiveMap} [liveMap]   only iff version > since
+ * @property {Array}        journal     journal entries (since|newest,limit)
+ * @property {EventEntry[]} events
+ * @property {number}       journalHead
+ * @property {number}       eventHead
  *   firstId > since+1 => ring eviction => optional UI break marker.
  */
 
