@@ -172,9 +172,60 @@ async function run() {
     ok('B2: RESET before the INIT build landed still yields a runner — real write executed + drained (not runner-less)');
   else fail(`B2: session runner-less after RESET-races-INIT (ack=${JSON.stringify(b2ack)})`);
 
+  // ---- 8. B18: erase sweeps must surface at SLOW-MO, not just fast. The events
+  //         cursor the coordinator feeds back each frame is the eventHead we last
+  //         reported (playground.js: eventsSince = frame.eventHead), and eventHead
+  //         is nextId — ONE PAST the highest id issued. Honoring it verbatim
+  //         against an EXCLUSIVE ring (id > since) dropped the very next erase. At
+  //         fast speed many erases land per frame so the drop is invisible; at
+  //         slow-mo exactly ONE lands between pulls and it IS the dropped one, so
+  //         the sweep never surfaced (inverted visibility). Drive gc erases at a
+  //         slow scale, pull with the head-as-since cursor, and assert each erase
+  //         surfaces exactly once AND holds for a long scaled ms. ----
+  {
+    const t3 = createTransport();
+    installWorkerHost(t3.workerPort, { createRunner: createStubRunner });
+    const w3 = { grantAck: [], frame: [] };
+    t3.mainPort.onmessage = (e) => { const m = e.data; if (m.type === W2C.GRANT_ACK) w3.grantAck.push(m); else if (m.type === W2C.FRAME) w3.frame.push(m); };
+    t3.mainPort.postMessage(msg(C2W.INIT, { epoch: 20, fsId: 'stub', geometry: GEOMETRY, name: 'stub' }));
+    await flushTurns(6);
+    const gcEntries = [];
+    for (let i = 0; i < 12; i++) {
+      gcEntries.push({ index: gcEntries.length, kind: 'event', payload: { type: 'write', name: `g${i}.bin`, size: 1024, writeSeed: i + 1 }, seed: 0 });
+      gcEntries.push({ index: gcEntries.length, kind: 'gc', payload: null, seed: 0 });
+    }
+    t3.mainPort.postMessage(msg(C2W.ENTRIES, { epoch: 20, entries: gcEntries }));
+    await flushTurns(3);
+    const SLOW = 30000;                          // ~33x slow-mo (real-time = 1e6)
+    const chunk = SLOW * (1000 / 60);
+    let playLimitNs = 0, eventsSince = 0;
+    const seen = new Map();                       // id -> times surfaced
+    let maxMs = 0;
+    for (let fr = 0; fr < 2000; fr++) {
+      playLimitNs += chunk;
+      t3.mainPort.postMessage(msg(C2W.GRANT, { epoch: 20, round: fr + 1, entryLimit: gcEntries.length, playLimitNs, scale: SLOW }));
+      t3.mainPort.postMessage(msg(C2W.PULL, { epoch: 20, events: { since: eventsSince, limit: 400 } }));
+      await flushTurns(2);                        // settle each frame (one PULL per frame, no pipelining)
+      for (const f of w3.frame.splice(0)) {
+        for (const ev of (f.events || [])) if (ev.kind === 'erase') { seen.set(ev.id, (seen.get(ev.id) || 0) + 1); maxMs = Math.max(maxMs, ev.ms); }
+        if (f.eventHead != null) eventsSince = f.eventHead;   // the playground cursor convention (head fed back as since)
+      }
+      const ack = w3.grantAck[w3.grantAck.length - 1];
+      if (ack && ack.entriesDrained >= gcEntries.length - 1) break;
+    }
+    const uniqueErases = seen.size;
+    const dups = [...seen.values()].filter((n) => n > 1).length;
+    if (uniqueErases >= 10) ok(`B18: erase sweeps surface at slow-mo via the head-as-since cursor (${uniqueErases}/12 gc erases; pre-fix: 0 — the boundary event was dropped every frame)`);
+    else fail(`B18: erase sweeps NOT surfacing at slow-mo (got ${uniqueErases}/12) — inverted visibility regressed`);
+    if (dups === 0) ok('B18: each erase surfaces exactly once — the head->inclusive-since bridge does not double-animate');
+    else fail(`B18: ${dups} erase(s) surfaced more than once — the cursor bridge over-returns`);
+    if (maxMs > 300) ok(`B18: slow-mo erase holds for a long scaled ms (${maxMs.toFixed(0)}ms) — the 21ms erase is genuinely visible, not a MIN_ANIM flash`);
+    else fail(`B18: slow-mo erase ms too short (${maxMs.toFixed(0)}ms) — duration not scaling with slow-mo`);
+  }
+
   console.log('');
   if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
-  console.log('PASS - real-execution path: §2 gate, raw-source sandbox command (I1), FRAME typedefs (heat/shown/liveMap/erase events), write-amp telemetry, I5 discard, RESET, B2 reset-races-init.');
+  console.log('PASS - real-execution path: §2 gate, raw-source sandbox command (I1), FRAME typedefs (heat/shown/liveMap/erase events), write-amp telemetry, I5 discard, RESET, B2 reset-races-init, B18 slow-mo erase visibility.');
   process.exit(0);
 }
 

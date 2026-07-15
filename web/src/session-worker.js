@@ -666,8 +666,18 @@ export function installWorkerHost(port, opts = {}) {
     payload.journal = m.journal
       ? (m.journal.newest ? journal.newest(m.journal.limit) : journal.since(m.journal.since, m.journal.limit))
       : [];
+    // B18: the events cursor the consumer sends back is the eventHead we last
+    // reported — and eventHead is `nextId`, ONE PAST the highest id issued (§7).
+    // The ring's since() is EXCLUSIVE (id > since), so honoring that head verbatim
+    // skips the event whose id equals it — the very NEXT erase pushed. At fast/no-
+    // delay many erases land per frame so the dropped one is invisible; at slow-mo
+    // exactly ONE erase lands between pulls and it IS the dropped one → the sweep
+    // never surfaces (inverted visibility). Bridge the one-past head to an
+    // inclusive lower bound: everything pushed at or after the reported head
+    // (id >= head) is genuinely new — no drop, and no historical replay (ids below
+    // head were already seen / reset past on focus switch via {newest,limit:0}).
     payload.events = m.events
-      ? (m.events.newest ? events.newest(m.events.limit) : events.since(m.events.since, m.events.limit))
+      ? (m.events.newest ? events.newest(m.events.limit) : events.since((m.events.since ?? 0) - 1, m.events.limit))
       : [];
     payload.journalHead = journal.head;
     payload.eventHead = events.head;
