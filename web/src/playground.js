@@ -447,17 +447,22 @@ async function boot() {
     applyCapsGating(capsFor(focusedFsId));   // A3: caps land on TELEMETRY, same ~250ms cadence
   }, 250);
 
-  // ---- standing-signal pins (spec/ui.md): the CS pin/status dot renders the
-  // RAW per-frame `csActive` blinky (NO debounce); the fs-card "holding" label
-  // renders the ALREADY-debounced (~300ms) `holding`. Both come from the
-  // coordinator per-fsId as waitStates()[fsId] = { csActive, holding }; the
-  // debounce lives coordinator-side now (lockstep.js), not here. ----
+  // ---- standing-signal pins (spec/ui.md): the CS pin AND each fs-card status
+  // dot render the RAW per-frame `csActive` blinky (NO debounce, NO CSS smoothing
+  // — B15); the fs-card "holding" label renders the ALREADY-debounced (~300ms)
+  // `holding`. Both come from the coordinator per-fsId as waitStates()[fsId] =
+  // { csActive, holding }; the debounce lives coordinator-side (lockstep.js). ----
   const pinCS = $('pinCS');
   (function holdTick() {
     const ws = coordinator.waitStates();
     for (const fsId of Object.keys(ws)) {
       const { csActive, holding } = ws[fsId];
-      $('fsCard-' + fsId)?.classList.toggle('waiting', holding);   // debounced (the "Holding" card)
+      const card = $('fsCard-' + fsId);
+      card?.classList.toggle('waiting', holding);                  // debounced (the "Holding" card)
+      // B15: the top-right status dot reads this FS's raw per-frame CS activity
+      // (real-time blinky); its CSS pulse animation was removed so nothing
+      // smooths it. Every card shows its OWN session's csActive, focused or not.
+      card?.querySelector('.fs-run')?.classList.toggle('cs-on', csActive);
       if (pinCS && fsId === focusedFsId) {
         pinCS.classList.toggle('cs-active', csActive);             // RAW per-frame (spec/ui.md)
         pinCS.classList.toggle('cs-paused', !csActive);
