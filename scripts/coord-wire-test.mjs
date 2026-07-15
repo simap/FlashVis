@@ -37,14 +37,15 @@ const fail = (m) => { failures++; console.error('  FAIL - ' + m); };
 const ok = (m) => console.log('  ok   - ' + m);
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
-function makeRig({ speed = Infinity, units = UNITS, maxOpsPerGrant = 64 } = {}) {
+function makeRig({ speed = Infinity, units = UNITS, maxOpsPerGrant = 64, caps = null } = {}) {
   const churn = createChurnModel(CHURN_CFG);
   const coord = createLockstep({ churn, autoTick: false });
   const workers = {};
   const proxies = [];
   for (const fsId of FS_ORDER) {
     const { mainPort, workerPort } = createTransport();
-    workers[fsId] = createMockWorker(workerPort, { unit: units[fsId], maxOpsPerGrant });
+    const cap = caps && caps[fsId] != null ? caps[fsId] : maxOpsPerGrant;   // per-FS exec cap (models exec-bound FS)
+    workers[fsId] = createMockWorker(workerPort, { unit: units[fsId], maxOpsPerGrant: cap });
     proxies.push(createSessionProxy(mainPort, { fsId, name: fsId, geometry: GEOMETRY }));
   }
   coord.setSessions(proxies);
@@ -374,6 +375,88 @@ async function testBootResetFlow() {
   else ok('post-reset format command executed on every worker (boot flow works without a format wire field)');
 }
 
+// ---------------------------------------------------------------------------
+// RACE SCALE (regression for the two reported symptoms). The COORDINATOR grants a
+// per-frame race ceiling that grows by chunk = scale × MS_PER_FRAME, so a higher
+// scale MUST yield a proportionally larger per-frame race advance, provided the
+// worker can BURN the granted headroom (no drain cap). These pin the coordinator side
+// of both symptoms so a future worker-side fix can be verified against a correct clock.
+// Uncapped mock worker = "worker not drain-capped" (the §2 laggard can burn its headroom).
+async function measurePerFrameAdvance(scale, { unit = 1e4 } = {}) {
+  const rig = makeRig({ speed: scale, units: { fastffs: unit, littlefs: unit }, maxOpsPerGrant: Infinity });
+  await flushTurns(4);
+  rig.coord.setMode('race');
+  rig.coord.start();
+  await run(rig, 20);                                   // skip the ramp
+  const a = pb(rig, 'fastffs');
+  await run(rig, 20);
+  const b = pb(rig, 'fastffs');
+  return (b - a) / 20;                                  // sim-ns of playback advanced per frame
+}
+async function testRaceScaleProportional() {
+  console.log('\n[12] RACE scale: a higher scale yields a proportionally larger per-frame advance (uncapped worker)');
+  const S = 1e5;
+  const adv1 = await measurePerFrameAdvance(S);
+  const adv2 = await measurePerFrameAdvance(2 * S);
+  const ratio = adv2 / adv1;
+  // chunk = scale × MS_PER_FRAME ⇒ doubling scale doubles the per-frame advance.
+  if (!(ratio > 1.8 && ratio < 2.2)) fail(`per-frame race advance did not track scale: adv(S)=${(adv1 / 1e6).toFixed(2)}ms, adv(2S)=${(adv2 / 1e6).toFixed(2)}ms, ratio ${ratio.toFixed(2)} (want ~2). The coordinator clock is not scale-driven.`);
+  else ok(`per-frame race advance ~doubled with scale (adv(S)=${(adv1 / 1e6).toFixed(2)}ms, adv(2S)=${(adv2 / 1e6).toFixed(2)}ms, ratio ${ratio.toFixed(2)}) : grant.scale/chunk drives the race rate`);
+  // expected magnitude: chunk = scale × MS_PER_FRAME
+  const expected = S * (1000 / 60);
+  const relErr = Math.abs(adv1 - expected) / expected;
+  if (relErr > 0.15) fail(`per-frame advance ${(adv1 / 1e6).toFixed(2)}ms is not ≈ chunk=scale×MS_PER_FRAME=${(expected / 1e6).toFixed(2)}ms (rel err ${(relErr * 100).toFixed(0)}%)`);
+  else ok(`per-frame advance ≈ chunk = scale × MS_PER_FRAME (${(adv1 / 1e6).toFixed(2)}ms ≈ ${(expected / 1e6).toFixed(2)}ms)`);
+}
+async function testBoundedRaceClock() {
+  console.log('\n[13] RACE bounded-MAX: an exec-bound laggard bounds the leader to slowest + 2×chunk (symptom 1)');
+  const scale = 1e5;
+  const chunk = scale * (1000 / 60);
+  const BOUND = 2 * chunk;   // RACE_LEAD_BOUND_FRAMES = 2
+  // (a) BOTH keep up (uncapped, equal unit): flash time stays level, no false hold.
+  {
+    const rig = makeRig({ speed: scale, units: { fastffs: 1e4, littlefs: 1e4 }, maxOpsPerGrant: Infinity });
+    await flushTurns(4);
+    rig.coord.setMode('race'); rig.coord.start();
+    let sawHold = false;
+    await run(rig, 40, () => { const s = snapById(rig); if (s.fastffs.holding || s.littlefs.holding) sawHold = true; });
+    const a = pb(rig, 'fastffs'), b = pb(rig, 'littlefs');
+    const rel = Math.abs(a - b) / Math.max(a, b);
+    if (rel > 0.1) fail(`both-keep-up race flash time NOT level (${(rel * 100).toFixed(0)}% apart)`);
+    else ok(`both keep up: flash time level within ${(rel * 100).toFixed(1)}% (MAX clock, under the bound)`);
+    if (sawHold) fail('a false hold fired while both FS kept up (small-jitter race must stay hold-free)');
+    else ok('no false hold while both kept up (bound not engaged under small jitter)');
+  }
+  // (b) ONE FS is EXECUTION-bound (a tight per-grant op cap): it genuinely cannot burn
+  // the granted headroom, so it falls behind. The leader must PIN at slowest + 2×chunk
+  // (bounded divergence, NOT runaway) and read holding while pinned; the laggard, being
+  // the one still executing, must never read holding.
+  {
+    const rig = makeRig({ speed: scale, units: { fastffs: 1e4, littlefs: 1e4 }, caps: { fastffs: Infinity, littlefs: 1 } });
+    await flushTurns(4);
+    rig.coord.setMode('race'); rig.coord.start();
+    let maxLead = 0, sawLeaderHold = false, sawLaggardHold = false;
+    await run(rig, 80, () => {
+      const lead = pb(rig, 'fastffs') - pb(rig, 'littlefs');
+      maxLead = Math.max(maxLead, lead);
+      const s = snapById(rig);
+      if (s.fastffs.holding) sawLeaderHold = true;
+      if (s.littlefs.holding) sawLaggardHold = true;
+    });
+    const lead = pb(rig, 'fastffs') - pb(rig, 'littlefs');
+    // The leader may overshoot the ceiling by at most one op (unit) beyond the bound.
+    const tol = BOUND + 2e4;
+    if (lead > tol) fail(`leader ran away: lead ${(lead / 1e6).toFixed(1)}ms > bound 2×chunk=${(BOUND / 1e6).toFixed(1)}ms, the race clock is NOT bounded`);
+    else ok(`leader pinned at slowest + 2×chunk: lead ${(lead / 1e6).toFixed(2)}ms ≤ bound ${(BOUND / 1e6).toFixed(2)}ms (bounded MAX, no runaway); peak lead ${(maxLead / 1e6).toFixed(2)}ms`);
+    if (!(maxLead > BOUND * 0.4)) fail(`the laggard was not actually held back (peak lead ${(maxLead / 1e6).toFixed(2)}ms), test not exercising the bound`);
+    else ok(`the exec-bound laggard did fall behind toward the bound (peak lead ${(maxLead / 1e6).toFixed(2)}ms)`);
+    if (!sawLeaderHold) fail('leader never read holding while pinned at the bound (the bounded-race hold must show)');
+    else ok('leader read holding while pinned at the bound (a real race hold, only for the too-far-behind case)');
+    if (sawLaggardHold) fail('the exec-bound laggard wrongly read holding (it is the one still executing)');
+    else ok('the exec-bound laggard never read holding (only the pinned leader holds)');
+  }
+}
+
 // ---- run all ----
 console.log('ADR-0024 coordinator-over-the-wire suite (mock transport + mock workers)');
 await testHandshake();
@@ -388,6 +471,8 @@ await testResetEpochDiscard();
 await testCsActive();
 await testHoldDebounce();
 await testBootResetFlow();
+await testRaceScaleProportional();
+await testBoundedRaceClock();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
