@@ -88,10 +88,37 @@ const OPS_EMA_TAU_MS = 2000;
 // shallow one, and its post-Stop tail stays a handful of entries instead of the flat
 // 256 draining out over slow-mo minutes. Under-provisioning only ever costs a round-
 // trip of idle, never correctness (§4 "window size is a deferred tuning knob").
-const RACE_LOOKAHEAD_MAX = 256;     // no-delay + fast finite: feed the flat-out leader
+// The window must be sized in ENTRIES the cheapest FS actually burns per frame, NOT
+// a fixed nominal per-entry cost. A cheap-op FS drains many small entries to fill one
+// chunk of the shared flash-time ceiling; if the window is sized by a nominal cost far
+// above that FS's real per-entry cost, entryLimit binds BEFORE the §2 playLimitNs gate
+// and the FS cannot burn its granted headroom, which (1) breaks Race's equal-flash-
+// time (the cheap FS falls short of the shared ceiling the pricey FS reaches) and (2)
+// once the clamp saturates, stops the race rate responding to SPEED. So we size it from
+// the OBSERVED per-entry cost (Δplayback / Δcursor, min across sessions), i.e. the
+// window feeds whatever the field's cheapest FS demands to keep the GATE the only
+// throttle. The post-Stop tail stays bounded in TIME regardless of the entry count:
+// the frontier drains at the gate rate, so it is always ~RACE_LOOKAHEAD_FRAMES frames.
+const RACE_LOOKAHEAD_MAX = 4096;    // generous ceiling over the realistic finite range (memory guard, not a throttle)
 const RACE_LOOKAHEAD_MIN = 4;       // slow-mo floor: enough to never starve the next entry
 const RACE_LOOKAHEAD_FRAMES = 8;    // aim to keep this many frames of paced playback shipped ahead
-const NOMINAL_ENTRY_NS = 2_000_000; // rough per-entry flash used only to size the window (a small churn write)
+const NOMINAL_ENTRY_NS = 2_000_000; // BOOTSTRAP only: per-entry flash used before any cost is observed
+
+// Bounded MAX for the §2 RACE watermark (symptom-1 fix). A too-slow FS is genuinely
+// EXECUTION-bound: the coordinator grants it the headroom to catch up, but the worker
+// cannot burn it (a real limit we do NOT paper over by capping animation, ADR-0022).
+// The answer is to BOUND how far the leader's race clock may run ahead of the SLOWEST
+// session: while the lead is under the bound the clock still advances by MAX exactly
+// (small jitter => no hold), and once a session falls further behind the leader pins at
+// slowest + bound and advances only as that laggard does, a real hold, but ONLY for
+// the too-far-behind case. SCALE-RELATIVE (a multiple of chunk = scale × MS_PER_FRAME)
+// so the visual lead stays a constant number of frames at every speed. USER-SET to
+// N = 2 frames: the leader may run at most 2 x chunkNs() of race time ahead of the
+// slowest session, then pins at slowest + 2 x chunk. Easy to retune here; a FIXED
+// sim-ns flash-time tolerance is the alternative (swap `RACE_LEAD_BOUND_FRAMES * chunk`
+// for a constant ns) if a speed-invariant absolute tolerance is wanted instead of a
+// speed-invariant visual one.
+const RACE_LEAD_BOUND_FRAMES = 2;   // user-set, scale-relative (x chunk)
 
 const nowMs = () => (typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now());
 
@@ -122,6 +149,32 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   let lastComputedRound = -1;       // highest round we have derived a grant for
   let sharedIndex = 0;              // Pace: the one entry currently authorized (entryLimit = +1)
   let frontier = 0;                 // Race: shipped/authorized entry count
+
+  // ---- observed per-entry cost (sizes the Race prefetch window; §2 gate must be the
+  // only throttle, so the window feeds the CHEAPEST FS's actual demand) ----
+  const costEma = new Map();        // proxy -> EMA of playbackNs per drained entry
+  const costLastCur = new Map();    // proxy -> acked.cursor at the previous sample
+  const costLastPb = new Map();     // proxy -> acked.playbackNs at the previous sample
+  function trackEntryCost() {
+    for (const p of proxies) {
+      const cur = p.acked.cursor, pbn = p.acked.playbackNs;
+      const dCur = cur - (costLastCur.get(p) ?? 0);
+      const dPb = pbn - (costLastPb.get(p) ?? 0);
+      costLastCur.set(p, cur); costLastPb.set(p, pbn);
+      if (dCur > 0 && dPb > 0) {
+        const inst = dPb / dCur;                        // this window's flash-ns per entry
+        const prev = costEma.get(p);
+        costEma.set(p, prev == null ? inst : prev + 0.25 * (inst - prev));
+      }
+    }
+  }
+  // Min observed per-entry cost across the field (the cheapest FS drives the largest
+  // window need). Bootstrap to NOMINAL_ENTRY_NS before any entry has drained.
+  function observedMinCost() {
+    let m = Infinity;
+    for (const p of proxies) { const c = costEma.get(p); if (c > 0 && c < m) m = c; }
+    return isFinite(m) ? m : NOMINAL_ENTRY_NS;
+  }
 
   // one-shot step nudges (paused single-step; see step())
   let forceProduce = false;         // Pace: allow one shared-index advance while paused
@@ -194,7 +247,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   // playback worth of entries at finite speed (bounds the post-Stop tail — B16).
   const raceLookahead = () => (atMax
     ? RACE_LOOKAHEAD_MAX
-    : Math.max(RACE_LOOKAHEAD_MIN, Math.min(RACE_LOOKAHEAD_MAX, Math.ceil(RACE_LOOKAHEAD_FRAMES * chunkNs() / NOMINAL_ENTRY_NS))));
+    : Math.max(RACE_LOOKAHEAD_MIN, Math.min(RACE_LOOKAHEAD_MAX, Math.ceil(RACE_LOOKAHEAD_FRAMES * chunkNs() / observedMinCost()))));
 
   // Pace join: advance the shared index one entry at a time, only when every session
   // has drained the current shared step (∀ entriesDrained ≥ sharedIndex). On each
@@ -226,10 +279,25 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     }
     // rel = MAX over sessions of (acked_s − baseline_s), plus one chunk. DERIVED from
     // current acks every time — never accumulated (I4).
-    let rel = -Infinity;
-    for (const p of proxies) rel = Math.max(rel, p.acked.playbackNs - (baseline.get(p) ?? 0));
-    if (!isFinite(rel)) rel = 0;
-    rel += chunk;
+    let relMax = -Infinity, relMin = Infinity;
+    for (const p of proxies) {
+      const d = p.acked.playbackNs - (baseline.get(p) ?? 0);
+      if (d > relMax) relMax = d;
+      if (d < relMin) relMin = d;
+    }
+    if (!isFinite(relMax)) { relMax = 0; relMin = 0; }
+    let rel = relMax + chunk;
+    if (mode === 'race') {
+      // Bounded MAX (symptom-1): the leader's race clock may run at most
+      // RACE_LEAD_BOUND_FRAMES chunks ahead of the SLOWEST session. Under the bound
+      // rel IS the MAX exactly (small jitter, no hold); once a session falls further
+      // behind (exec-bound, cannot burn its headroom) the ceiling pins at slowest +
+      // bound and climbs only as that laggard climbs. Never below one chunk, so the
+      // slowest always keeps >= chunk of headroom and nothing deadlocks. The per-
+      // session clamp (>= acked_s, below) means a session already past the bound is
+      // held at its own position, never rewound. Pace keeps the unbounded MAX.
+      rel = Math.max(Math.min(rel, relMin + RACE_LEAD_BOUND_FRAMES * chunk), chunk);
+    }
     for (const p of proxies) {
       const base = baseline.get(p) ?? 0;
       let playLimitNs = base + rel;
@@ -247,6 +315,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   function frame() {
     sampleRates(nowMs());
     if (!proxies.length) return;
+    trackEntryCost();                                         // update observed per-entry cost (sizes the race window)
     shipEntries();
     if (lastComputedRound < round) { computeGrants(round); lastComputedRound = round; }
     else if (proxies.every((p) => p.acked.round >= round)) {   // §2 barrier: all acked ⇒ release round+1
@@ -295,6 +364,21 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     const finishedStep = p.acked.entriesDrained >= sharedIndex;
     return peerWorking && (finishedStep || leads);
   }
+  // RACE hold: p is PINNED by the bounded-MAX clock: its granted headroom has been
+  // squeezed below one chunk (the RACE_LEAD_BOUND_FRAMES bound engaged) while a peer
+  // sits further back (the exec-bound laggard it is waiting on). Unlike the Pace freeze,
+  // a pinned leader still CREEPS forward one laggard-step per frame (so csActive may
+  // blink); it is nonetheless "holding", held at the boundary, advancing only as the
+  // slow peer advances. Under the bound but with the field level (no peer behind), or
+  // with a full chunk of headroom (still MAX-driven), this stays false: no false hold.
+  function racePinned(p) {
+    const g = cached.get(p);
+    if (!g) return false;
+    if ((g.playLimitNs - p.acked.playbackNs) >= chunkNs() - 1) return false;   // full chunk of room ⇒ MAX-driven, not pinned
+    const dp = p.acked.playbackNs - (baseline.get(p) ?? 0);
+    for (const q of proxies) if (q !== p && (q.acked.playbackNs - (baseline.get(q) ?? 0)) < dp - 1) return true;  // a peer is further behind
+    return false;
+  }
   // Update the per-frame signals. Called once per frame() so csActive is a true
   // per-frame delta and the hold debounce advances on real time.
   function updateSignals(now) {
@@ -303,11 +387,13 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       const advanced = pb > (prevPlayback.get(p) ?? 0) + 1e-6;   // advanced this frame?
       csActive.set(p, advanced);
       prevPlayback.set(p, pb);
-      // A session that advanced this frame is ACTIVE, never frozen — so csActive and
-      // holding are mutually exclusive by construction (the frame a fast FS finishes
-      // its step it both moved AND becomes a hold candidate; it counts as active that
-      // frame and only reads holding from the next, genuinely frozen, frame on).
-      if (!advanced && holdingRaw(p)) {
+      // Pace: the fast FS is FROZEN at the join, holding and csActive are mutually
+      //   exclusive (the frame it finishes the step it counts as active, holding only
+      //   from the next genuinely frozen frame). Race: the pinned leader CREEPS at the
+      //   laggard's pace, so holding is the bound-pinned signal directly (not gated on
+      //   being frozen this frame).
+      const raw = (mode === 'race') ? racePinned(p) : (!advanced && holdingRaw(p));
+      if (raw) {
         if (holdRawSince.get(p) == null) holdRawSince.set(p, now);
         holdingShown.set(p, (now - holdRawSince.get(p)) >= holdDebounceMs());
       } else {
@@ -328,6 +414,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       for (const p of [...baseline.keys()]) if (!next.has(p)) {
         baseline.delete(p); cached.delete(p); shipped.delete(p); opsEma.delete(p); lastOps.delete(p);
         prevPlayback.delete(p); csActive.delete(p); holdRawSince.delete(p); holdingShown.delete(p);
+        costEma.delete(p); costLastCur.delete(p); costLastPb.delete(p);
       }
       proxies = list.slice();
       for (const p of proxies) if (!baseline.has(p)) {
@@ -394,6 +481,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       for (const p of proxies) { baseline.set(p, 0); shipped.set(p, 0); cached.delete(p); p.reset(epoch); }
       opsEma.clear(); lastOps.clear(); lastSampleNow = 0;
       prevPlayback.clear(); csActive.clear(); holdRawSince.clear(); holdingShown.clear();
+      costEma.clear(); costLastCur.clear(); costLastPb.clear();
     },
     get epoch() { return epoch; },
     /** Append one ATOMIC COMMAND at the frontier ("present"). `payload` is the wire
