@@ -14,6 +14,7 @@ import { installFakeDom } from './fake-dom.mjs';
 import { createTransport } from './mock-worker-transport.mjs';
 import { createWorkerHost } from '../web/src/session-worker.js';
 import { createStubRunner } from './worker-stub-runner.mjs';
+import { C2W } from '../web/src/protocol.js';
 
 const dom = installFakeDom();
 const fail = (msg) => { console.error('FAIL —', msg); dom.uninstall(); process.exit(1); };
@@ -23,10 +24,17 @@ const ok = (c, m) => { if (c) { checks++; console.log('  ok   -', m); } else fai
 // Each connectWorker() spins up an in-realm worker host over a transport pair
 // and returns the coordinator-side port. The stub runner keeps it WASM-free.
 const hosts = [];
+// RC-A instrumentation: record every PULL selector the coordinator sends to
+// each session, so the test can prove a focus switch asks for HEAD-ONLY events
+// (no since:0 erase-replay backlog) and then carries the cursor forward.
+const pullLog = new Map();
 globalThis.__flashvisWorkerConnect = (fsId, meta) => {
   const { mainPort, workerPort } = createTransport();
   const host = createWorkerHost(workerPort, { createRunner: (geometry) => createStubRunner(geometry) });
   hosts.push(host);
+  const pulls = []; pullLog.set(fsId, pulls);
+  const send = mainPort.postMessage.bind(mainPort);
+  mainPort.postMessage = (m) => { if (m && m.type === C2W.PULL) pulls.push(m); return send(m); };
   return { port: mainPort, terminate: () => { host._stop?.(); workerPort.close?.(); mainPort.close?.(); } };
 };
 // Deterministic hold pins under the fake clock (no real-time debounce race).
@@ -52,8 +60,12 @@ for (let i = 0; i < 600 && !ready; i++) { await pump(1); ready = dom.getEl('boot
 ok(ready, 'playground reached bootStatus "ready" (boot did not hang or throw)');
 if (dom.getEl('specLive').textContent.includes('boot failed')) fail(`boot failed: ${dom.getEl('specLive').textContent}`);
 
-// ---- one die mounted (ONE main-thread viz, ADR-0024 focus-is-view) ----
-ok(dom.getEl('dieStack').children.length === 1, 'exactly one die is mounted (single main-thread renderer)');
+// ---- one die PER SESSION (ADR-0024 §7 PROPOSAL: per-session viz; focus swaps
+// visibility, so exactly one die is visible at a time) ----
+const dice = dom.getEl('dieStack').children;
+ok(dice.length === 5, `one die mounted per registered FS (${dice.length} dice)`);
+ok(dice.filter((d) => !d.classList.contains('hidden')).length === 1,
+  'exactly one die is visible (the focused session); the rest are hidden');
 
 // ---- compare strip: one .fs card per registered FS, fastffs focused ----
 for (let i = 0; i < 40; i++) await pump(1);   // let telemetry heartbeats populate the strip
@@ -108,6 +120,28 @@ ok(dom.getEl('speedRead').textContent.includes('no delay'), 'SPEED=max sets the 
 // (fProg > 0% or free pages < total) ----
 const free = Number(dom.getEl('fFree').textContent);
 ok(Number.isFinite(free) && free < 64 * 16, `the focused die rendered pulled shown state (free pages ${free} < ${64 * 16})`);
+
+// ---- RC-A: a focus switch must NOT replay a session's historical events ----
+// Run churn so every (unfocused) session accumulates events in its worker ring,
+// then switch to one and inspect the pulls issued from the switch onward.
+dom.dispatch('btnRun');
+for (let i = 0; i < 150; i++) await pump(1);
+dom.dispatch('btnRun');   // pause
+const spiffsPulls = pullLog.get('spiffs');
+const nBefore = spiffsPulls.length;
+dom.dispatch('fsCard-spiffs');
+for (let i = 0; i < 40; i++) await pump(1);
+const fresh = spiffsPulls.slice(nBefore).filter((p) => p.events);
+const firstEvents = fresh[0]?.events;
+// B11/B4: the (re)attach pull asks for HEAD-ONLY events — never the whole ring.
+ok(firstEvents && firstEvents.newest === true && firstEvents.limit === 0,
+  `first pull after focus asks HEAD-ONLY events (no erase-replay backlog): ${JSON.stringify(firstEvents)}`);
+ok(!fresh.some((p) => p.events.since === 0 && !p.events.newest),
+  'no pull requests the whole events ring (since:0) on switch — historical erases never replay');
+// B12: after the fresh frame seeds the cursor, later pulls carry it FORWARD, so
+// genuinely-new events for the WATCHED fs are requested (not over-suppressed).
+ok(fresh.some((p) => p.events.since != null && !p.events.newest),
+  'after attach the events cursor carries forward (watched FS still gets new events — B12)');
 
 for (const h of hosts) h._stop?.();
 dom.uninstall();
