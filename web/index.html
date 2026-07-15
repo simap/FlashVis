@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FLASHVIS — flash filesystems on NOR, live</title>
+<title>FLASHVIS: flash filesystems on NOR, live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -8,7 +8,7 @@
 :root{
   /* Structural constants shared by every theme: hairlines and body text stay a
      neutral cool grey so text/line contrast is guaranteed in ALL palettes (good
-     dark-theme practice — the ambient below carries the color, the type stays
+     dark-theme practice, the ambient below carries the color, the type stays
      maximally legible). --err/--lead/--queued are semantic (fault / leader /
      queued) and read the same everywhere. Everything a theme owns is a var it
      re-declares below. */
@@ -30,12 +30,11 @@
      The load-bearing requirement is the OP-OVER-STATE overlay: a glow renders on
      top of a cell that already holds a state color, and BOTH must stay readable.
      The base op hue (low/mid heat, before it whitens) is therefore kept distinct
-     from EVERY state it can sit on — by hue where possible, by lightness +
+     from EVERY state it can sit on, by hue where possible, by lightness +
      saturation where the families are close (read-over-live, program-over-live).
      See the per-theme overlay notes. viz.js re-sources --read/--program/--erase/
      --mix/--prog-edge/--sector-bg for the live glow. --mix is the DESIGNED color a
-     cell glows when a read and a program overlap it (both heat channels present) —
-     a natural fusion of the two, never the muddy read↔program midpoint; the render
+     cell glows when a read and a program overlap it (both heat channels present),      a natural fusion of the two, never the muddy read↔program midpoint; the render
      pulls toward it by how co-present the two ops are. Aurora is the :root default
      so the page renders fully themed before JS runs.
 
@@ -47,7 +46,7 @@
      colorless AMONG the saturated colors, and a neutral also makes every op-glow
      overlay trivially legible). Op hues are pushed saturated too. */
 
-  /* 1 · AURORA SIGNAL — instrument-on-dark-glass (default). */
+  /* 1 · AURORA SIGNAL, instrument-on-dark-glass (default). */
   --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a; --chrome:#16212b;
   --glow-a:#12202b; --glow-b:#131a26;
   --erased:#132029; --erased-edge:#2b4a57;
@@ -61,7 +60,7 @@
      program red-orange(h18) over gold live(h44) → hue26+sat; every op over the
      neutral ash obsolete → trivially high-contrast. */
 }
-/* 2 · MAGMA — a volcanic core, deliberately the warm counterweight to Aurora's
+/* 2 · MAGMA, a volcanic core, deliberately the warm counterweight to Aurora's
    cool glass: warm obsidian substrate + ember accent, cooled basalt erased,
    sulfur-gold molten live, a cobalt mineral vein for metadata, a red-hot write,
    and a magenta plasma discharge to erase. Cyan read is the one cold probe. */
@@ -79,7 +78,7 @@
      program red(h8) over sulfur live(h45) → hue37+redder; magenta erase(h340)
      over gold/cobalt/ash → far; every op over ash obsolete → high-contrast. */
 }
-/* 3 · ULTRAVIOLET LAB — an indigo cleanroom under UV. Ice-blue read, hot-
+/* 3 · ULTRAVIOLET LAB, an indigo cleanroom under UV. Ice-blue read, hot-
    magenta write, a UV-reactive lime erase (blue/magenta/green is the most
    colorblind-robust op trio). Live glows blue-violet; metadata is teal. */
 :root[data-theme="uv"]{
@@ -96,7 +95,7 @@
      (h328) over orchid live(h278) → hue50 + big sat/brightness gap; lime erase
      over teal/orchid/ash → far; blue/magenta/lime is the colorblind-robust trio. */
 }
-/* 4 · TERMINAL PHOSPHOR — the storage-tool vernacular on a green-black tube, but
+/* 4 · TERMINAL PHOSPHOR, the storage-tool vernacular on a green-black tube, but
    a MULTI-phosphor set so the states stay distinct: vivid green live, cyan
    metadata, a dim grey-green burn for obsolete, with amber write + red erase.
    Op TYPE also reads through MOTION (read bloom / program fill-rise / erase
@@ -116,7 +115,7 @@
      amber/red ops over any green state → warm/cool; green-vs-red also carries on the
      phosphor MOTION cue (read bloom / program fill-rise / erase sweep). */
 }
-/* 5 · DEEP SEA — an abyssal dive: bioluminescent sea-green scan, an
+/* 5 · DEEP SEA, an abyssal dive: bioluminescent sea-green scan, an
    anglerfish amber lure for writes, a jellyfish rose-magenta erase. Live is a
    vivid coral against the cold trench; metadata a bright water-blue. */
 :root[data-theme="deepsea"]{
@@ -133,7 +132,7 @@
      program amber(h33) over coral live(h13) → hue20+yellower; rose-magenta erase
      (h330) over coral/water-blue/ash → far. */
 }
-/* 6 · CYANOTYPE BLUEPRINT — a drafting print: paper-white-blue read over a
+/* 6 · CYANOTYPE BLUEPRINT, a drafting print: paper-white-blue read over a
    blueprint-cyan field, orange annotation for writes, a crimson correction to
    erase. Metadata is a warm amber margin note (cool read never collides). */
 :root[data-theme="blueprint"]{
@@ -166,11 +165,11 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .hidden{display:none!important}
 
 /* ============================ signature header =============================
-   Two stacked rows (the N=5 "standings rail" — ADR-0018's scoreboard must stay
+   Two stacked rows (the N=5 "standings rail", ADR-0018's scoreboard must stay
    legible as N grows, and five cards no longer fit inside a sentence):
-   row 1 (.sig-line) is the title sentence — mono, the FLASHVIS logotype the one
+   row 1 (.sig-line) is the title sentence, mono, the FLASHVIS logotype the one
    sans flourish, with speed (A1b) and the compare-mode wheel (A1a) inline
-   (sim-global controls, not per-op stimulus — the WORKLOAD strip below holds
+   (sim-global controls, not per-op stimulus, the WORKLOAD strip below holds
    only stimulus). Row 2 (.fsset) is the full-width rail of FS cards; the cards
    ARE the display switcher (click → focus/display that die). */
 .sig{flex:none;display:flex;flex-direction:column;gap:12px;
@@ -186,9 +185,9 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .tail .k{color:var(--txt);font-weight:500}
 
 /* the standings rail: .fs cards are built DYNAMICALLY by playground.js into
-   #fsSet, one per participating FS (all registered, always — A2). auto-fit +
+   #fsSet, one per participating FS (all registered, always, A2). auto-fit +
    minmax keeps every card visible at every width: cards compress, then wrap
-   to a second row — never a scroll row (standings you can't see aren't
+   to a second row, never a scroll row (standings you can't see aren't
    standings). */
 .fsset{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}
 
@@ -200,7 +199,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .fs:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .fs-top{display:flex;align-items:center;gap:8px}
 .fs-name{font-family:"Space Grotesk";font-weight:700;font-size:14.5px;letter-spacing:.05em;color:var(--txt);line-height:1.1;transition:.14s}
-/* B15: the status dot is RAW per-frame CS-activity blinky (spec/ui.md) — no
+/* B15: the status dot is RAW per-frame CS-activity blinky (spec/ui.md), no
    animation, no transition to smooth it. JS toggles .cs-on off each frame's
    csActive; off = faint, on = the live accent. */
 .fs-run{width:6px;height:6px;border-radius:50%;background:var(--txt-faint);margin-left:auto;flex:none}
@@ -235,7 +234,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    override .hintk's small size so it renders at the sentence's own type. */
 .sig-speed .hintk{font-size:15px;letter-spacing:.005em;color:inherit}
 /* the compare mode is an inline WHEEL: the active phrase sits on the sentence
-   baseline, the other mode peeks below — faded and tilted back, like the next
+   baseline, the other mode peeks below, faded and tilted back, like the next
    notch of a reel. Click and it rotates up into place; the old one recedes. */
 .modewheel{position:relative;display:inline-block;vertical-align:baseline;
   background:none;border:none;padding:0;margin:0;cursor:pointer;font-family:inherit;text-align:left;perspective:280px}
@@ -254,7 +253,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 /* ============================ main split: stage | side panel | console ====
    Fix #2: the sector inspector + telemetry live in their OWN column beside the
    die (readable while clicking die sectors), NOT stacked under it. This is my
-   fixed layout — the reference's under-die stacking is one of the regressions
+   fixed layout, the reference's under-die stacking is one of the regressions
    the fixes correct, so it does NOT win here; only its *styling* is ported. */
 .main{flex:1 1 auto;min-height:0;overflow:hidden;display:grid;
   grid-template-columns:minmax(0,1fr) 292px minmax(348px,432px);gap:22px;
@@ -265,7 +264,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 /* the emulated NOR chip drawn as its real package: an 8-pin small-outline body
    with 8 gull-wing legs (A4). The body sits ABOVE the legs (z-index) so each lead disappears
    under the package edge, not stuck to the side. Enclosure tokens
-   (--pkg-a/b/line) are desaturated on purpose — the cell-state colors below
+   (--pkg-a/b/line) are desaturated on purpose, the cell-state colors below
    (--prog/--stale/--index/--program/--erase/--read) are the DATA and are
    untouched. */
 .chip-pkg{align-self:center;display:flex;align-items:stretch;width:100%;max-width:560px}
@@ -284,17 +283,16 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    would only lag and damp that glow toward the dim resting ring. */
 .cell{position:relative;aspect-ratio:1;border-radius:1.5px;background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 /* .fillwrap owns the rounded overflow-clip (so the rectangular .fill stays inside
-   the cell's rounded shape) — .cell itself no longer clips, so .glow's box-shadow
+   the cell's rounded shape), .cell itself no longer clips, so .glow's box-shadow
    below can bleed outside the cell's own box in every direction (z-height fix). */
 .cell .fillwrap{position:absolute;inset:0;border-radius:inherit;overflow:hidden}
 .cell .fill{position:absolute;left:0;right:0;bottom:0;height:0;background:var(--prog);transition:height .18s ease}
-/* .glow carries only the BLOOM (core + outer glow, written by viz.js drawHeat —
-   the heat RING/border is written to the .cell body, BELOW this layer). It lives
+/* .glow carries only the BLOOM (core + outer glow, written by viz.js drawHeat,    the heat RING/border is written to the .cell body, BELOW this layer). It lives
    in ONE layer ABOVE every opaque body AND every border in the die: absolutely
    positioned with a positive z-index, and NO ancestor up to .diewrap establishes a
    stacking context (.sector/.cell are position:relative with z-index:auto), so
-   every .glow paints in the diewrap's stacking context — above ALL cells/sectors/
-   borders everywhere — not just cells earlier in DOM order. That is what stops a
+   every .glow paints in the diewrap's stacking context, above ALL cells/sectors/
+   borders everywhere, not just cells earlier in DOM order. That is what stops a
    cell's border ever peeking over the bloom (the directional top-left artifact).
    inset:0 keeps each glow aligned to its own cell; pointer-events:none lets clicks
    fall through. Translucent box-shadows blend additively, so bloom paint order is
@@ -305,18 +303,18 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .cell[data-live="obsolete"] .fill{background:var(--stale)}
 .cell[data-live="obsolete"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
 .cell[data-live="meta"] .fill{background:var(--index)}
-/* WL (class 4, FAT+WL): the wear-levelling FTL's own bookkeeping — conceptually
+/* WL (class 4, FAT+WL): the wear-levelling FTL's own bookkeeping, conceptually
    a layer of metadata, so it renders as a SHADE of the metadata color, not a
    new hue. Derived from --index/--panel via color-mix so it tracks every
    palette without per-theme declarations. */
 .cell[data-live="wl"] .fill{background:color-mix(in srgb,var(--index) 45%,var(--panel))}
-/* Slack (class 5, FAT+WL): allocated but carrying no data — must READ as
+/* Slack (class 5, FAT+WL): allocated but carrying no data, must READ as
    erased/blank (spec/ui.md). Slack pages ARE physically programmed, so without
    these rules the default fill would render them in the live gold at full
-   height (pixel-identical to live data — the misreading the spec exists to
+   height (pixel-identical to live data, the misreading the spec exists to
    fix). Suppress the fill and reset the [data-s="prog"] hot edge back to the
    erased ring; equal specificity, so these must stay AFTER that rule (source
-   order is the override — pinned by scripts/fatfs-render-test.mjs). Palette-
+   order is the override, pinned by scripts/fatfs-render-test.mjs). Palette-
    independent by construction: it re-uses the erased vars. */
 .cell[data-live="slack"]{box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .cell[data-live="slack"] .fill{background:transparent}
@@ -340,7 +338,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 /* pin 1 / CS (chip-select) activity indicator (top-left lead, SOP-8
    convention, by the notch): the fast per-frame twin of the card's
    holding/stalled readout. playground.js toggles .cs-active/.cs-paused on
-   #pinCS every rAF from coordinator.waitStates()[focusedFsId] — positive
+   #pinCS every rAF from coordinator.waitStates()[focusedFsId], positive
    logic on purpose (CS is electrically active-low, shown here active-HIGH):
    lit = the focused die is actually executing/animating, quiet = parked on
    a gate. A short transition keeps RACE's expected rapid flicker readable
@@ -357,7 +355,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
   color:var(--txt-faint);pointer-events:none;user-select:none;transition:color .07s ease-out}
 .pin-cs.cs-active .cs-label{color:var(--accent)}
 
-/* static device geometry line (A5) — replaces the old dynamic .stagefoot;
+/* static device geometry line (A5), replaces the old dynamic .stagefoot;
    the dynamic stats it used to show moved into Flash Stats (A6). Built once
    by playground.js from the same geometry data #specGeo is sourced from. */
 .geo{display:flex;gap:16px;color:var(--txt-faint);font-size:11px;letter-spacing:.04em;flex-wrap:wrap;justify-content:center}
@@ -386,14 +384,14 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    (the chip background shows through, mirroring a glow riding over a cell). */
 .sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
-.sw.wl{background:color-mix(in srgb,var(--index) 45%,var(--panel))}  /* shade of metadata — see [data-live="wl"] */
+.sw.wl{background:color-mix(in srgb,var(--index) 45%,var(--panel))}  /* shade of metadata, see [data-live="wl"] */
 .sw.glow{width:11px;height:11px;border-radius:50%;background:transparent}
 .sw.read.glow{box-shadow:inset 0 0 0 1.5px var(--read),0 0 6px 0 var(--read)}
 .sw.program.glow{box-shadow:inset 0 0 0 1.5px var(--program),0 0 6px 0 var(--program)}
 .sw.erase.glow{box-shadow:inset 0 0 0 1.5px var(--erase),0 0 6px 0 var(--erase)}
 .sw.mix.glow{box-shadow:inset 0 0 0 1.5px var(--mix),0 0 6px 0 var(--mix)}
 
-/* palette switcher — sits with the legend because it governs what the legend
+/* palette switcher, sits with the legend because it governs what the legend
    MEANS: pick a palette and the whole die + live glow re-skins. It's a radiogroup
    of one chip per theme; each chip previews ITS OWN five signature colors (read ·
    write · mix · erase · live) via the .tprev-* blocks below, so you can see a
@@ -424,7 +422,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .tprev-deepsea{--read:#2ff0c8;--program:#ff9a2e;--mix:#8ff05a;--erase:#ff4db0;--prog:#ff7a52}
 .tprev-blueprint{--read:#d6ecff;--program:#ff7a33;--mix:#ffc79e;--erase:#ff3b52;--prog:#2f9fe0}
 
-/* side panel — telemetry + sector inspector, its own column (fix #2) */
+/* side panel, telemetry + sector inspector, its own column (fix #2) */
 .panel{display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
 .card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line-soft);border-radius:8px;padding:13px 14px}
 .card h3{margin:0 0 10px;font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim);display:flex;justify-content:space-between}
@@ -445,9 +443,9 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 /* ============================ the console tape (signature) ================= */
 .pane{display:flex;flex-direction:column;min-height:0;gap:11px}
 
-/* register A — the workload strip (drives auto-churn on every FS). Speed +
+/* register A, the workload strip (drives auto-churn on every FS). Speed +
    compare mode now live in the header sentence (A1a/A1b, ADR-0020: they're
-   sim-global execution controls, not per-op stimulus) — this strip holds
+   sim-global execution controls, not per-op stimulus), this strip holds
    only Run/Step + BG GC. */
 .workload{flex:none;display:flex;align-items:center;gap:9px 12px;flex-wrap:wrap;
   padding:9px 11px;border:1px solid var(--line-soft);border-radius:8px;background:linear-gradient(180deg,var(--chrome),var(--panel-2))}
@@ -468,6 +466,10 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 .btn.primary{background:var(--prog);color:#241a06;border-color:var(--prog);font-weight:600}
 .btn.primary:hover{background:var(--prog-edge)}
 .btn .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+/* docbtn: non-interactive button-look for inline references in prose (about panel). No hover/active/focus/cursor. Use .docbtn or .docbtn.primary; optional inner .dot. */
+.docbtn{font-family:inherit;font-size:.9em;color:var(--txt);background:var(--chrome);border:1px solid var(--line);border-radius:5px;padding:1px 5px;display:inline-flex;align-items:center;gap:5px;vertical-align:middle;cursor:default}
+.docbtn.primary{background:var(--prog);color:#241a06;border-color:var(--prog);font-weight:600}
+.docbtn .dot{width:6px;height:6px;border-radius:50%;background:currentColor}
 .toggle{display:flex;align-items:center;gap:8px;color:var(--txt-dim);font-size:10.5px;letter-spacing:.05em;cursor:pointer;user-select:none}
 .toggle input{position:absolute;opacity:0;pointer-events:none}
 .tswitch{width:32px;height:17px;border-radius:10px;background:var(--chrome);border:1px solid var(--line);position:relative;transition:.15s}
@@ -486,18 +488,18 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 .tape-gap .catchup{margin-left:auto;font-size:10.5px;padding:4px 9px}
 .tape-scroll{flex:1;min-height:0;overflow:auto;padding:9px 13px;font-size:12px;line-height:1.55}
 .line{white-space:pre-wrap;word-break:break-word;padding-left:12px;text-indent:-12px}
-.line.in{color:var(--accent)}            /* injected command echo — "what I did" */
+.line.in{color:var(--accent)}            /* injected command echo, "what I did" */
 .line.out{color:var(--txt)}              /* op result with simulated cost */
-.line.churn{color:var(--txt-dim)}        /* auto-workload op — "what the workload did" */
+.line.churn{color:var(--txt-dim)}        /* auto-workload op, "what the workload did" */
 .line.err{color:var(--err)}
 .line.sys{color:var(--txt-faint)}
-.line.gc{color:var(--txt-faint)}         /* GC — background maintenance, not a workload op (ADR-0023): grayed but still shows its flash-time cost */
-/* lifecycle (ADR-0018): queued dimmed to --queued; live lit to accent — applied
+.line.gc{color:var(--txt-faint)}         /* GC, background maintenance, not a workload op (ADR-0023): grayed but still shows its flash-time cost */
+/* lifecycle (ADR-0018): queued dimmed to --queued; live lit to accent, applied
    in place as the coordinator advances an entry queued → live → done. */
 .line[data-state="queued"]{color:var(--queued)}
 .line[data-state="live"]{color:var(--accent);font-weight:500}
 
-/* register B — manual pokes (inject discrete operations) + free-form input */
+/* register B, manual pokes (inject discrete operations) + free-form input */
 .pokes{flex:none;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .pokes .reg{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint);margin-right:2px}
 .prompt{flex:none;display:flex;align-items:center;gap:8px;
@@ -594,10 +596,10 @@ dialog.about[open]{animation:aboutIn .18s ease}
     <button class="btn" id="btnReset" title="reset the simulation to a clean boot state">Reset</button>
   </div>
   <!-- The standings rail (ADR-0018's scoreboard, A1): the FS cards ARE the
-       display switcher. Built dynamically by playground.js into #fsSet — one
-       .fs button per participating FS (all registered, always — A2). Click a
+       display switcher. Built dynamically by playground.js into #fsSet, one
+       .fs button per participating FS (all registered, always, A2). Click a
        card to focus it. -->
-  <div class="fsset" id="fsSet" role="group" aria-label="filesystem standings — select one to focus"></div>
+  <div class="fsset" id="fsSet" role="group" aria-label="filesystem standings, select one to focus"></div>
 </header>
 
 <div class="main">
@@ -682,7 +684,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
   </section>
 </div>
 
-<!-- Boot/ready status (kept per redesign manifest §C — placement deferred,
+<!-- Boot/ready status (kept per redesign manifest §C, placement deferred,
      not surfaced in the new header). #specGeo also feeds the visible static
      .geo geometry line (A5). -->
 <span id="specGeo" class="hidden"></span>
@@ -699,43 +701,34 @@ dialog.about[open]{animation:aboutIn .18s ease}
   <div class="about-body">
     <section class="about-sec">
       <p><span class="wordmark">FLASH<b>VIS</b></span> runs <span class="k">real embedded filesystems</span>, compiled to
-      <b>WebAssembly</b>, against an emulation of an SPI NOR flash chip. Every read, program, and
-      erase lights up the <b>die</b> under real NOR flash rules, so you can watch and compare how
+      <b>WebAssembly</b>, against an emulated NOR flash chip that lets you see where the data ends up and where operations work. 
+      Every read, program, and erase lights up the <b>die</b>, so you can watch and compare how
       filesystems behave. It exists to show how
       <a href="https://github.com/simap/FASTFFS" target="_blank" rel="noopener">FASTFFS</a>, a new
-      NOR flash filesystem, works next to others like LittleFS.</p>
+      NOR flash filesystem, works next to others.</p>
+      <p>Hit <b class="docbtn primary">Run</b> to see it in action.</p>
+      <p>The filesystem cards in the header switch the view: click one to focus its die and
+      compare the same workload on each.</p>
     </section>
 
     <section class="about-sec">
-      <h3>You are looking at a SPI NOR flash chip</h3>
+      <h3>You are looking at NOR flash - sectors and pages</h3>
       <p>The chip die visualization grid shows <b>256 KB</b> of NOR flash: <b>64 sectors</b> of <b>4 KB</b>, each <b>16 pages</b>
       of <b>256 bytes</b>.</p> 
-      <p>Each die cell is one 256 byte page, and its <b>fill height</b> is the bytes programmed. Past that
-      physical fill, the die can also tint pages by <b>logical</b> roles the filesystem assigns: live
+      <p>The larger squares are sectors, each cell inside is one 256 byte page, and its <b>fill height</b> is the bytes programmed. Past that
+      physical fill, the die also tints pages by <b>logical</b> roles the filesystem assigns: live
       versus obsolete (which copy it still treats as current, not a physical byte state) and data
       versus metadata (file bytes versus the filesystem's own bookkeeping). The <b>wear heatmap</b> adds a
-      third view, tinting each sector by how many times it has been erased, so you can watch wear pool
-      into hotspots.</p>
-      <p>NOR flash has a few peculiarities:</p>
-      <ul>
-        <li>Erased data reads as <code>0xFF</code>.</li>
-        <li>Programming only clears bits from <code>1</code> to <code>0</code>, down to a byte at a time. You can keep
-        programming <code>1</code> bits into <code>0s</code> without erasing.</li>
-        <li>Setting bits back to <code>1</code> takes an <span class="k">erase</span>, and erase only works
-        on a whole <b>4 KB sector</b>. It is the slowest operation, and wears out the flash over time.</li>
-      </ul>
-      <p>Timing is based on measured performance using an <b>ESP32-S3</b>, and is used both for <b>flash
-      time</b> accounting and relative visual animation speeds: a 256 byte read is about <b>0.1 ms</b>, a
-      page program is about <b>1.5 ms</b>, and a sector erase is about <b>21 ms</b>. The <b>speed control</b> scales this
-      simulated flash time so you can watch it in super slomo, or speed it up to see how it behaves over time.</p>
+      third view, tinting each sector by how many times it has been erased, so you can watch for hotspots that might wear out early.</p>
     </section>
 
     <section class="about-sec">
       <h3>Two ways to drive it</h3>
-      <p><b>Run</b>, in the header, starts the <b>automated workload generator</b>: it creates, replaces,
+      <p><b class="docbtn primary">Run</b> starts the <b>automated workload generator</b>: it creates, replaces,
       and deletes files continuously to a roughly <b>steady state</b> of storage capacity, so you watch the 
-      die under a write heavy load. This is where most of the intersting action happens and where most
+      die under a write heavy load. This is where most of the interesting action happens and where most
       of the <b>divergent filesystem behavior</b> occurs.</p>
+      <p><b class="docbtn">Step</b> drives the automated workload generator one step at a time.</p>
       <p>The console and the poke buttons (<b>write</b>, <b>read</b>, <b>ls</b>, <b>delete</b>,
       <b>gc</b>, <b>format</b>) drive one action at a time, so you can watch a single operation on the
       die. Or put in a one liner to run a micro-benchmark. Type <code>help()</code> for the full command list.</p>
@@ -743,7 +736,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
 
     <section class="about-sec">
       <h3>Least time, or most ops</h3>
-      <p>The header sentence switches how the comparison reads. <b>Least time for equal ops</b> (pace)
+      <p>This toggle switches how the various filesystems are kept in sync. <b>Least time for equal ops</b> (pace)
       holds every filesystem to the same workload step, so the die images stay directly comparable,
       and tracks each one's active flash time: the same work, timed. <b>Most ops in equal time</b>
       (race) lets each filesystem run as fast as it can and counts how far it gets: equal time, more
@@ -752,13 +745,30 @@ dialog.about[open]{animation:aboutIn .18s ease}
     </section>
 
     <section class="about-sec">
+      <h3>NOR flash has a few peculiarities:</h3>
+      <ul>
+        <li>Erased data reads as <code>0xFF</code>.</li>
+        <li>Programming only clears bits from <code>1</code> to <code>0</code>, down to a byte at a time. You can keep
+        programming <code>1</code> bits into <code>0s</code> without erasing.</li>
+        <li>Setting bits back to <code>1</code> takes an <span class="k">erase</span>, and erase only works
+        on a whole <b>4 KB sector</b>. It is the slowest operation, and wears out the flash over time.</li>
+        <li>Most NOR flash chips are rated for 100,000 program/erase cycles per sector. Some flash, like the flash inside 
+          a microcontroller, might be rated for 10,000 or 1,000 cycles.</li>
+      </ul>
+      <p>Timing is based on measured performance using an <b>ESP32-S3</b>, and is used both for <b>flash
+      time</b> accounting and relative visual animation speeds: a 256 byte read is about <b>0.1 ms</b>, a
+      page program is about <b>1.5 ms</b>, and a sector erase is about <b>21 ms</b>. The <b>speed control</b> scales this
+      simulated flash time so you can watch it in super slomo, or speed it up to see how it behaves over time.</p>
+    </section>
+
+    <section class="about-sec">
       <h3>How the filesystems cope</h3>
-      <p><span class="wordmark">FLASH<b>VIS</b></span> compares five filesystems today &mdash;
+      <p><span class="wordmark">FLASH<b>VIS</b></span> compares five filesystems today:
       <b>FASTFFS</b>, <b>LittleFS</b>, <b>SPIFFS</b>, <b>JesFS</b>, and ChaN <b>FatFs</b> over the
-      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT+WL</b>) &mdash; with more
+      ESP-IDF <b>wear_levelling</b> FTL (shown as <b>FAT+WL</b>), with more
       planned. The first four are purpose-built for raw flash: they write new data into erased space
       and let superseded copies linger as <b>garbage</b> to reclaim later, since flash cannot cheaply
-      overwrite in place. FatFs is the outlier &mdash; a classic <b>overwrite-in-place</b> FAT
+      overwrite in place. FatFs is the outlier, a classic <b>overwrite-in-place</b> FAT
       filesystem that only runs on flash because a wear-levelling translation layer beneath it remaps
       and rotates sectors to imitate a rewritable disk.</p>
 
@@ -773,7 +783,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
         <li><b>Power-loss behavior is where they diverge.</b> FASTFFS and LittleFS are fully
         copy-on-write and fall back to the last known good state after an interrupted write. The
         log-structured SPIFFS and chain-structured JesFS recover their committed files on remount.
-        FatFs overwrites in place, so a write cut short &mdash; for example by a full volume &mdash;
+        FatFs overwrites in place, so a write cut short, for example by a full volume,
         can leave a file truncated.</li>
       </ul>
 
@@ -812,7 +822,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
       expensive, so it is not used here out of fairness.</p>
 
       <h4>SPIFFS</h4>
-      <p>SPIFFS is <b>log-structured</b> at a <b>256-byte page</b> granule &mdash; the same size as
+      <p>SPIFFS is <b>log-structured</b> at a <b>256-byte page</b> granule, the same size as
       one die cell, so its native map lines up one-to-one with the grid. Every 4&nbsp;KB block begins
       with an <b>object-lookup table</b>: a compact array with one entry per data page in the block,
       recording which object that page belongs to. That table is SPIFFS's <b>metadata</b> and its
@@ -822,50 +832,41 @@ dialog.about[open]{animation:aboutIn .18s ease}
       <code>0</code>), leaving the page as garbage that lingers until its whole block is dead. Like
       FASTFFS, SPIFFS then reclaims in <b>bounded background steps</b>: a quick pass erases one block
       whose pages are all deleted, moving nothing. Because that step is small and churn-safe, SPIFFS
-      is the <b>other</b> filesystem the <b>background GC control</b> drives &mdash; turn it up and
+      is the <b>other</b> filesystem the <b>background GC control</b> drives. Turn it up and
       SPIFFS tidies more often between writes, just like FASTFFS. It also reclaims inline when free
       space runs tight.</p>
-      <p>SPIFFS's format erases the whole chip up front (FASTFFS's touches two sectors) &mdash; a
-      visible sweep on the die, but a one-time cost, often paid at the factory. The behavior that
-      matters here is everything after.</p>
 
       <h4>JesFS</h4>
       <p>JesFS organizes the chip as <b>chains of 4&nbsp;KB sectors</b>. Sector&nbsp;0 holds a master
       header plus the <b>file index</b>, an array of pointers to each file's start. A file's
       <b>HEAD</b> sector co-locates its metadata (name, length, CRC) with the first ~4&nbsp;KB of its
       data; longer files chain into further data sectors. Every sector carries a 4-byte <b>magic</b>
-      recording its state &mdash; which is exactly what the die coloring reads.</p>
-      <p>Deleting a file just rewrites those magics &mdash; the head to a <b>deleted</b> state, its
-      data sectors to a <b>to-delete</b> state &mdash; without erasing. Reclamation is entirely
+      recording its state, which is exactly what the die coloring reads.</p>
+      <p>Deleting a file just rewrites those magics, the head to a <b>deleted</b> state and its
+      data sectors to a <b>to-delete</b> state, without erasing. Reclamation is entirely
       <b>inline and just-in-time</b>: when a later write needs a fresh sector, the allocator sweeps
       forward (a rotating cursor that also levels wear) and erases the next to-delete sector right
       before reusing it. There is no separate GC pass, so the <b>background GC control</b> does
       nothing when JesFS is focused.</p>
-      <p>JesFS has no native <b>seek</b>, so seeking is emulated by rewinding and re-reading forward
-      &mdash; visible extra read traffic on the die. Filenames are capped at <b>21 characters</b>.</p>
 
       <h4>FAT+WL</h4>
-      <p>FatFs is the classic FAT filesystem &mdash; here, ChaN <b>FatFs</b> over the ESP-IDF
+      <p>FatFs is the classic FAT filesystem, here ChaN <b>FatFs</b> over the ESP-IDF
       <b>wear_levelling</b> FTL. FAT expects to <b>overwrite sectors in place</b> and does no erasing
       itself; it simply rewrites the FAT table and directory entries as files change. Flash cannot
       overwrite, so the wear_levelling layer beneath it does the real work: it remaps each logical
       sector to a physical one and rotates a spare <b>dummy</b> sector on every update, spreading
       repeated overwrites (including the constant FAT-table rewrites) across the die instead of
       hammering one spot.</p>
-      <p>That translation layer costs <b>4 of the 64 sectors</b> &mdash; its config, state, and dummy
-      sectors show up as <b>metadata</b> on the die &mdash; leaving a <b>240&nbsp;KB</b> logical
+      <p>That translation layer costs <b>4 of the 64 sectors</b>. Its config, state, and dummy
+      sectors show up as <b>metadata</b> on the die, leaving a <b>240&nbsp;KB</b> logical
       volume (about <b>224&nbsp;KB</b> usable as FAT12, 4&nbsp;KB clusters, two FAT copies). Deleting
       a file frees its clusters in the FAT, but the old bytes stay on the die as <b>garbage</b> until
       something reuses them; nothing reclaims proactively, so the <b>background GC control</b> is
       inert here too.</p>
       <p>The cost of overwrite-in-place is the headline. Driven through the same workload, FatFs
-      produces far more erasing than the log-structured designs &mdash; on one churn run about
-      <b>14,600</b> sector erases against roughly <b>1,000</b> for FASTFFS. And because FAT is not
+      produces far more erasing than the log-structured designs. And because FAT is not
       copy-on-write, a write interrupted by a full volume can leave a file truncated, where the
       log-structured filesystems fall back cleanly.</p>
-
-      <p>The filesystem cards in the header switch the view: click one to focus its die and
-      compare the same workload on each.</p>
     </section>
   </div>
 </dialog>
