@@ -117,6 +117,81 @@ debounced `holding` signal. Cosmetic leftover from the signal rework.
 
 ---
 
+## ROUND 2 — browser testing (post-fix build @8423431). NOT fixed yet.
+
+Two suspected shared root causes tie most of these together:
+  (RC-A) SINGLETON die + SINGLETON UI state (since-cursors, viz, journal) mutated on FS
+         switch → cross-FS state clobber, replayed/suppressed animations, die/journal desync.
+  (RC-B) Page-load boot ops not prep-wrapped + changing mode/speed/stop WHILE boot or
+         generated entries are still executing → mid-flight breakage.
+
+### B10 — Lost prep wrap around initial page-load boot · MED (larger implications)
+spec/ui.md L11: "Page load — fast forward the load-triggered reset and boot animations/delay
+so the page lands usable." Boot ops are no longer prep-wrapped (ADR-0014/§9 prep = instant,
+no metering/animation), so boot animates slowly and its ops linger — likely the RC-B source
+that makes mode/speed/stop-during-boot misbehave. Fixing may resolve OR merely mask B13/B14/B16.
+
+### B11 — FS switch: replayed erases + valid→erased draining artifacts + state clobber · HIGH · RC-A
+B4's UI animate-skip did NOT fully fix it. Repro (path-dependent, not consistent): load settle →
+switch FAT+WL → another → sectors 2-5 jump from a few metadata pages to full valid data, then
+animate (drain transition, not erase glow) to erased. Switch several FS then back to SPIFFS →
+purple glow floods everywhere (erase events replayed). "Smells like tracking state getting
+clobbered" — the singleton since-cursors / die state carry one FS's data into another's view.
+
+### B12 — Erase events NOT showing while watching a focused FS · HIGH · RC-A (over-suppression)
+Erase sweeps no longer animate for the CURRENTLY-focused FS (regression). Tension with B11
+(replays on switch, absent while watching) points at the event-cursor / B4 animate-skip logic
+being wrong in both directions. RC-A per-session event cursors would fix both.
+
+### B13 — Journal/animation desync (die shows wrong liveness vs journal) · HIGH · RC-A/RC-B
+Journal should land first, then animation. Observed: animation showed file-writes with cells
+shaded OBSOLETE instead of LIVE while the journal showed DELETES. Suspected when switching
+mid-entry-exec. Die state and journal came from inconsistent points → the singleton die showing
+stale/other-FS liveness against a different FS's journal.
+
+### B14 — Race speed slider INCONSISTENTLY broken · MED/HIGH · (RC-B?)
+Timed player fixed Pace; Race pacing is flaky — sometimes SPEED only controls heat/erase fade,
+not op pacing; "sometimes it works, sometimes it doesn't." Non-determinism smells like RC-B
+(state depends on what was mid-flight when the mode/speed changed).
+
+### B15 — FS-card status dot not real-time · LOW
+spec/ui.md: CS pin/status dot = raw per-frame blinky. The dot's CSS animation/transition smooths
+the raw csActive so it doesn't read as real-time. Fix: remove CSS animation on the status dot
+ONLY (top-right dot of each FS card); leave other animations.
+
+### B16 — Workload Stop doesn't reliably stop execution · MED/HIGH · RC-B
+Race → Run → Stop: FASTFFS (leader, no queue — correctly) keeps executing ops a good while after
+Stop. Generator appears to queue invisibly (generated-but-unexecuted entries keep draining, or
+the generator gate isn't actually gating). ADR-0020: Stop gates the churn GENERATOR only — so
+either generation isn't stopping, or a pre-generated entry window drains post-stop.
+
+### B17 — Multi-page read lost its page-by-page sweep animation · MED
+ADR-0009: "multi-page ops split to sweep page-by-page." Now a multi-page/sector read starts the
+whole sector's read glow instantly and the pages fade together (overall timing ~ok, but the
+per-page sweep is gone). Regression in the timed-player port (worker-heat glow application).
+
+### PROPOSAL (design, endorsed) — per-session STATE; per-session die DOM only; visibility-swap
+The per-session-ness is a property of the STATE, not the DOM — that is what kills the clobber
+(nothing shared is mutated on switch).
+- UI STATE: a COMPLETE separate copy PER SESSION — since-cursors, journal entries, stats,
+  frame/heat, everything. The invariant is NO CROSS-SESSION DATA BLEED (session B's pulled
+  frame/journal only ever applies to session B's state+die, never overlaid onto another) — NOT
+  "no field ever changes on switch."
+  EXCEPTION (legit, and it's the control not the clobber): each session's state holds its own
+  pull-participation field, which DOES flip on switch. Start as a bool (pulling?), grow to a
+  SCOPE (hidden → pull nothing · compare → heat/wear only · focused → full) — this IS §7's
+  "focus = which workers the UI pulls AND what they ask for." Per-session, describes that
+  session's own view-participation, never touches another session's data.
+- DOM: die = ONE PER SESSION (swap visibility on focus; a hidden die keeps its own rendered
+  state, never re-rendered with another FS's data — this is what avoids CSS transitions firing
+  on switch). Flash-stats panel = ONE shared DOM. Journal = ONE shared DOM.
+- Focus switch mutates NO state: (1) show focused die, hide others; (2) re-render the shared
+  stats + journal DOM FROM the focused session's own state copy. Hidden sessions are not pulled.
+Fixes RC-A (B11/B12/B13) at the root, removes the B4 animate-skip hack, and is the natural
+substrate for multi-dice / compare views.
+
+---
+
 ## AUDIT FINDINGS (read-only audit vs ADR-0024 …named.md; full report AUDIT-FINDINGS.md)
 
 Determinism substrate intact: churn.js/device.js/runner.js byte-identical to main; seeded
