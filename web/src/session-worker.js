@@ -59,12 +59,24 @@ const MIN_ANIM = 110, MAX_ANIM = 9000;   // erase-sweep animated-slot bounds (vi
 // compaction of ~30k tiny reads) stays visibly lit across frames instead of mushing
 // into one decay flash. Paces the DRAIN; drops nothing (I8 veto holds).
 const MAX_OPS_PER_FRAME = 500;
+const MS_PER_FRAME = 1000 / 60;     // coordinator grant cadence (chunk = scale × this)
 // I3 execution backpressure: how far EXECUTION (executedTapeNs) may run ahead of
 // paced PLAYBACK (playbackNs) before the pump parks. A single sync WASM call may
 // still vault past this in one macrotask (accepted, ADR-0019/§5 I3); this only
-// stops the pump from starting the NEXT entry. Keeps the queue bounded at deep
-// slow-mo where a frame's budget is ≪ one op.
-const TAPE_CAP = 1_000_000_000;     // 1 sim-second of executed-but-unplayed flash
+// stops the pump from starting the NEXT entry.
+//
+// At FINITE speed the cap is SCALE-RELATIVE — a few frames of paced PLAYBACK
+// (chunk = scale × MS_PER_FRAME) — so execution leads the metered player by a
+// bounded REAL-TIME amount (~TAPE_CAP_FRAMES frames), matching §6 "the limit
+// leads the meter by ≈ one Δ." A fixed sim-ns cap instead let execution vault a
+// full sim-second ahead, which at deep slow-mo is ~50 real-seconds of un-played
+// backlog: that backlog is the ADR-0020 "Stop leaves a long tail" root (B16) and
+// the B14 "SPEED stops pacing" root (a big backlog drains MAX_OPS-bound per frame
+// instead of chunk/time-bound, so the op rate no longer tracks SPEED). At no-delay
+// there is no real-time lead to bound (playback is flat-out), so a fixed sim-
+// second stands and BACKLOG_CAP guards the event count.
+const TAPE_CAP_FRAMES = 4;          // finite: execution may lead paced playback by this many frames of sim
+const NO_DELAY_TAPE_CAP = 1_000_000_000;   // no-delay: 1 sim-second of executed-but-unplayed flash
 const BACKLOG_CAP = 100_000;        // hard cap on queued device steps (event-count guard)
 
 const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)} ms` : `${(ms / 1000).toFixed(2)} s`; };
@@ -192,7 +204,8 @@ export function installWorkerHost(port, opts = {}) {
 
   function send(type, payload) { port.postMessage(msg(type, { epoch, ...payload })); }
   const eraseMs = (ns) => (isFinite(scale) ? Math.max(MIN_ANIM, Math.min(MAX_ANIM, ns / scale)) : MIN_ANIM);
-  const backpressured = () => (executedTapeNs - playbackNs) >= TAPE_CAP || pbQueue.length >= BACKLOG_CAP;
+  const tapeCapNs = () => (isFinite(scale) ? TAPE_CAP_FRAMES * scale * MS_PER_FRAME : NO_DELAY_TAPE_CAP);
+  const backpressured = () => (executedTapeNs - playbackNs) >= tapeCapNs() || pbQueue.length >= BACKLOG_CAP;
 
   // ---- liveness (ADR-0008/0015 §7): one reachability walk per flash change,
   // throttled to ≥250ms since the last walk (§7/A4 — the walk is real work). ----
