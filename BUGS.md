@@ -187,6 +187,14 @@ metered drain (playback), not at execution. Fix: emit/queue the erase EventEntry
 PLAYER (worker-heat applyStep / playback), not from eager device execution. Double-check the whole
 erase-sweep path against OLD viz.js timing.
 
+### B19 — Journal ring shares the B18 off-by-one; boundary tape line dropped per pull window · MED
+Same root as B18 (found while fixing it): ring `head` = nextId (one-past-last), `since()` exclusive
+(`id > since`), consumer feeds `journalHead` back as `since`, so the boundary journal entry of every
+pull window is dropped. At slow-mo exactly one entry lands per window (= the dropped one), so tape
+lines go missing at slow speed. FIX: same bridge B18 used for events — inclusive lower bound for the
+journal branch in session-worker.js handlePull (`journal.since((since ?? 0) - 1, …)`), consumer
+dedups via tapeSeen so no dup. Verify tape-leak + playground-boot stay green (the reason B18 left it).
+
 ### PROPOSAL (design, endorsed) — per-session STATE; per-session die DOM only; visibility-swap
 The per-session-ness is a property of the STATE, not the DOM — that is what kills the clobber
 (nothing shared is mutated on switch).
