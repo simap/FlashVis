@@ -1,10 +1,10 @@
 /*
- * coord-wire-test.mjs — ADR-0024 coordinator over the WIRE (lane C's own suite).
+ * coord-wire-test.mjs, ADR-0024 coordinator over the WIRE (lane C's own suite).
  *
  * Drives the rebuilt lockstep coordinator (web/src/lockstep.js) through the real
  * protocol.js message envelopes, over the faithful mock transport (structuredClone +
  * async queued delivery), against a pair of mock session workers. NO WASM, NO real
- * session — the point is to prove the §2 clock-release algebra and its grant/ack/round
+ * session, the point is to prove the §2 clock-release algebra and its grant/ack/round
  * barrier end to end, and that the standing signals are correctly DERIVED from ack
  * state alone (the old synchronous device/pending reads are gone): `holding` (the
  * SUSTAINED fast-FS-frozen-at-the-join wait, debounced) and `csActive` (the RAW
@@ -12,7 +12,7 @@
  *
  * Two workers model a "cheap" FS (fastffs, 1e6 ns/op) and a "pricey" FS (littlefs,
  * 5e6 ns/op) so a Race under an identical playback ceiling diverges in step count
- * while playback stays level — the ADR-0016 comparison — and a Pace stays in cursor
+ * while playback stays level, the ADR-0016 comparison, and a Pace stays in cursor
  * lockstep while playback (cost) diverges.
  */
 // Deterministic default for the fake-clock _tick polling: no hold debounce, so the
@@ -86,11 +86,11 @@ async function testRaceDivergence() {
   const s = snapById(rig);
   const cur = { fastffs: s.fastffs.stepCursor, littlefs: s.littlefs.stepCursor };
   if (!(cur.fastffs > cur.littlefs)) fail(`cheap FS did not out-step pricey FS (fastffs ${cur.fastffs} vs littlefs ${cur.littlefs})`);
-  else ok(`cheap FS out-stepped pricey ${(cur.fastffs / Math.max(cur.littlefs, 1)).toFixed(1)}x (fastffs ${cur.fastffs}, littlefs ${cur.littlefs}) — the comparison`);
+  else ok(`cheap FS out-stepped pricey ${(cur.fastffs / Math.max(cur.littlefs, 1)).toFixed(1)}x (fastffs ${cur.fastffs}, littlefs ${cur.littlefs}), the comparison`);
   const a = pb(rig, 'fastffs'), b = pb(rig, 'littlefs');
   const rel = Math.abs(a - b) / Math.max(a, b);
-  if (rel > 0.15) fail(`playback NOT level across FS (fastffs ${(a / 1e6).toFixed(0)}ms vs littlefs ${(b / 1e6).toFixed(0)}ms, ${(rel * 100).toFixed(0)}% apart) — ceiling not shared`);
-  else ok(`playback level within ${(rel * 100).toFixed(1)}% (fastffs ${(a / 1e6).toFixed(0)}ms, littlefs ${(b / 1e6).toFixed(0)}ms) — one shared ceiling`);
+  if (rel > 0.15) fail(`playback NOT level across FS (fastffs ${(a / 1e6).toFixed(0)}ms vs littlefs ${(b / 1e6).toFixed(0)}ms, ${(rel * 100).toFixed(0)}% apart), ceiling not shared`);
+  else ok(`playback level within ${(rel * 100).toFixed(1)}% (fastffs ${(a / 1e6).toFixed(0)}ms, littlefs ${(b / 1e6).toFixed(0)}ms), one shared ceiling`);
   // round barrier: both workers acked the same advancing round (I2)
   const rounds = FS_ORDER.map((f) => rig.byId[f].acked.round);
   if (rounds[0] < 5 || Math.abs(rounds[0] - rounds[1]) > 1) fail(`round barrier off: acked rounds ${rounds} (should advance together, ≥1 apart at most)`);
@@ -127,11 +127,11 @@ async function testPaceLockstep() {
     maxGap = Math.max(maxGap, Math.abs(s.fastffs.stepCursor - s.littlefs.stepCursor));
   });
   const s = snapById(rig);
-  if (maxGap > 1) fail(`pace cursors diverged (max gap ${maxGap}) — the join let a session get ahead`);
-  else ok(`pace cursors never diverged (max gap ${maxGap}) — ∀ entriesDrained ≥ sharedIndex join holds`);
+  if (maxGap > 1) fail(`pace cursors diverged (max gap ${maxGap}), the join let a session get ahead`);
+  else ok(`pace cursors never diverged (max gap ${maxGap}), ∀ entriesDrained ≥ sharedIndex join holds`);
   if (s.fastffs.stepCursor < 5) fail(`pace made no progress (cursor ${s.fastffs.stepCursor})`);
   else ok(`pace advanced to cursor ${s.fastffs.stepCursor}, both equal`);
-  // playback (cost) DOES diverge under Pace — same steps, different per-op cost
+  // playback (cost) DOES diverge under Pace, same steps, different per-op cost
   const a = pb(rig, 'fastffs'), b = pb(rig, 'littlefs');
   if (!(b > a * 1.5)) fail(`pace playback did not diverge by cost (fastffs ${a}, littlefs ${b})`);
   else ok(`pace playback diverged by cost: littlefs ${(b / a).toFixed(1)}x fastffs (equal steps, unequal flash time)`);
@@ -139,11 +139,11 @@ async function testPaceLockstep() {
 
 // ---------------------------------------------------------------------------
 // (a) The SUSTAINED Pace hold (the product's whole point): a fast FS finishes the
-// shared step and sits FROZEN at the join — for many consecutive frames — while the
+// shared step and sits FROZEN at the join, for many consecutive frames, while the
 // slow peer grinds. Speed is chosen so chunk sits BETWEEN the two per-op costs, so the
 // fast FS clears the multi-op step in a couple of frames and the slow FS takes many.
 async function testSustainedPaceHold() {
-  console.log('\n[5] PACE: sustained hold — fast FS frozen at the join for many frames while slow grinds');
+  console.log('\n[5] PACE: sustained hold, fast FS frozen at the join for many frames while slow grinds');
   const rig = makeRig({ speed: 180000, units: { fastffs: 1e6, littlefs: 5e6 } });   // chunk ≈ 3e6: fast ≥3 ops/frame, slow ~1
   await flushTurns(4);
   rig.coord.setMode('pace');
@@ -161,7 +161,7 @@ async function testSustainedPaceHold() {
   const drained = FS_ORDER.every((f) => rig.byId[f].acked.entriesDrained >= index);
   if (!drained) fail(`pace command not drained on both (entriesDrained ${FS_ORDER.map((f) => rig.byId[f].acked.entriesDrained)})`);
   else ok('pace command drained on both workers');
-  if (maxFastHoldRun < 3) fail(`fast FS hold was a flicker, not sustained (longest run ${maxFastHoldRun} frames) — the join hold is meant to persist`);
+  if (maxFastHoldRun < 3) fail(`fast FS hold was a flicker, not sustained (longest run ${maxFastHoldRun} frames), the join hold is meant to persist`);
   else ok(`fast FS held FROZEN at the join for ${maxFastHoldRun} consecutive frames while slow ground the step (the sustained Pace hold)`);
   if (sawSlowHold) fail('slow FS (the laggard) wrongly read holding while it was the one still working');
   else ok('slow FS never read holding while it was the laggard (only the waited-ON fast FS holds)');
@@ -213,7 +213,7 @@ async function testReseatBurstNoStall() {
 // ---------------------------------------------------------------------------
 // The OTHER catch-up direction the spec calls out: RACE→PACE. Race diverges cursors
 // (cheap FS leads); on the switch to Pace the LEAD FS is parked at the join until the
-// laggard climbs to its cursor — a sustained hold that clears on convergence.
+// laggard climbs to its cursor, a sustained hold that clears on convergence.
 async function testRaceToPaceCatchupHold() {
   console.log('\n[6b] RACE→PACE catch-up: the lead FS holds until the laggard converges');
   // moderate finite speed so chunk sits between the two op costs -> cheap out-steps
@@ -246,10 +246,10 @@ async function testRaceToPaceCatchupHold() {
 }
 
 // ---------------------------------------------------------------------------
-// (b) csActive: RAW per-frame — true on a frame the session's playback advanced,
+// (b) csActive: RAW per-frame, true on a frame the session's playback advanced,
 // false while frozen / idle. No debounce.
 async function testCsActive() {
-  console.log('\n[9] csActive: raw per-frame blinky — true while playback advances, false while frozen/idle');
+  console.log('\n[9] csActive: raw per-frame blinky, true while playback advances, false while frozen/idle');
   const rig = makeRig({ speed: Infinity });
   await flushTurns(4);
   // idle (not running, no work): csActive false for both
@@ -263,7 +263,7 @@ async function testCsActive() {
   let fastActiveFrames = 0, slowActiveFrames = 0, N = 20;
   await run(rig, N, () => { const x = snapById(rig); if (x.fastffs.csActive) fastActiveFrames++; if (x.littlefs.csActive) slowActiveFrames++; });
   if (fastActiveFrames < N * 0.5 || slowActiveFrames < N * 0.5) fail(`csActive rarely true while running (fast ${fastActiveFrames}/${N}, slow ${slowActiveFrames}/${N})`);
-  else ok(`csActive true on most running frames (fast ${fastActiveFrames}/${N}, slow ${slowActiveFrames}/${N}) — the real-time blinky`);
+  else ok(`csActive true on most running frames (fast ${fastActiveFrames}/${N}, slow ${slowActiveFrames}/${N}), the real-time blinky`);
   // stop generation + reset to a clean idle chip (no queued frontier) -> csActive false
   rig.coord.stop();
   rig.coord.reset();
@@ -290,7 +290,7 @@ async function testHoldDebounce() {
     rig.coord.stop();
     rig.coord.setMode('pace');                            // lead FS enters a sustained raw hold NOW
     await frame(rig);
-    if (snapById(rig)[lead].holding) fail('holding lit on the very first frame of a fresh hold — not debounced');
+    if (snapById(rig)[lead].holding) fail('holding lit on the very first frame of a fresh hold, not debounced');
     else ok('holding NOT lit immediately when the raw hold begins (debounce engaged)');
     // let ~350ms of real wall-time pass while the hold persists, ticking as we go
     const t0 = Date.now();
@@ -312,7 +312,7 @@ async function testGrantContinuityNoAccumulation() {
   // (no consumption ⇒ rel pinned at chunk ⇒ the ADR-0020 idle burst cannot re-enter).
   await run(rig, 30);
   const idlePb = FS_ORDER.map((f) => pb(rig, f));
-  if (idlePb.some((v) => v > 0)) fail(`playback advanced while idle with no work (${idlePb}) — a grant leaked execution (I10 no-op violated)`);
+  if (idlePb.some((v) => v > 0)) fail(`playback advanced while idle with no work (${idlePb}), a grant leaked execution (I10 no-op violated)`);
   else ok('30 idle grants advanced no playback (no-op grants, I10)');
   // now queue ONE small command; it must start at Speed (one chunk), not burst the
   // whole banked idle time (the leak counter-model).
@@ -321,8 +321,8 @@ async function testGrantContinuityNoAccumulation() {
   await frame(rig);
   const afterOne = pb(rig, 'fastffs');
   // one op costs unit (1e6); a burst of "banked" idle grants would be many chunks.
-  if (afterOne > 2e6) fail(`first post-idle grant burst (playback ${(afterOne / 1e6).toFixed(1)}ms > one op) — grant was accumulated, not derived (I4)`);
-  else ok(`post-idle command started metered at Speed (playback ${(afterOne / 1e6).toFixed(2)}ms ≈ one op) — rel derived, not banked (I4)`);
+  if (afterOne > 2e6) fail(`first post-idle grant burst (playback ${(afterOne / 1e6).toFixed(1)}ms > one op), grant was accumulated, not derived (I4)`);
+  else ok(`post-idle command started metered at Speed (playback ${(afterOne / 1e6).toFixed(2)}ms ≈ one op), rel derived, not banked (I4)`);
   await run(rig, 20);
   if (!FS_ORDER.every((f) => rig.byId[f].acked.entriesDrained >= index)) fail('post-idle command never drained');
   else ok('post-idle command drained on both');
@@ -366,7 +366,7 @@ async function testBootResetFlow() {
   rig.coord.setMode('race');                     // set a non-default mode
   const modeBefore = rig.coord.mode;
   rig.coord.reset();                             // header Reset
-  if (rig.coord.mode !== modeBefore) fail(`reset() switched mode ${modeBefore}→${rig.coord.mode} — spec says it must not`);
+  if (rig.coord.mode !== modeBefore) fail(`reset() switched mode ${modeBefore}→${rig.coord.mode}, spec says it must not`);
   else ok(`reset() preserved mode '${modeBefore}' (header Reset never switches race/pace)`);
   // the boot sequence: broadcast the ONE format command right after reset
   const { index } = rig.coord.broadcast({ ops: [1, 1] }, 'format()');
