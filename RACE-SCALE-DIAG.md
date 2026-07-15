@@ -75,20 +75,34 @@ growing with scale, the gate never became the binding limit, and the per-frame a
 tracking the slider. Measured before the fix: per-frame advance ~0.07ms at scale 1e5 where the
 chunk (the intended advance) is 1.67ms, i.e. the window throttled it ~24x below the clock.
 
-### Fix (lockstep.js window sizing)
-Size the Race prefetch window from OBSERVED per-entry cost, not a fixed nominal. Each frame
-`trackEntryCost()` measures per session `dPlayback / dCursor` (an EMA of the real flash-ns
-per entry); `observedMinCost()` takes the min across sessions (the cheapest FS drives the
-largest window need, bootstrapping to `NOMINAL_ENTRY_NS` before any entry drains). The window
-is then `RACE_LOOKAHEAD_FRAMES * chunk / observedMinCost`, clamped `[4, 4096]`. This keeps the
-§2 gate the sole throttle for every FS, so the per-frame advance equals chunk = scale *
-MS_PER_FRAME and tracks the slider. The post-Stop tail stays bounded in TIME regardless of the
-entry count: the frontier drains at the gate rate, so it is always about RACE_LOOKAHEAD_FRAMES
-frames. RACE_LOOKAHEAD_MAX was raised 256 -> 4096 (a memory guard, not a throttle) to cover the
-realistic finite slider range without re-introducing starvation.
+### Fix (lockstep.js window sizing) : PER-SESSION window, keyed on observed drain
+The window must not throttle entryLimit below the §2 gate for any FS. My FIRST attempt sized
+one SHARED window from the cheapest observed per-entry cost and shipped the frontier ahead of
+the LEADER's cursor (RACE_LOOKAHEAD_MAX 256 -> 4096). That fixed symptom 2 but REGRESSED the
+B16 post-Stop drain tail: the shared frontier sits ahead of the leader, and in a diverging race
+the leader-lead grows without bound, so the laggard's tail = (leader-lead + window) blew past
+200 frames (the s13 regression). The comment "tail stays ~RACE_LOOKAHEAD_FRAMES frames" only
+holds if the frontier is near the LAGGARD, not the leader.
 
-Verified [12]: doubling scale doubles the per-frame race advance (ratio 2.00), and the advance
-equals chunk = scale * MS_PER_FRAME (1.67ms at scale 1e5).
+Corrected fix: size the window PER SESSION from that session's OWN observed drain rate, and
+authorize each session only a few frames ahead of ITS cursor.
+- `trackDrainRates()`: per-session EMA of `dCursor / frame` (entries that session actually
+  drains per frame).
+- `raceWindow(p) = clamp(RACE_LOOKAHEAD_FRAMES * drainEma[p], MIN, MAX)`.
+- Race `entryLimit_s = cursor_s + raceWindow(p)` while RUNNING; FROZEN at its last running
+  value once STOPPED (so a session drains only its already-authorized backlog, about one
+  window, and halts, instead of a treadmill chasing the frontier; at no-delay the worker
+  bypasses the playback gate, so entryLimit is the only tail bound). Generation covers
+  `max_s(cursor_s + raceWindow(s))`.
+
+This keeps the §2 gate the throttle for every FS (per-frame advance is chunk = scale *
+MS_PER_FRAME, tracks the slider) AND bounds each session's post-Stop tail to a few frames of ITS
+own drain, whatever its per-op cost. RACE_LOOKAHEAD_MAX 4096 is now a per-session memory guard.
+`NOMINAL_ENTRY_NS` / `observedMinCost` (the shared-cost approach) were removed.
+
+Verified [12]: doubling scale doubles the per-frame race advance (ratio 2.00), advance equals
+chunk = scale * MS_PER_FRAME (1.67ms at scale 1e5). Verified s13 (real WASM): after stop the
+laggard drains about one window and csActive clears in ~11 frames (was hundreds, then never).
 
 ### Interaction with the bounded-MAX clock at the very top of the slider
 With the observed-cost window, the slider now bites across the range until the point where the
@@ -121,11 +135,27 @@ only slider==100 is Infinity/no-delay, and it calls `coordinator.setSpeed(scale)
   per-frame race advance; advance ~= chunk (symptom 2).
 - coord-wire-test.mjs [13] `testBoundedRaceClock`: both keep up -> flash time level, no false
   hold; one FS execution-bound -> leader pins at slowest + 2*chunk (no runaway) and reads
-  holding, laggard never does (symptom 1). Full suite green (npm run test:coordwire).
+  holding, laggard never does (symptom 1).
+- coord-wire-test.mjs [6] updated: after a Pace->Race reseat the Pace playback gap exceeds the
+  bound, so the AHEAD FS is pinned (may read holding) while the BEHIND FS bursts to catch up
+  and never holds. This corrects the old "no sustained race hold" assertion to the bounded-MAX
+  behaviour (not a weakening; the pre-bounded-MAX assumption is simply no longer true).
+- Full coord-wire suite green (npm run test:coordwire), and the full REAL-WASM
+  `scripts/lockstep-concurrency-test.mjs` green (s10-s15 signals incl. s12/s13, and s7 reseat).
 
-## Pre-existing failure (NOT a regression from this work)
-`scripts/lockstep-concurrency-test.mjs` fails at `bootFormat` ("coordinator never converged")
-BEFORE any of my edits, verified by stashing my changes and re-running against the integrated
-HEAD e5a2146. It is a Pace-mode boot flow over the REAL worker host (session-worker.js /
-worker-harness.mjs), independent of the race-only changes here. Flagging for routing to the
-worker-host / test-worker lane; it is outside lane C's area and outside this task's scope.
+## CORRECTION: the earlier "pre-existing bootFormat failure" was wrong (dist was missing)
+My previous report claimed lockstep-concurrency was pre-existing-red at HEAD. That was WRONG.
+The cause was a MISSING BUILD ARTIFACT: `dist/*.mjs` (the real filesystems, loaded by runner.js
+via `../../dist/${fsId}.mjs`) is gitignored, so a fresh git worktree has no `dist/`, and
+`bootFormat` could not load real WASM. Stashing code cannot restore a missing build artifact, so
+"stash and re-run still fails" did not prove pre-existing. With `dist` symlinked in
+(`flashvis-coord/dist -> flashvis/dist`), the suite boots real WASM. Always run it with `dist`
+present.
+
+## The real regression this task also fixed (s13)
+With real WASM present, my symptom-2 change (the SHARED enlarged prefetch window) introduced a
+real regression: `s13-drain-to-idle` hung. After `coord.stop()` the laggard had to drain the
+whole shared frontier (leader-lead + 4096) at its slow rate, so `csActive` stayed set for
+hundreds of frames. Root cause: the window was shared and shipped ahead of the LEADER. Fixed by
+the per-session, stop-frozen window above (frontier bound by each session's own cursor + drain).
+s13 now clears in ~11 frames. This is the frontier-bound fix the coordinator directed.
