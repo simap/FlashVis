@@ -40,6 +40,18 @@ const TELEMETRY_MS = 250;           // W2C.TELEMETRY cadence (§4/§8: unconditi
 const JOURNAL_MAX = 2000;           // ring bound; protocol.js's JOURNAL_MIN (400) is the wire floor
 const MIN_ANIM = 110, MAX_ANIM = 9000;   // erase-sweep animated-slot bounds (viz.js parity), for EventEntry.ms
 
+// Console help text (ADR-0019 buildConsoleApi parity). Worker-side because the
+// wire ships RAW console source (`help()`) that the sandbox compiles here —
+// help() prints against the per-session api.print, so every per-FS tape shows it.
+const HELP_TEXT = [
+  'POKES (friendly, all paced — prefix with await):',
+  '  writeFile(name?, size?) · readFile(name?) · deleteFile(name?) · stat(name)',
+  '  ls(prefix?) · getFiles(prefix?) · mkdir(path)',
+  'RAW:  fs.write/read/remove/exists/fsinfo · fs.format()/mount()/unmount()',
+  'HELPERS:  gc(n=1) · format() · randomBytes(n) · text(s) · print(x) · help()',
+  'ONE LINE = ONE ATOMIC COMMAND (queued → live → done).',
+].join('\n');
+
 // ---- deterministic content generation (ADR-0015/0019) — pure, relocated verbatim ----
 function deterministicBytes(seed, n) {
   let s = seed >>> 0;
@@ -219,7 +231,11 @@ export function installWorkerHost(port, opts = {}) {
       prep: (v) => setPrep(!!v),
       format: async () => { await fs.format(); await fs.mount(); },
       text: (s) => new TextEncoder().encode(s),
+      // I7 determinism: randomBytes is SEEDED from the entry's per-command seed
+      // (rng = mulberry32(entry.seed)), NEVER crypto — every session re-derives
+      // identical bytes for the same command.
       randomBytes: (n) => { const a = new Uint8Array(n); for (let i = 0; i < n; i++) a[i] = (rng() * 256) & 0xff; return a; },
+      help: () => { print(HELP_TEXT); return HELP_TEXT; },
     };
   }
 
@@ -300,6 +316,9 @@ export function installWorkerHost(port, opts = {}) {
     const myGen = gen;
     const rng = mulberry32((entry.seed ?? 0) >>> 0);
     const api = buildLocalApi(rng, index, myGen);
+    // Echo the RAW source to the journal so every per-FS tape shows what was
+    // typed/broadcast (playground renders a leading '›' line as console input).
+    if (typeof entry.payload === 'string') journal.push({ entryIndex: index, kind: 'echo', text: '› ' + entry.payload });
     journal.push({ entryIndex: index, kind: 'started', text: 'command' });
     let inFlight = 0, fnDone = false, settled = false;
     const check = () => setTimeout(() => {

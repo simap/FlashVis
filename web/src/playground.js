@@ -15,17 +15,13 @@
  *     snapshots(), the ~250ms heartbeat, for EVERY session at once.
  *   - The tape (console scrollback) is WORKER-OWNED and read via a journal
  *     PULL (frame.journal / journalHead), not flipped by the coordinator.
- *   - broadcast() ships SOURCE TEXT (a self-contained async-fn expression the
- *     worker compiles), not a live closure — a closure can't cross the thread.
+ *   - broadcast() ships RAW console SOURCE TEXT the worker compiles in its
+ *     ADR-0019 sandbox, not a live closure — a closure can't cross the thread.
  *
- * CROSS-LANE SHAPE NOTES (see LANE-REPORT.md — flagged, not silently worked
- * around): lane W's session-worker.js FRAME payload uses different field names
- * than protocol.js's frozen FrameMsg (heat.readHeat vs .read, shown.shown vs
- * .pages, liveMap.map vs .classes) and puts command-lifecycle entries in the
- * `events` ring where protocol.js specifies erase/reset viz-triggers.
- * `adaptFrame()` below is the ISOLATED translation from the worker's actual
- * shape to protocol.js's (and thus viz.js's) shape — delete it once the worker
- * conforms.
+ * The worker's FRAME payload is protocol.js-conformant (FrameMsg: heat.read/
+ * prog, shown.pages/wear, liveMap.version/classes, erase/reset EventEntries in
+ * `events`), so the render loop feeds the pulled FRAME straight to viz.js —
+ * no field remap.
  */
 import { createChurnModel, CHURN_CLASS } from './churn.js';
 import { createLockstep } from './lockstep.js';
@@ -72,64 +68,19 @@ const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(
 const fmtPerOp = (ns, ops) => { if (!(ops > 0)) return '—'; const us = ns / 1000 / ops; return us < 1000 ? `${Math.round(us)} µs/op` : `${(us / 1000).toFixed(2)} ms/op`; };
 const fmtRate = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
 
-const HELP_TEXT = [
-  'POKES (friendly, all paced — prefix with await):',
-  '  writeFile(name?, size?) · readFile(name?) · deleteFile(name?) · stat(name)',
-  '  ls(prefix?) · getFiles(prefix?) · mkdir(path)',
-  'RAW:  fs.write/read/remove/exists/fsinfo · fs.format()/mount()/unmount()',
-  'HELPERS:  gc(n=1) · format() · randomBytes(n) · text(s) · print(x) · help()',
-  'ONE LINE = ONE ATOMIC COMMAND (queued → live → done).',
-].join('\n');
-
 /* ------------------------------------------------------------------------ *
- * COMMAND SOURCE (ADR-0024 §4: commands ship as SOURCE)
+ * COMMAND SOURCE (ADR-0024 §4: commands ship as RAW SOURCE)
  *
- * A console line is wrapped into a SELF-CONTAINED async-fn expression the
- * worker compiles (session-worker.js: `(0, eval)("(" + source + ")")`, sloppy
- * mode so `with` is legal). The sandbox that used to live in a main-thread
- * Proxy (undeclared `for (i=0;…)` stays local; api → bag → globalThis
- * resolution) is reconstructed IN the shipped source so it runs worker-side.
- * The command echoes itself to the (worker-owned) tape via api.print, so every
- * per-FS tape shows what was typed.
+ * A console line ships to the worker AS TYPED — bare statements (`help()`,
+ * `writeFile('cfg.bin')`, `for (i=0;i<3;i++) ls()`). The worker (session-
+ * worker.js makeSandbox/compileSource) wraps it in its ADR-0019 sloppy-mode
+ * `with(scope){…}` sandbox whose inner `api` provides every console helper
+ * (writeFile/…/format/text/randomBytes/help/print) and echoes the source to
+ * the worker-owned tape. Nothing is pre-wrapped here: a live closure can't
+ * cross the thread, and double-wrapping (shipping a whole async(api)=>{} that
+ * the worker's own `with` would merely RETURN, never call) leaves the body
+ * unexecuted. The seed for any random draw rides the entry (I7 determinism).
  * ------------------------------------------------------------------------ */
-export function wrapCommandSource(userSrc) {
-  return `async (api) => {
-  const enc = new TextEncoder();
-  const bag = Object.create(null);
-  const helpers = {
-    text: (s) => enc.encode(s),
-    randomBytes: (n) => { const a = new Uint8Array(n); const c = globalThis.crypto; if (c && c.getRandomValues) for (let i = 0; i < n; i += 65536) c.getRandomValues(a.subarray(i, Math.min(n, i + 65536))); return a; },
-    format: async () => { await api.fs.format(); await api.fs.mount(); },
-    help: () => { api.print(${JSON.stringify(HELP_TEXT)}); return ${JSON.stringify(HELP_TEXT)}; },
-  };
-  const scope = new Proxy(Object.create(null), {
-    has: () => true,
-    get: (_t, k) => (k in api ? api[k] : k in helpers ? helpers[k] : k in bag ? bag[k] : Reflect.get(globalThis, k, globalThis)),
-    set: (_t, k, v) => { bag[k] = v; return true; },
-  });
-  api.print(${JSON.stringify('› ' + userSrc)});
-  with (scope) {
-${userSrc}
-  }
-}`;
-}
-
-/* ------------------------------------------------------------------------ *
- * FRAME ADAPTER — worker's actual FRAME shape → protocol.js/viz.js shape.
- * Isolated here so viz.js stays conformant to the frozen protocol; delete
- * once lane W's worker emits protocol field names. (Erase SWEEP inference is
- * intentionally left out for now — the die renders correctly from `shown`
- * regardless, and the worker doesn't yet emit erase EventEntry triggers;
- * see LANE-REPORT.)
- * ------------------------------------------------------------------------ */
-function adaptFrame(f) {
-  if (!f) return null;
-  const out = {};
-  if (f.heat) out.heat = { read: f.heat.read ?? f.heat.readHeat, prog: f.heat.prog ?? f.heat.progHeat };
-  if (f.shown) out.shown = { pages: f.shown.pages ?? f.shown.shown, wear: f.shown.wear };
-  if (f.liveMap) out.liveMap = { version: f.liveMap.version, classes: f.liveMap.classes ?? f.liveMap.map };
-  return out;
-}
 
 /* ------------------------------------------------------------------------ *
  * WORKER CONNECTION SEAM — production spawns a real Worker; a headless test
@@ -196,7 +147,7 @@ async function boot() {
 
   // ---- command source → broadcast (the ONE path console/boot/buttons take) ----
   function injectCommand(userSrc) {
-    return coordinator.broadcast(wrapCommandSource(userSrc), userSrc);
+    return coordinator.broadcast(userSrc, userSrc);   // RAW source; worker compiles it
   }
 
   // ---- focus switch: die/tape/telemetry/legend follow one session; a pure
@@ -389,7 +340,7 @@ async function boot() {
     // issue the next pull.
     const f = proxy.frame;
     if (f) {
-      viz.applyFrame(adaptFrame(f));
+      viz.applyFrame(f);   // FRAME is protocol-conformant; viz consumes it directly
       if (f.liveMap && f.liveMap.version != null) liveMapSince = f.liveMap.version;
       if (f.journalHead != null) journalSince = f.journalHead;
       if (f.eventHead != null) eventsSince = f.eventHead;
@@ -409,31 +360,20 @@ async function boot() {
   // ---- HUD + compare strip on the ~250ms cadence (telemetry heartbeat) ----
   setInterval(() => { refreshHUD(); renderFsSet(); renderGap(); }, 250);
 
-  // ---- HOLD pins (spec/ui.md): the CS pin/status dot is RAW real-time blinky;
-  // the fs-card "holding" label is debounced ~300ms. Consume the coordinator's
-  // signal (snapshots().csActive / .holding once lane C lands them); until
-  // then, waitStates() is the raw signal and we debounce it here. ----
-  const HOLD_SHOW_MS = globalThis.__flashvisHoldShowMs ?? 300;
-  const holdSince = new Map();
+  // ---- standing-signal pins (spec/ui.md): the CS pin/status dot renders the
+  // RAW per-frame `csActive` blinky (NO debounce); the fs-card "holding" label
+  // renders the ALREADY-debounced (~300ms) `holding`. Both come from the
+  // coordinator per-fsId as waitStates()[fsId] = { csActive, holding }; the
+  // debounce lives coordinator-side now (lockstep.js), not here. ----
   const pinCS = $('pinCS');
   (function holdTick() {
-    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     const ws = coordinator.waitStates();
-    const snaps = coordinator.snapshots();
-    const csActiveOf = (fsId) => {
-      const s = snaps.find((x) => x.fsId === fsId);
-      return s && s.csActive != null ? s.csActive : !ws[fsId];   // raw: active iff not waiting
-    };
     for (const fsId of Object.keys(ws)) {
-      const raw = ws[fsId];
-      let show = false;
-      if (raw) { if (!holdSince.has(fsId)) holdSince.set(fsId, now); show = now - holdSince.get(fsId) >= HOLD_SHOW_MS; }
-      else holdSince.delete(fsId);
-      $('fsCard-' + fsId)?.classList.toggle('waiting', show);
+      const { csActive, holding } = ws[fsId];
+      $('fsCard-' + fsId)?.classList.toggle('waiting', holding);   // debounced (the "Holding" card)
       if (pinCS && fsId === focusedFsId) {
-        const active = csActiveOf(fsId);       // RAW per-frame, not debounced (spec/ui.md)
-        pinCS.classList.toggle('cs-active', active);
-        pinCS.classList.toggle('cs-paused', !active);
+        pinCS.classList.toggle('cs-active', csActive);             // RAW per-frame (spec/ui.md)
+        pinCS.classList.toggle('cs-paused', !csActive);
       }
     }
     raf(holdTick);
