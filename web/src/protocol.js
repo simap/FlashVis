@@ -183,6 +183,9 @@ export const JOURNAL_MIN = 400;
  * @property {object} livenessCounts     {live, obsolete, metadata}
  * @property {number} exec_fileOpCount
  * @property {number} exec_simNs         telemetry only — never the currency
+ * @property {number} programBytes       cumulative bytes programmed to flash (write-amp numerator)
+ * @property {number} hostBytes          cumulative bytes the host asked to write (write-amp denominator)
+ *   write-amplification = programBytes / hostBytes; ~250ms scalars, not per-op (I9 intact).
  *   Silence for k*250ms => crash (§8): console tape line, wedges, reload.
  */
 
