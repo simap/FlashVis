@@ -386,9 +386,20 @@ async function boot() {
   // ---- boot log: the ONE real format ships as a broadcast command AFTER the
   // workers are init'd (ADR-0024 §8 — no format wire field). help() first so
   // every per-FS tape shows the reference; both drain even while paused
-  // (ADR-0020: Pause gates the churn GENERATOR only). ----
-  injectCommand('help()');
-  injectCommand('format()');
+  // (ADR-0020: Pause gates the churn GENERATOR only).
+  //   B10 (spec/ui.md L11): the page-load boot ops are wrapped in the §9 prep
+  // bracket — prep(true) … boot ops … prep(false) — so the worker executes them
+  // INSTANTLY, with no metering and no animation, and the page lands usable.
+  // prep(false) zeroes the displayed drained counters so boot doesn't count. A
+  // prep entry ships as a synthetic-command payload object (never a source
+  // string), so it drains atomically worker-side and never echoes on the tape. ----
+  bootSequence();
+  function bootSequence() {
+    coordinator.broadcast({ prep: true }, '');    // §9 open: instant, no metering/animation
+    injectCommand('help()');
+    injectCommand('format()');
+    coordinator.broadcast({ prep: false }, '');   // §9 close: reseat, zero displayed counters
+  }
 
   // ---- the render loop: pull + paint the FOCUSED session once per rAF into
   // its OWN viz (ADR-0024 §4/§7). Hidden sessions pull nothing and keep their
@@ -510,8 +521,7 @@ async function boot() {
     }
     setFocus(focusedFsId);   // re-render the shared DOM from the (now empty) focused state
     $('specLive').textContent = 'formatted + mounted — empty and paused';
-    injectCommand('help()');
-    injectCommand('format()');
+    bootSequence();          // B10: prep-wrapped, same as page-load boot
   });
 
   // slider 0..100 → sim-ns per real-ms (log scale). Real flash time = 1e6.
