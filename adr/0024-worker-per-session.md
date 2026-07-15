@@ -262,9 +262,11 @@ op rate, and the worker holds no state about what the UI has seen.
 
 - `prep(true)`/`prep(false)` are ordinary broadcast entries. `prep(true)` takes effect
   per-session at its sequence position — no entry sync; sessions enter prep as their cursors
-  arrive. **Only the exit is a join**: the coordinator holds `entryLimit` at the `prep(false)`
-  index until every session's `entriesDrained` reaches it, because the clear + reseat must land
-  at one shared entry (reseat mechanics; a momentary join even in Race). Playback is one FIFO
+  arrive. **Only the exit is a join**: the coordinator withholds the `prep(false)` entry (holding
+  `entryLimit` so sessions execute only the entries before it) until every session's
+  `entriesDrained` reaches the entry just before it, then releases `prep(false)` to all at once —
+  executing it is the clear + reseat, which is what makes it land at one shared entry (reseat
+  mechanics; a momentary join even in Race). Playback is one FIFO
   replay, so entering prep flushes whatever remains of that session's own pre-bracket tape; a
   session's execution reaches `prep(true)` only after its backlog drains below `TAPE_CAP` at
   Speed — so the exit join waits on the slowest session's drain (minutes at deep slow-mo;
