@@ -397,6 +397,12 @@ export function createViz(geometry) {
       if (selected >= 0) renderInspector(selected);
     },
 
+    /** Blank the die to its empty, cold, untinted state (focus switch / epoch
+     *  bump): the next pulled FRAME's full-state snapshot then snaps it to the
+     *  newly-focused session. Without this, a focus switch would briefly show
+     *  the previous FS's shown/heat/tint until the first new frame diffs it. */
+    clear() { resetDie(); },
+
     attachInspector(el) { inspectorEl = el; },
     onSelect(cb) { onSelectCb = cb; },
     setHeatmap(on, dieEl) { heatmapOn = on; dieEl.classList.toggle('heat', on); if (on) refreshHeatmap(); },

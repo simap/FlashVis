@@ -1,49 +1,61 @@
 /*
- * Playground: the console command-compiler + comparison UI (ADR-0018/0019).
+ * Playground: the console command-compiler + comparison UI, rewired onto the
+ * ADR-0024 worker-per-session wire.
  *
- * Two jobs live here:
+ * WHAT CHANGED FROM THE PRE-0024 PLAYGROUND
+ *   - Each session is now a WORKER behind a Port. We spawn one Worker per FS,
+ *     wrap it in a session-PROXY (web/src/session-proxy.js, the SINGLE owner of
+ *     that Port — it receives GRANT_ACK/FRAME/TELEMETRY), and hand the proxies
+ *     to the coordinator (web/src/lockstep.js) via setSessions([...proxies]).
+ *   - The die renders from PULLED FRAMEs, not synchronous device reads: a rAF
+ *     loop calls focusedProxy.pull(sel) then viz.applyFrame(frame) for the ONE
+ *     focused session (ADR-0017 focus-is-view; unfocused sessions stream
+ *     nothing). There is ONE main-thread viz; focus switch = snap repaint.
+ *   - HUD + compare strip read TELEMETRY (proxy.telemetry) + coordinator
+ *     snapshots(), the ~250ms heartbeat, for EVERY session at once.
+ *   - The tape (console scrollback) is WORKER-OWNED and read via a journal
+ *     PULL (frame.journal / journalHead), not flipped by the coordinator.
+ *   - broadcast() ships SOURCE TEXT (a self-contained async-fn expression the
+ *     worker compiles), not a live closure — a closure can't cross the thread.
  *
- * 1. COMMAND COMPILER (ADR-0019). A console line — or a button's injected
- *    command — is compiled into ONE atomic `commandFn = async (api) => …` and
- *    handed to `coordinator.broadcast(commandFn, label)`. The coordinator runs
- *    it per-session against that session's own local, paced `api`; nothing in
- *    here ever touches a session directly once broadcast. The compiled
- *    function runs against a per-session SANDBOX (a `with`-scope backed by a
- *    Proxy) so an undeclared loop var (`for (i=0;…)`) stays local to that one
- *    invocation instead of leaking to a shared `window.i` two concurrent
- *    sessions would stomp.
- *
- * 2. COMPARISON UI (ADR-0018). The console *is* the tape — buttons inject
- *    their command rather than calling a function, so the tape is a complete,
- *    replayable record. Focus is a pure view property: the header scoreboard
- *    doubles as the focus switcher, and the die / tape / telemetry / legend
- *    all follow whichever session is focused. The workload engine (Run/Stop/
- *    Step, Race/Pace, SPEED, BG GC) stays a separate, visually distinct
- *    register from manual pokes, per ADR-0018.
- *
- * session.js / lockstep.js (ADR-0015/0016/0019) are the backend this file
- * consumes — not owned here. They're loaded dynamically (see loadBackend
- * below) so a test harness can swap in a stub that matches the documented
- * contract without touching the real modules or requiring real WASM.
+ * CROSS-LANE SHAPE NOTES (see LANE-REPORT.md — flagged, not silently worked
+ * around): lane W's session-worker.js FRAME payload uses different field names
+ * than protocol.js's frozen FrameMsg (heat.readHeat vs .read, shown.shown vs
+ * .pages, liveMap.map vs .classes) and puts command-lifecycle entries in the
+ * `events` ring where protocol.js specifies erase/reset viz-triggers.
+ * `adaptFrame()` below is the ISOLATED translation from the worker's actual
+ * shape to protocol.js's (and thus viz.js's) shape — delete it once the worker
+ * conforms.
  */
 import { createChurnModel, CHURN_CLASS } from './churn.js';
+import { createLockstep } from './lockstep.js';
+import { createSessionProxy } from './session-proxy.js';
+import { createViz } from './viz.js';
 import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
 
-// FS registry (ADR-0015): fsId → display name. All are live from page load
-// (ADR-0017 — "every active filesystem runs the same workload at once").
+// FS registry (ADR-0015): fsId → display name. All live from page load
+// (ADR-0017). Static per-FS caps (ADR-0011/0021) used for control-gating —
+// caps are not on the wire today (TELEMETRY carries none), so this table
+// stands in; see LANE-REPORT.
 const FS_REGISTRY = {
   fastffs: 'FASTFFS', littlefs: 'LittleFS', spiffs: 'SPIFFS', jesfs: 'JesFS',
-  fatfs: 'FAT+WL',   // ChaN FatFs over the ESP-IDF wear_levelling FTL — one logical FS entry
+  fatfs: 'FAT+WL',
+};
+const FS_CAPS = {
+  fastffs: FF_CAP_GC | FF_CAP_LIVE_MAP,
+  littlefs: FF_CAP_LIVE_MAP,
+  spiffs: FF_CAP_LIVE_MAP,
+  jesfs: FF_CAP_LIVE_MAP,
+  fatfs: FF_CAP_LIVE_MAP,
 };
 const DEFAULT_FS = 'fastffs';
 
-// Auto-workload churn config, scaled to the 256 KiB (4096×64) device. The model
-// drives the FS toward a steady-state live size instead of overfilling it.
+// Auto-workload churn config, scaled to the 256 KiB (4096×64) device.
 const CHURN_SEED = 0x00c0ffee;
-const CHURN_TARGET_LIVE = 96 * 1024;               // ~37.5% of the chip — leaves GC headroom
-const CHURN_TARGET_SLACK = 16 * 1024;              // tolerance above target before forced deletes
-const CHURN_TARGET_WRITTEN = 0xffffffff;           // effectively never "DONE" — run forever
-const CHURN_FORCE_LARGE_AFTER = 0xffffffff;        // disabled: never force a large write
+const CHURN_TARGET_LIVE = 96 * 1024;
+const CHURN_TARGET_SLACK = 16 * 1024;
+const CHURN_TARGET_WRITTEN = 0xffffffff;
+const CHURN_FORCE_LARGE_AFTER = 0xffffffff;
 const churnProfile = () => ({
   namePrefix: 'w',
   replacePercent: 25,
@@ -51,134 +63,84 @@ const churnProfile = () => ({
   classes: [
     { key: CHURN_CLASS.SMALL,  name: 'small',  weight: 800, minSize: 2 * 1024,  maxSize: 6 * 1024 },
     { key: CHURN_CLASS.MEDIUM, name: 'medium', weight: 150, minSize: 8 * 1024,  maxSize: 20 * 1024 },
-    // Over-capacity large writes are DISABLED (weight 0) for now: near the live
-    // ceiling they can ENOSPC, and the drivers diverge on what a failed write
-    // leaves behind (log-structured FSs fail atomically; FAT truncates), while
-    // the open-loop oracle (ADR-0010) must stay blind to per-FS outcomes.
-    // Revisit when the churn tuning knobs land (see ROADMAP).
     { key: CHURN_CLASS.LARGE,  name: 'large',  weight: 0,   minSize: 40 * 1024, maxSize: 40 * 1024 },
   ],
 });
 
 const $ = (id) => document.getElementById(id);
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const enc = new TextEncoder();
 const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)} ms` : `${(ms / 1000).toFixed(2)} s`; };
-// Pace efficiency: flash time per WORKLOAD op (sequence step), adaptive unit.
 const fmtPerOp = (ns, ops) => { if (!(ops > 0)) return '—'; const us = ns / 1000 / ops; return us < 1000 ? `${Math.round(us)} µs/op` : `${(us / 1000).toFixed(2)} ms/op`; };
-// Compact workload ops/sec for the Race throughput tag.
 const fmtRate = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)));
-function randomBytes(n) {
-  const a = new Uint8Array(n);
-  for (let i = 0; i < n; i += 65536) crypto.getRandomValues(a.subarray(i, Math.min(n, i + 65536)));
-  return a;
-}
-
-/* ------------------------------------------------------------------------ *
- * COMMAND COMPILER + SANDBOX (ADR-0019)
- *
- * makeSandbox(api) builds the `with`-scope: a Proxy whose `has` trap returns
- * TRUE for every name (so nothing ever falls through to the real global —
- * plain `with(api)` only traps names `api` already HAS, which is why an
- * undeclared `for (i=0;…)` leaks to `window.i` under a naive implementation).
- * `get` resolves api → per-invocation bag → globalThis, in that order — the
- * globalThis forward is mandatory, or Math/JSON/… would read as undefined.
- * `set` always writes an undeclared assignment into the bag, never `api`.
- *
- * `let`/`const`/`var` declared IN the compiled source stay real per-invocation
- * locals — that's native `with` behavior (an inner block-scoped declaration
- * shadows the with-object), not something this Proxy needs to implement.
- * ------------------------------------------------------------------------ */
-export function makeSandbox(api) {
-  const bag = Object.create(null);
-  return new Proxy(Object.create(null), {
-    has() { return true; },
-    get(_t, key) {
-      if (api && key in api) return api[key];
-      if (key in bag) return bag[key];
-      return Reflect.get(globalThis, key, globalThis);
-    },
-    set(_t, key, value) { bag[key] = value; return true; },
-  });
-}
-
-/**
- * Compile one console line (or an injected button command) into
- * `commandFn = async (api) => result`. Two forms are tried at COMPILE time
- * (a synchronous `new AsyncFunction(...)` call, so a syntax failure never
- * touches the sandbox): first as a single expression (`return (<src>)`, so a
- * bare query like `2+2` or `writeFile()` yields its value), falling back to
- * a plain statement block for multi-statement scripts (`let x = …; for (…) …`)
- * where wrapping in `return (…)` would be a syntax error. Both compile
- * `with(scope){ … }` — sloppy mode is required for `with` to be legal, which
- * is why this uses `new AsyncFunction`, never a strict/module compile.
- *
- * `augment(api)` optionally layers extra convenience bindings (console-only
- * helpers, not part of the backend's per-session api) over the real api
- * before it reaches the sandbox — see buildConsoleApi below. It defaults to
- * the identity so this function is directly testable against a bare stub api,
- * exactly per the ADR-0019 contract.
- */
-export function compileCommand(src, augment = (api) => api) {
-  let fn;
-  try { fn = new AsyncFunction('scope', 'with(scope){ return (\n' + src + '\n); }'); }
-  catch { fn = new AsyncFunction('scope', 'with(scope){\n' + src + '\n}'); }
-  return async (api) => fn(makeSandbox(augment(api)));
-}
-
-// Console-only convenience layered OVER the backend-provided local api (never
-// replacing anything the api already defines — `??` only fills gaps). These
-// aren't part of the ADR-0019 contract; they're this file's UX surface, kept
-// out of the pure compiler above so compileCommand alone stays testable
-// against a bare stub.
-function buildConsoleApi(api) {
-  // print sink: the backend's per-session api provides one (session.js prints to
-  // that session's tape); a bare stub api without a sink degrades to a no-op so
-  // help()/print() never throw. help() RENDERS the reference through print (its
-  // return value alone goes nowhere — the command runner discards it), which is
-  // why a typed `help()` previously echoed `> help()` but printed nothing.
-  const print = api.print ?? (() => {});
-  return {
-    ...api,
-    text: (s) => enc.encode(s),
-    randomBytes,
-    print,
-    help: api.help ?? (() => { print(HELP_TEXT); return HELP_TEXT; }),
-    format: api.format ?? (async () => { await api.fs?.format?.(); await api.fs?.mount?.(); }),
-    // The real per-session api (session.js buildLocalApi) provides gc(n) directly,
-    // paced/timed/journal-logged exactly like writeFile/readFile/etc — this
-    // fallback exists only so a bare test-stub api without gc still works.
-    gc: api.gc ?? (async (n = 1) => { let r; for (let i = 0; i < Math.max(1, n | 0); i++) r = await api.fs?.gcStep?.(); return r; }),
-    prep: api.prep ?? (() => {}),
-  };
-}
 
 const HELP_TEXT = [
-  'POKES  (friendly, all paced — prefix with await):',
-  '  writeFile(name?, size?)  ·  readFile(name?)  ·  deleteFile(name?)  → {name,size}   ·   stat(name) → {name,size}|null',
-  '    (no-arg read/delete lands on a tracked file; deleteFile also takes a prior result, e.g. deleteFile(last))',
-  '  ls(prefix?)   ·   getFiles(prefix?) → [{name,size}]   ·   mkdir(path)  (mkdir -p; no-op on flat FASTFFS)',
-  'RAW fs.  (await to pace to simulated flash time):',
-  '  fs.write(name, data)  ·  fs.read(name)  ·  fs.remove(name)  ·  fs.stat(name)  ·  fs.mkdir(name)  ·  fs.format()/mount()/unmount()',
-  "HANDLES:  const f = await fs.open(name, 'r'|'w')  → f.read(n), f.write(bytes), f.seek(off, 'set'|'cur'|'end'), f.stat(), f.close()",
-  '          const d = await fs.openDir(prefix?)  → d.read() → {name,size}|null, d.close()',
-  'HELPERS:  gc(n=1)  ·  format()  ·  randomBytes(n)  ·  text(s) → bytes  ·  print(x)  ·  help()',
-  'ONE LINE = ONE ATOMIC COMMAND (queued → live → done); an undeclared loop var (for (i=0;…)) stays local to the line.',
-  "example:  let f = await writeFile(); for (i=0;i<5;i++) await writeFile('n'+i, 64); await deleteFile(f)",
+  'POKES (friendly, all paced — prefix with await):',
+  '  writeFile(name?, size?) · readFile(name?) · deleteFile(name?) · stat(name)',
+  '  ls(prefix?) · getFiles(prefix?) · mkdir(path)',
+  'RAW:  fs.write/read/remove/exists/fsinfo · fs.format()/mount()/unmount()',
+  'HELPERS:  gc(n=1) · format() · randomBytes(n) · text(s) · print(x) · help()',
+  'ONE LINE = ONE ATOMIC COMMAND (queued → live → done).',
 ].join('\n');
 
 /* ------------------------------------------------------------------------ *
- * BACKEND SEAM — real session.js/lockstep.js by default; a test harness can
- * install globalThis.__flashvisBackend = { createSession, createLockstep }
- * BEFORE this module is imported to run the UI against a stub that matches
- * the ADR-0019 contract, without touching the (parallel-built) real backend
- * or requiring real WASM. Dynamic import keeps production loading identical
- * to a static import — this only adds the override hook.
+ * COMMAND SOURCE (ADR-0024 §4: commands ship as SOURCE)
+ *
+ * A console line is wrapped into a SELF-CONTAINED async-fn expression the
+ * worker compiles (session-worker.js: `(0, eval)("(" + source + ")")`, sloppy
+ * mode so `with` is legal). The sandbox that used to live in a main-thread
+ * Proxy (undeclared `for (i=0;…)` stays local; api → bag → globalThis
+ * resolution) is reconstructed IN the shipped source so it runs worker-side.
+ * The command echoes itself to the (worker-owned) tape via api.print, so every
+ * per-FS tape shows what was typed.
  * ------------------------------------------------------------------------ */
-async function loadBackend() {
-  if (globalThis.__flashvisBackend) return globalThis.__flashvisBackend;
-  const [sessionMod, lockstepMod] = await Promise.all([import('./session.js'), import('./lockstep.js')]);
-  return { createSession: sessionMod.createSession, createLockstep: lockstepMod.createLockstep };
+export function wrapCommandSource(userSrc) {
+  return `async (api) => {
+  const enc = new TextEncoder();
+  const bag = Object.create(null);
+  const helpers = {
+    text: (s) => enc.encode(s),
+    randomBytes: (n) => { const a = new Uint8Array(n); const c = globalThis.crypto; if (c && c.getRandomValues) for (let i = 0; i < n; i += 65536) c.getRandomValues(a.subarray(i, Math.min(n, i + 65536))); return a; },
+    format: async () => { await api.fs.format(); await api.fs.mount(); },
+    help: () => { api.print(${JSON.stringify(HELP_TEXT)}); return ${JSON.stringify(HELP_TEXT)}; },
+  };
+  const scope = new Proxy(Object.create(null), {
+    has: () => true,
+    get: (_t, k) => (k in api ? api[k] : k in helpers ? helpers[k] : k in bag ? bag[k] : Reflect.get(globalThis, k, globalThis)),
+    set: (_t, k, v) => { bag[k] = v; return true; },
+  });
+  api.print(${JSON.stringify('› ' + userSrc)});
+  with (scope) {
+${userSrc}
+  }
+}`;
+}
+
+/* ------------------------------------------------------------------------ *
+ * FRAME ADAPTER — worker's actual FRAME shape → protocol.js/viz.js shape.
+ * Isolated here so viz.js stays conformant to the frozen protocol; delete
+ * once lane W's worker emits protocol field names. (Erase SWEEP inference is
+ * intentionally left out for now — the die renders correctly from `shown`
+ * regardless, and the worker doesn't yet emit erase EventEntry triggers;
+ * see LANE-REPORT.)
+ * ------------------------------------------------------------------------ */
+function adaptFrame(f) {
+  if (!f) return null;
+  const out = {};
+  if (f.heat) out.heat = { read: f.heat.read ?? f.heat.readHeat, prog: f.heat.prog ?? f.heat.progHeat };
+  if (f.shown) out.shown = { pages: f.shown.pages ?? f.shown.shown, wear: f.shown.wear };
+  if (f.liveMap) out.liveMap = { version: f.liveMap.version, classes: f.liveMap.classes ?? f.liveMap.map };
+  return out;
+}
+
+/* ------------------------------------------------------------------------ *
+ * WORKER CONNECTION SEAM — production spawns a real Worker; a headless test
+ * installs globalThis.__flashvisWorkerConnect to wire the mock transport +
+ * an in-realm worker host with a stub runner (no real WASM). Returns
+ * `{ port, terminate }`; the proxy owns port.onmessage.
+ * ------------------------------------------------------------------------ */
+function connectWorker(fsId, meta) {
+  if (globalThis.__flashvisWorkerConnect) return globalThis.__flashvisWorkerConnect(fsId, meta);
+  const worker = new Worker(new URL('./session-worker.js', import.meta.url), { type: 'module' });
+  return { port: worker, terminate: () => worker.terminate() };
 }
 
 boot().catch((e) => {
@@ -188,8 +150,6 @@ boot().catch((e) => {
 });
 
 async function boot() {
-  const { createSession, createLockstep } = await loadBackend();
-
   const geometry = { sectorSize: 4096, sectorCount: 64, pageSize: 256, granule: 1 };
 
   const churn = createChurnModel({
@@ -201,137 +161,89 @@ async function boot() {
     profile: churnProfile(),
     slotCount: 256,
   });
-  // The coordinator (ADR-0016/0019) owns the ONE canonical command sequence —
-  // sessions never decide what runs next, they only execute what they're handed.
   const coordinator = createLockstep({ churn });
 
-  // Participating sessions (fsId → session) and which one is FOCUSED. Focus is
-  // a pure view property (ADR-0017/0019): it changes nothing about state and
-  // is never itself logged.
+  // Participating sessions (fsId → { proxy, terminate }) and which is FOCUSED.
   const sessions = new Map();
-  const journalUnsub = new Map();
   let focusedFsId = DEFAULT_FS;
-  let activeSession = null;
-  let tapeNodes = new Map();   // journal entry id → tape DOM node, for the FOCUSED session only
 
-  async function mkSession(fsId) {
-    const s = await createSession(fsId, {
-      geometry, container: $('dieStack'), name: FS_REGISTRY[fsId],
-    });
-    journalUnsub.set(s, s.onJournal((change) => onSessionJournal(s, change)));
-    return s;
-  }
+  // ONE main-thread renderer; re-pointed (snap repaint) on focus switch.
+  const viz = createViz(geometry);
+  const dieEl = document.createElement('div');
+  dieEl.className = 'die';
+  $('dieStack').appendChild(dieEl);
+  viz.mountDie(dieEl);
+  viz.attachInspector($('insp'));
+
+  // Focused-session pull cursors (ADR-0024 §7). Reset on focus switch / epoch bump.
+  let liveMapSince = 0, journalSince = 0, eventsSince = 0, attachedFresh = true;
+  const tapeSeen = new Set();
 
   $('specLive').textContent = `loading ${Object.values(FS_REGISTRY).join(' + ')} (WASM)…`;
-  for (const fsId of Object.keys(FS_REGISTRY)) sessions.set(fsId, await mkSession(fsId));
-  coordinator.setSessions([...sessions.values()]);
-  // Reset run state WITHOUT pre-formatting ({ format: false }): the boot log
-  // broadcast below includes format(), which is the ONE real format each chip
-  // gets — visible, journaled, true cost on the tape (ADR-0018). The old
-  // silent pre-format here ran a full second device format ahead of it (2× the
-  // erase sweep at boot — SPIFFS swept all 64 sectors twice). The short
-  // not-yet-formatted window before that command executes is safe: every
-  // driver returns blank-chip fsinfo/liveMap values, and the format command
-  // precedes any churn in the canonical sequence.
-  coordinator.reset({ format: false });
 
-  // ---- command compiler → broadcast: the ONE path console input, boot
-  // logging, and every poke button all go through (ADR-0018/0019). ----
-  function injectCommand(src) {
-    const commandFn = compileCommand(src, buildConsoleApi);
-    return coordinator.broadcast(commandFn, src);
+  // ---- spawn one worker per FS, wrap in a proxy ----
+  for (const fsId of Object.keys(FS_REGISTRY)) {
+    const meta = { fsId, name: FS_REGISTRY[fsId], geometry };
+    const { port, terminate } = connectWorker(fsId, meta);
+    const proxy = createSessionProxy(port, meta);
+    sessions.set(fsId, { proxy, terminate });
+  }
+  const proxyOf = (fsId) => sessions.get(fsId).proxy;
+  const proxies = [...sessions.values()].map((s) => s.proxy);
+
+  // setSessions init()'s every worker (INIT builds a fresh chip at epoch 0).
+  coordinator.setSessions(proxies);
+
+  // ---- command source → broadcast (the ONE path console/boot/buttons take) ----
+  function injectCommand(userSrc) {
+    return coordinator.broadcast(wrapCommandSource(userSrc), userSrc);
   }
 
   // ---- focus switch: die/tape/telemetry/legend follow one session; a pure
-  // view op, never logged, never touches state (ADR-0017/0018). ----
+  // view op (ADR-0017), never logged, never touches state. Re-attach fresh so
+  // the next pull is a full-state snap repaint (§7). ----
   function setFocus(fsId) {
-    if (activeSession) activeSession.attachInspector(null);
     focusedFsId = fsId;
-    activeSession = sessions.get(fsId);
-    for (const [id, s] of sessions) s.setActive(id === fsId);
-    activeSession.attachInspector($('insp'));
+    viz.clear();
+    liveMapSince = 0; journalSince = 0; eventsSince = 0; attachedFresh = true;
+    tapeSeen.clear();
+    $('tape').innerHTML = '';
     $('insp').innerHTML = '<span class="hint">Click a sector to inspect it.</span>';
-    applyCapsGating(activeSession.caps);
-    renderLegend(activeSession);
-    renderTapeFull();
-    renderGap();
+    applyCapsGating(FS_CAPS[fsId] ?? 0);
+    renderLegend(fsId);
     renderFsSet();
     $('telName').textContent = FS_REGISTRY[fsId];
   }
 
-  // ---- tape (ADR-0018): the focused session's journal, queued/live/done. ----
-  function tapeText(e) {
-    const icon = e.state === 'queued' ? '⧗ ' : e.state === 'live' ? '▸ ' : '';
-    const echo = e.cls === 'in' ? '› ' : '';
-    return icon + echo + e.text;
+  // ---- tape: worker-owned journal, read via journal PULL (frame.journal) ----
+  function tapeClass(e) {
+    if (e.kind === 'gc') return 'out gc';
+    if (e.kind === 'done' && /error/i.test(e.text || '')) return 'err';
+    if (typeof e.text === 'string' && e.text.startsWith('›')) return 'in';
+    return 'out';
   }
-  // GC lines render gray — "there, but in the background" (ADR-0023). GC is not a
-  // workload op, so its tape lines are visually demoted while still carrying their
-  // flash-time cost (summing every line's time — gray ones included — still
-  // reconstructs the flash-time total). The `gc` class is carried STRUCTURALLY on
-  // the journal entry: gc()/runGcStep() tag their op with cls 'gc' at the source
-  // (session.js), so it flows straight through e.cls — no text matching, and a
-  // file named `gc(...)` can never be mistaken for a GC op.
-  function tapeLine(e) {
-    const el = document.createElement('div');
-    el.className = 'line ' + (e.cls || 'out');
-    el.dataset.state = e.state || 'done';
-    el.dataset.jid = e.id;          // stamp the journal id so the DOM-cap eviction can drop this node's tapeNodes entry
-    el.textContent = tapeText(e);
-    tapeNodes.set(e.id, el);
-    return el;
-  }
-  function renderTapeFull() {
+  function appendTapeEntry(e) {
+    // internal command lifecycle markers carry text 'command' — not user-facing.
+    if ((e.kind === 'started' || e.kind === 'done') && e.text === 'command') return;
     const out = $('tape');
-    out.innerHTML = '';
-    tapeNodes = new Map();
-    const entries = (activeSession.journal || []).slice(-400);
-    for (const e of entries) out.appendChild(tapeLine(e));
+    const el = document.createElement('div');
+    el.className = 'line ' + tapeClass(e);
+    el.dataset.jid = e.id;
+    el.textContent = e.text;
+    out.appendChild(el);
+    while (out.children.length > 400) out.removeChild(out.firstChild);
     out.scrollTop = out.scrollHeight;
   }
-  function onSessionJournal(session, change) {
-    if (session !== activeSession) return;
-    const out = $('tape');
-    if (change.type === 'clear') {
-      renderTapeFull();   // session.journal is now empty — this just paints the empty tape
-    } else if (change.type === 'append') {
-      out.appendChild(tapeLine(change.entry));
-      // Cap the visible tape at 400 lines AND drop each evicted node's tapeNodes
-      // entry, so the Map stays bounded like the DOM instead of retaining every
-      // line ever appended as a detached node (the auto-workload op-log leak).
-      while (out.children.length > 400) {
-        const gone = out.removeChild(out.firstChild);
-        tapeNodes.delete(Number(gone.dataset.jid));
-      }
-      out.scrollTop = out.scrollHeight;
-    } else {
-      const el = tapeNodes.get(change.entry.id);
-      if (el) { el.dataset.state = change.entry.state; el.textContent = tapeText(change.entry); }
-      else renderTapeFull();   // entry predates this focus session — fall back to a full repaint
+  function ingestJournal(journal) {
+    if (!journal) return;
+    for (const e of journal) {
+      if (tapeSeen.has(e.id)) continue;
+      tapeSeen.add(e.id);
+      appendTapeEntry(e);
     }
   }
 
-  // ---- present-gap header + Catch-up (ADR-0018/0017): driven off `behind`
-  // (genuine Race divergence / Race→Pace catch-up) — NEVER off gap>0 alone,
-  // so ordinary Pace lockstep (gap normally 0, and even a transient non-zero
-  // gap that isn't real lag) never shows it (fix: was showing on gap>0). ----
-  function renderGap() {
-    const gapEl = $('tapeGap');
-    const p = coordinator.pendingFor(activeSession);
-    if (!p || !p.behind) { gapEl.classList.add('hidden'); return; }
-    const snaps = coordinator.snapshots();
-    let leader = null;
-    for (const s of snaps) if (!leader || s.stepCursor > leader.stepCursor) leader = s;
-    const leadTxt = leader && leader.fsId !== activeSession.fsId ? ` · ${leader.name} leads` : '';
-    $('tapeGapText').textContent = `${p.gap} behind present${leadTxt}`;
-    gapEl.classList.remove('hidden');
-  }
-  $('btnCatchup').addEventListener('click', () => { coordinator.setMode('pace'); markMode('pace'); });
-
-  // ---- the standings rail (A1/ADR-0018): per-FS standings AND the focus
-  // control, one `.fs` card per participating FS (all registered, always —
-  // A2), built into the full-width #fsSet grid under the title sentence;
-  // click a card to focus it.
+  // ---- the standings rail (ADR-0018): one .fs card per FS, click to focus ----
   function fsCard(fsId) {
     const btn = document.createElement('button');
     btn.className = 'fs'; btn.id = 'fsCard-' + fsId; btn.dataset.fs = fsId;
@@ -343,44 +255,21 @@ async function boot() {
     btn.addEventListener('click', () => { if (sessions.has(fsId) && fsId !== focusedFsId) setFocus(fsId); });
     return btn;
   }
-  // Tracked explicitly (not inferred from a getElementById probe) — a card is
-  // built once per participating fsId and reused on every subsequent render.
   const fsSetBuilt = new Set();
   function renderFsSet() {
     const wrap = $('fsSet');
     const snaps = coordinator.snapshots();
     const mode = coordinator.mode;
-    // Per-FS "goodness": higher = better = fuller bar = leader color, in BOTH
-    // modes — only the underlying quantity flips. Race = workload throughput
-    // (ops/sec). Pace = efficiency (workload ops per unit flash-time, the inverse
-    // of ms/op): in lockstep Pace every FS shares the same ops/sec, so only the
-    // per-op flash cost separates them, and less time per op reads as the
-    // fuller/leading bar.
     const goodOf = (s) => (mode === 'race' ? (s.opsPerSec || 0) : (s.simNs > 0 ? s.fileOpCount / s.simNs : 0));
     const leaderGood = snaps.reduce((m, s) => Math.max(m, goodOf(s)), 0);
     for (const snap of snaps) {
-      if (!fsSetBuilt.has(snap.fsId)) {
-        wrap.appendChild(fsCard(snap.fsId));
-        fsSetBuilt.add(snap.fsId);
-      }
+      if (!fsSetBuilt.has(snap.fsId)) { wrap.appendChild(fsCard(snap.fsId)); fsSetBuilt.add(snap.fsId); }
       const card = $('fsCard-' + snap.fsId);
       card.classList.toggle('on', snap.fsId === focusedFsId);
       card.setAttribute('aria-pressed', String(snap.fsId === focusedFsId));
       const good = goodOf(snap);
       card.classList.toggle('leader', leaderGood > 0 && good >= leaderGood);
-      // Parked-waiting indicator: the card's `.waiting` class is OWNED by the
-      // per-frame hold loop (below the intervals), which debounces the unified
-      // waitStates() signal — never toggled from this 250 ms telemetry tick,
-      // or the two cadences would fight. Only the mode-appropriate pin LABEL
-      // is kept fresh here.
       $('fsHold-' + snap.fsId).textContent = mode === 'race' ? '◷ waiting' : '◷ holding';
-      // Mode-aware vital: RACE = workload ops done (more wins) = fileOpCount, the
-      // high-level FILE ops this FS got through in the shared flash-time budget
-      // (ADR-0023 — a whole console loop counts each inner op, and GC no-ops never
-      // count); PACE = flash time (less wins). The bar rates goodness (throughput /
-      // efficiency); the tag carries the live number — ops/sec in Race, ms/op in
-      // Pace. Flash ops (reads/programs/erases) are the COST view (the die + Flash
-      // Stats), deliberately not the "ops" the compare modes measure.
       $('fsV-' + snap.fsId).textContent = mode === 'race' ? String(snap.fileOpCount) : fmtTime(snap.simNs);
       $('fsL-' + snap.fsId).textContent = mode === 'race' ? 'ops done' : 'flash time';
       $('fsBar-' + snap.fsId).style.width = (leaderGood > 0 ? Math.round((good / leaderGood) * 100) : 0) + '%';
@@ -388,32 +277,26 @@ async function boot() {
     }
   }
 
-  // ---- die-adjacent legend chip-row (ADR-0018): per-FS class descriptor —
-  // shared baseline plus per-driver extras (below), without reworking the
-  // row's structure. ----
-  // Every color the die can display, in TWO groups. STATES are matte FILLS (a
-  // cell's stored condition). OPS are GLOWS (marked `glow`) the die rides over a
-  // cell, so their swatch renders as a hollow ring + halo, no fill; the group
-  // includes the read+program MIX (--mix, the overlap color the dual-channel heat
-  // renders when a cell is read and programmed at once).
-  // Per-FS extra STATE classes (the descriptor's per-driver hook): fsId → chips
-  // appended to the shared baseline when that FS is focused. FAT+WL declares
-  // class 4 — the metadata the wear_levelling FTL itself WRITES (config/state
-  // sectors only; the rotating dummy spare is not class 4, spec/ui.md) — shown
-  // as a SHADE of the metadata color (a layer of metadata, not a new kind).
-  // Its class 5 "slack" (allocated but carrying no data) READS as erased per
-  // spec/ui.md — fill suppressed by the [data-live="slack"] CSS, no legend
-  // chip, no metadata counting: unused pages in a file's clusters read as
-  // erased. The one wording nuance: on FAT+WL the erased LOOK also covers
-  // those slack pages (which are not 0xFF), so the Erased chip's explainer
-  // says so there — everywhere else it keeps the plain physical truth.
+  // ---- present-gap header (ADR-0017/0018), off pendingFor().behind ----
+  function renderGap() {
+    const gapEl = $('tapeGap');
+    const p = coordinator.pendingFor(proxyOf(focusedFsId));
+    if (!p || !p.behind) { gapEl.classList.add('hidden'); return; }
+    const snaps = coordinator.snapshots();
+    let leader = null;
+    for (const s of snaps) if (!leader || s.stepCursor > leader.stepCursor) leader = s;
+    const leadTxt = leader && leader.fsId !== focusedFsId ? ` · ${leader.name} leads` : '';
+    $('tapeGapText').textContent = `${p.gap} behind present${leadTxt}`;
+    gapEl.classList.remove('hidden');
+  }
+  $('btnCatchup').addEventListener('click', () => { coordinator.setMode('pace'); markMode('pace'); });
+
+  // ---- die-adjacent legend ----
   const FS_EXTRA_STATES = {
-    fatfs: [
-      { cls: 'wl', word: 'WL', title: "metadata the FTL itself writes (config/state) — a shade of metadata" },
-    ],
+    fatfs: [{ cls: 'wl', word: 'WL', title: 'metadata the FTL itself writes (config/state) — a shade of metadata' }],
   };
-  function legendFor(session) {
-    const erasedTitle = session.fsId === 'fatfs'
+  function legendFor(fsId) {
+    const erasedTitle = fsId === 'fatfs'
       ? '0xFF, nothing written — or slack: allocated but carrying no data'
       : '0xFF, nothing written';
     return [
@@ -422,7 +305,7 @@ async function boot() {
         { cls: 'prog', word: 'Live', title: 'fill = bytes programmed' },
         { cls: 'obsolete', word: 'Obsolete', title: 'reclaimable garbage' },
         { cls: 'index', word: 'Metadata', title: 'index + records' },
-        ...(FS_EXTRA_STATES[session.fsId] ?? []),
+        ...(FS_EXTRA_STATES[fsId] ?? []),
       ] },
       { label: 'Ops', items: [
         { cls: 'read', word: 'Reading', title: 'XIP, no wear', glow: true },
@@ -432,10 +315,10 @@ async function boot() {
       ] },
     ];
   }
-  function renderLegend(session) {
+  function renderLegend(fsId) {
     const host = $('legendChips');
     host.innerHTML = '';
-    for (const group of legendFor(session)) {
+    for (const group of legendFor(fsId)) {
       const row = document.createElement('div');
       row.className = 'legend-row'; row.setAttribute('role', 'list'); row.setAttribute('aria-label', group.label);
       const lbl = document.createElement('span');
@@ -451,11 +334,8 @@ async function boot() {
     }
   }
 
-  // ---- static device geometry line (A5): replaces the old dynamic
-  // .stagefoot; built once from the same geometry #specGeo is sourced from
-  // (the dynamic stats that lived here moved into Flash Stats — A6). ----
   function renderGeo() {
-    const kb = (activeSession.device.size / 1024) | 0;
+    const kb = (geometry.sectorSize * geometry.sectorCount / 1024) | 0;
     const pagesPerSector = geometry.sectorSize / geometry.pageSize;
     $('geoLine').innerHTML =
       `<span><b>${kb} KB</b> NOR</span>` +
@@ -464,87 +344,102 @@ async function boot() {
       `<span><b>${geometry.pageSize} B</b> program page</span>`;
   }
 
+  // ---- HUD (Flash Stats) from focused TELEMETRY + focused FRAME metrics.
+  // NB (LANE-REPORT): device erase/read counts and programBytes/hostBytes
+  // (write-amp) are NOT emitted by the worker today, so those fields show
+  // '—'. ----
+  function refreshHUD() {
+    const t = proxyOf(focusedFsId).telemetry;
+    const m = viz.metrics();
+    const lc = t.livenessCounts || { live: 0, obsolete: 0, metadata: 0 };
+    const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
+    set('sAmp', t.wa != null ? t.wa.toFixed(1) + '×' : '—');
+    set('fAmp', t.wa != null ? t.wa.toFixed(1) + '×' : '—');
+    set('fProg', Math.round(100 * m.displayedBytes / m.capacityBytes) + '%');
+    set('fFree', m.erasedPages);
+    set('sFiles', t.fsinfo ? t.fsinfo.files : 0);
+    set('sBytes', t.fsinfo ? (t.fsinfo.bytes / 1024).toFixed(1) + ' KB' : '0.0 KB');
+    set('fSim', fmtTime(t.simNs || 0));
+    const programmed = lc.live + lc.obsolete + lc.metadata;
+    set('sObs', programmed ? Math.round(100 * lc.obsolete / programmed) + '%' : '0%');
+    const uProg = $('uProg'); if (uProg) uProg.style.width = (100 * lc.live / viz.npages) + '%';
+    const uObs = $('uObs'); if (uObs) uObs.style.width = (100 * lc.obsolete / viz.npages) + '%';
+    const specLive = $('specLive');
+    if (specLive) specLive.textContent = `mounted · ${t.fsinfo ? t.fsinfo.files : 0} files · ${fmtTime(t.simNs || 0)} of flash time`;
+  }
+
   setFocus(DEFAULT_FS);
-  $('specGeo').textContent = `${(activeSession.device.size / 1024) | 0} KB · ${geometry.sectorCount}×${geometry.sectorSize / 1024} KB · ESP32-S3 timing`;
+  $('specGeo').textContent = `${(geometry.sectorSize * geometry.sectorCount / 1024) | 0} KB · ${geometry.sectorCount}×${geometry.sectorSize / 1024} KB · ESP32-S3 timing`;
   $('specLive').textContent = 'formatted + mounted — empty and paused';
   renderGeo();
 
-  // ---- FIX: boot logs (ADR-0018) — run help() then format() as BROADCAST
-  // commands (not a one-off print to a single shared log) so every
-  // participating session's OWN tape shows both, not just the focused one. ----
-  //
-  // ---- Fast-forward the page-load boot (UI spec: the load-triggered reset/
-  // boot animation and delay must not stand between load and a usable page).
-  // Turn on PREP mode (ADR-0014) on every session before injecting the boot
-  // log: ops still execute for real and still log their true simulated cost
-  // (ADR-0018's tape stays a journal of truth — asserted by
-  // scripts/real-smoke.mjs), but run full-speed with no animation and no
-  // await-pacing, so the die lands on its settled post-format state with zero
-  // frames of blur instead of visibly sweeping through it. This is
-  // deliberately SCOPED to the page-load boot only — the header Reset button
-  // (below) never touches prep, so its replayed format() keeps its full
-  // animated sweep (and the holding/waiting showcase that depends on it).
-  //
-  // Turned back off PER SESSION, the instant that session's own format()
-  // command reaches quiescence ('done' on its tape line) — not gated on every
-  // session finishing, and that's fine: a command a user types mid-boot is
-  // appended AFTER format() in the canonical sequence, so per-session cursor
-  // order alone guarantees it can only run on a given session once THAT
-  // session's format() (and so its prep-off) has already happened. No
-  // cross-session coordination needed.
-  for (const s of sessions.values()) s.setPrep(true);
+  // ---- boot log: the ONE real format ships as a broadcast command AFTER the
+  // workers are init'd (ADR-0024 §8 — no format wire field). help() first so
+  // every per-FS tape shows the reference; both drain even while paused
+  // (ADR-0020: Pause gates the churn GENERATOR only). ----
   injectCommand('help()');
-  const { entry: bootFormat } = injectCommand('format()');
-  for (const s of sessions.values()) {
-    const line = bootFormat.journalEntries.get(s);
-    const unsub = s.onJournal((change) => {
-      if (change.type === 'update' && change.entry === line && line.state === 'done') {
-        s.setPrep(false);
-        unsub();
-      }
+  injectCommand('format()');
+
+  // ---- the render loop: pull + paint the FOCUSED session once per rAF
+  // (ADR-0024 §4/§7). Unfocused sessions stream nothing. ----
+  const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(() => fn(Date.now()), 16);
+  function renderTick() {
+    const proxy = proxyOf(focusedFsId);
+    // Paint whatever the LAST pull returned (one frame of wire latency), then
+    // issue the next pull.
+    const f = proxy.frame;
+    if (f) {
+      viz.applyFrame(adaptFrame(f));
+      if (f.liveMap && f.liveMap.version != null) liveMapSince = f.liveMap.version;
+      if (f.journalHead != null) journalSince = f.journalHead;
+      if (f.eventHead != null) eventsSince = f.eventHead;
+      ingestJournal(f.journal);
+    }
+    proxy.pull({
+      heat: true, wear: true,
+      liveMap: { since: liveMapSince },
+      journal: attachedFresh ? { since: 0, limit: 400, newest: true } : { since: journalSince, limit: 400 },
+      events: attachedFresh ? { since: 0, limit: 400 } : { since: eventsSince, limit: 400 },
     });
+    attachedFresh = false;
+    raf(renderTick);
   }
+  raf(renderTick);
 
-  setInterval(() => activeSession.refreshHUD($), 160);
-  setInterval(() => activeSession.refreshLiveness($), 250);
-  setInterval(() => { renderFsSet(); renderGap(); }, 250);
+  // ---- HUD + compare strip on the ~250ms cadence (telemetry heartbeat) ----
+  setInterval(() => { refreshHUD(); renderFsSet(); renderGap(); }, 250);
 
-  // ---- HOLD indicators — every FS card's pin AND the CS (pin 1) status dot:
-  // one per-frame fast path over coordinator.waitStates(), the unified holding
-  // signal (lockstep holdingNow — an FS is holding iff it is IDLE because the
-  // others must catch up; an FS still executing or draining its animation
-  // never flags). A pin SHOWS only after the raw signal has held continuously
-  // for HOLD_SHOW_MS — a sub-frame flicker never paints — and CLEARS instantly
-  // the moment the signal drops. Runs per animation frame (cheap: waitStates
-  // does no fsinfo/liveness walk), never on the 250 ms telemetry tick, so the
-  // display tracks the sim in real time. The CS pin mirrors whichever FS is
-  // FOCUSED, re-read every frame since focus can change under it. ----
-  // Test seam (same idea as __flashvisBackend): harnesses set
-  // globalThis.__flashvisHoldShowMs = 0 so fake-clock polls stay deterministic
-  // instead of racing a real-time debounce.
+  // ---- HOLD pins (spec/ui.md): the CS pin/status dot is RAW real-time blinky;
+  // the fs-card "holding" label is debounced ~300ms. Consume the coordinator's
+  // signal (snapshots().csActive / .holding once lane C lands them); until
+  // then, waitStates() is the raw signal and we debounce it here. ----
   const HOLD_SHOW_MS = globalThis.__flashvisHoldShowMs ?? 300;
-  const holdSince = new Map();   // fsId -> performance.now() when the raw signal turned true
-  const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+  const holdSince = new Map();
   const pinCS = $('pinCS');
   (function holdTick() {
-    const now = performance.now();
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     const ws = coordinator.waitStates();
+    const snaps = coordinator.snapshots();
+    const csActiveOf = (fsId) => {
+      const s = snaps.find((x) => x.fsId === fsId);
+      return s && s.csActive != null ? s.csActive : !ws[fsId];   // raw: active iff not waiting
+    };
     for (const fsId of Object.keys(ws)) {
+      const raw = ws[fsId];
       let show = false;
-      if (ws[fsId]) {
-        if (!holdSince.has(fsId)) holdSince.set(fsId, now);
-        show = now - holdSince.get(fsId) >= HOLD_SHOW_MS;
-      } else holdSince.delete(fsId);
+      if (raw) { if (!holdSince.has(fsId)) holdSince.set(fsId, now); show = now - holdSince.get(fsId) >= HOLD_SHOW_MS; }
+      else holdSince.delete(fsId);
       $('fsCard-' + fsId)?.classList.toggle('waiting', show);
       if (pinCS && fsId === focusedFsId) {
-        pinCS.classList.toggle('cs-active', !show);
-        pinCS.classList.toggle('cs-paused', show);
+        const active = csActiveOf(fsId);       // RAW per-frame, not debounced (spec/ui.md)
+        pinCS.classList.toggle('cs-active', active);
+        pinCS.classList.toggle('cs-paused', !active);
       }
     }
     raf(holdTick);
   })();
 
-  // ---- Run/Pause, Step: act on the WHOLE participating set via the coordinator. ----
+  // ---- Run/Pause, Step ----
   const setRunning = (v) => {
     if (v) coordinator.start(); else coordinator.stop();
     $('runLabel').textContent = v ? 'Pause' : 'Run';
@@ -552,32 +447,29 @@ async function boot() {
   };
   setRunning(false);
 
-  // ---- Race / Pace mode: an inline WHEEL (A1a), not a segmented control —
-  // the active phrase sits on the sentence baseline, the other mode peeks
-  // below (faded, tilted back); click rotates the peek up. Canonical
-  // pace/race stay under the hood; wired straight to coordinator.setMode. ----
+  // ---- Race / Pace wheel ----
   const modeWheel = $('modeWheel');
   const modeOpts = { pace: $('modeOpt-pace'), race: $('modeOpt-race') };
   const markMode = (m) => {
     for (const [k, el] of Object.entries(modeOpts)) {
+      if (!el) continue;
       el.classList.toggle('active', k === m);
       el.classList.toggle('peek', k !== m);
     }
-    modeWheel.dataset.mode = m;
-    modeWheel.setAttribute('aria-checked', String(m === 'race'));
-    modeWheel.setAttribute('aria-label', `comparing ${m === 'race' ? 'most ops in equal time' : 'least time for equal ops'}; click to switch`);
+    if (modeWheel) {
+      modeWheel.dataset.mode = m;
+      modeWheel.setAttribute('aria-checked', String(m === 'race'));
+      modeWheel.setAttribute('aria-label', `comparing ${m === 'race' ? 'most ops in equal time' : 'least time for equal ops'}; click to switch`);
+    }
     renderFsSet();
   };
   markMode(coordinator.mode);
-  modeWheel.addEventListener('click', () => {
+  modeWheel?.addEventListener('click', () => {
     const m = coordinator.mode === 'race' ? 'pace' : 'race';
     coordinator.setMode(m); markMode(m); renderGap();
   });
 
-  // ---- controls: Run/Step direct; every poke button INJECTS a console
-  // command (ADR-0018 — "a button that can't be expressed as a console
-  // command has no home"), through the exact same compile+broadcast path
-  // typing at the prompt uses. ----
+  // ---- controls: buttons INJECT console commands ----
   $('btnRun').addEventListener('click', () => setRunning(!coordinator.running));
   $('btnStep').addEventListener('click', () => coordinator.step());
   $('btnWrite').addEventListener('click', () => injectCommand('writeFile()'));
@@ -587,39 +479,18 @@ async function boot() {
   $('btnGC').addEventListener('click', () => injectCommand('gc()'));
   $('btnFormat').addEventListener('click', () => injectCommand('format()'));
 
-  // ---- Reset (header): return the WHOLE sim to its just-booted state without
-  // a page reload — stop, wipe the coordinator's sequence/cursors/clock (the
-  // SAME { format: false } reset boot() makes), clear each session's tape,
-  // then replay the boot log (help()/format()) exactly like boot() does so the
-  // tape reads identically to a fresh load. The replayed format() command is
-  // the ONE real format each chip gets (no silent pre-format — the
-  // double-format bug); its runner.format() → device.reset() clears die
-  // glow/fills/wear and the flash-time/op stats for free, since viz.js treats
-  // the 'reset' event as a full repaint.
-  //
-  // Reset's replay is NEVER fast-forwarded — only page-load boot is (see
-  // above) — so it keeps the full animated format sweep and the holding/
-  // waiting indicators that go with it. `setPrep(false)` here is a belt-and-
-  // suspenders guard, not the normal path: prep is already off by the time a
-  // human can click anything (boot's own per-session prep-off fires at that
-  // session's format quiescence, well before this is reachable), but a Reset
-  // landing in the sub-frame window before that fire would otherwise replay
-  // its format with prep still on for that one session. ----
+  // ---- Reset (header): bump epoch (workers rebuild a fresh chip), then replay
+  // the boot log. Never switches race/pace mode (spec/ui.md). ----
   $('btnReset')?.addEventListener('click', () => {
     setRunning(false);
-    for (const s of sessions.values()) s.setPrep(false);
-    coordinator.reset({ format: false });
-    for (const s of sessions.values()) s.clearJournal();
-    renderFsSet();
-    renderGap();
-    activeSession.refreshHUD($);
-    activeSession.refreshLiveness($);
+    coordinator.reset();
+    setFocus(focusedFsId);   // re-attach so the tape/die snap back to the fresh chip
     $('specLive').textContent = 'formatted + mounted — empty and paused';
     injectCommand('help()');
     injectCommand('format()');
   });
 
-  // slider 0..100 → sim-ns per real-ms on a log scale. Real flash time = 1e6.
+  // slider 0..100 → sim-ns per real-ms (log scale). Real flash time = 1e6.
   function applySpeed(v) {
     let scale, label;
     if (v >= 100) { scale = Infinity; label = 'max · no delay'; }
@@ -641,20 +512,15 @@ async function boot() {
   applyGc(+$('gc').value);
   $('gc').addEventListener('input', (e) => applyGc(+e.target.value));
 
-  $('heat').addEventListener('change', (e) => { for (const s of sessions.values()) s.setHeatmap(e.target.checked); });
+  // heat-map toggle: a pure view (the focused die's wear overlay). It reads the
+  // wear the FRAME already carries, so it just flips the viz overlay flag.
+  $('heat').addEventListener('change', (e) => { viz.setHeatmap(e.target.checked, dieEl); });
 
-  // ---- console input: one shared prompt; Enter compiles + broadcasts the
-  // whole line as ONE atomic command (ADR-0019). History persisted like before. ----
+  // ---- console input ----
   const HKEY = 'flashvis.console.history', HMAX = 20;
   const store = typeof window !== 'undefined' ? window.localStorage : null;
 
-  // ---- palette switcher (color themes): flip [data-theme] on :root and every
-  // session re-sources its op-glow + erase colors, so the LIVE heat recolors too
-  // (not just the static state fills). The legend chips read the theme vars
-  // directly, so they re-skin for free. The switcher is a radiogroup of one chip
-  // per theme; each chip previews ITS OWN five colors (read/write/mix/erase/live)
-  // via the .tprev-* CSS, so a palette is visible before you pick it. The choice
-  // is persisted, so a reload keeps the chosen palette. ----
+  // ---- palette switcher ----
   const THEME_KEY = 'flashvis.theme';
   const THEME_LIST = [
     { id: 'aurora', name: 'Aurora Signal' },
@@ -665,7 +531,7 @@ async function boot() {
     { id: 'blueprint', name: 'Cyanotype Blueprint' },
   ];
   const THEMES = THEME_LIST.map((t) => t.id);
-  const themeChipEls = new Map();   // theme id -> chip button
+  const themeChipEls = new Map();
   const applyTheme = (t) => {
     if (!THEMES.includes(t)) t = 'aurora';
     document.documentElement.dataset.theme = t;
@@ -673,14 +539,13 @@ async function boot() {
       const on = id === t;
       el.classList.toggle('on', on);
       el.setAttribute('aria-checked', String(on));
-      el.tabIndex = on ? 0 : -1;    // roving tabindex: only the selected chip is a tab stop
+      el.tabIndex = on ? 0 : -1;
     }
     const nameEl = $('themeName');
     if (nameEl) nameEl.textContent = (THEME_LIST.find((x) => x.id === t) || {}).name || '';
-    try { store?.setItem(THEME_KEY, t); } catch { /* no storage / private mode */ }
-    for (const s of sessions.values()) s.refreshTheme?.();
+    try { store?.setItem(THEME_KEY, t); } catch { /* no storage */ }
+    viz.refreshTheme();
   };
-  // Build one preview chip per theme into #themeChips.
   const themeHost = $('themeChips');
   if (themeHost) {
     themeHost.innerHTML = '';
@@ -698,7 +563,6 @@ async function boot() {
       themeHost.appendChild(b);
       themeChipEls.set(id, b);
     }
-    // arrow keys move the selection (and focus) within the radiogroup
     themeHost.addEventListener('keydown', (e) => {
       const back = e.key === 'ArrowLeft' || e.key === 'ArrowUp';
       const fwd = e.key === 'ArrowRight' || e.key === 'ArrowDown';
@@ -713,8 +577,9 @@ async function boot() {
   let savedTheme = 'aurora';
   try { savedTheme = store?.getItem(THEME_KEY) || 'aurora'; } catch { /* ignore */ }
   applyTheme(savedTheme);
+
   const loadHist = () => { try { const h = JSON.parse(store.getItem(HKEY)); return Array.isArray(h) ? h : []; } catch { return []; } };
-  const saveHist = () => { try { store.setItem(HKEY, JSON.stringify(cmdHist)); } catch { /* no storage / private mode */ } };
+  const saveHist = () => { try { store.setItem(HKEY, JSON.stringify(cmdHist)); } catch { /* no storage */ } };
   let cmdHist = store ? loadHist() : [];
   let hidx = cmdHist.length;
   let draft = '';
@@ -749,8 +614,7 @@ async function boot() {
   $('bootStatus').textContent = 'ready';
 }
 
-// Caps-gating (ADR-0011/0015): hide controls the FOCUSED FS disclaims instead
-// of showing a dead/no-op control.
+// Caps-gating (ADR-0011/0015): hide controls the FOCUSED FS disclaims.
 function applyCapsGating(caps) {
   const toggle = (id, hide) => { const e = $(id); if (e) e.classList.toggle('hidden', hide); };
   toggle('ctlGc', !(caps & FF_CAP_GC));
