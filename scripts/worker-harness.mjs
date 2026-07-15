@@ -1,130 +1,164 @@
 /*
- * worker-harness.mjs — rig helpers for the ADR-0024 worker-per-session
- * conversion of scripts/lockstep-concurrency-test.mjs.
+ * worker-harness.mjs — rig for the ADR-0024 concurrency suite's REAL-PATH cut.
  *
- * SEAM (see LANE-REPORT.md): this suite drives sessions purely over the wire
- * (web/src/protocol.js) through a mock Worker-port pair
- * (scripts/mock-worker-transport.mjs). Two env vars carry forward the
- * FV_LOCKSTEP/FV_SESSION mutation-seam pattern from the old suite:
+ * Composes the whole production stack end to end over the faithful mock
+ * transport (scripts/mock-worker-transport.mjs — structuredClone + async
+ * queued delivery):
  *
- *   FV_WORKER_HOST  module exporting `attachWorkerHost(workerPort)` — wires
- *                   the worker side of one session. Defaults to
- *                   scripts/ref-worker-host.mjs (a REFERENCE host wrapping the
- *                   real session.js; lane/worker's production host is not in
- *                   this worktree yet — swap it in here once it lands).
+ *   createChurnModel  →  createLockstep (real coordinator, §2 algebra)
+ *                          │  N × createSessionProxy (real wire endpoints)
+ *                          │        │  mock transport pair (mainPort/workerPort)
+ *                          │        │        │  installWorkerHost (REAL worker host)
+ *                          │        │        │        │  createRunner → REAL WASM
  *
- * There is deliberately NO "FV_COORDINATOR" seam: the control-plane logic this
- * harness drives (grant/round barrier I2, derived-watermark I4, epoch discard
- * I5, grant continuity I10) is exactly what protocol.js's §2 algebra
- * specifies, so the test plays the coordinator role directly against the wire
- * rather than guess lane/coord's future JS method surface (setMode/broadcast/
- * snapshots/... are coordinator-internal API, not part of the frozen wire
- * contract). Scenarios that need lane/coord's actual Pace/Race mode
- * implementation (holding/stalled/waiting, opsPerSec, Pace<->Race reseat) are
- * NOT converted here for exactly this reason — see LANE-REPORT.md.
+ * So a coord.broadcast()/setMode()/start()/step()/reset() drives real
+ * filesystems on real emulated flash, reached only through the frozen
+ * protocol.js wire. This is the §13 acceptance path: the converted concurrency
+ * scenarios green against the REAL production worker backend, not a stub.
+ *
+ * Two mutation/integration seams carry forward the FV_LOCKSTEP/FV_SESSION
+ * pattern from the pre-0024 suite:
+ *
+ *   FV_COORDINATOR  module exporting createLockstep — the real coordinator
+ *                   (web/src/lockstep.js) by default; point at a scratch copy
+ *                   with one guard reintroduced-as-a-bug to prove a scenario
+ *                   fails under its target defect.
+ *   FV_WORKER_HOST  module exporting installWorkerHost (alias createWorkerHost /
+ *                   attachWorkerHost also accepted) — the real production host
+ *                   (web/src/session-worker.js) by default; same mutation role
+ *                   for worker-side guards.
+ *
+ * (The old ref-worker-host.mjs, which wrapped the retained main-thread
+ * session.js, is retired now that the real standalone worker host is here —
+ * see LANE-REPORT.md.)
  */
 import { createTransport, flushTurns } from './mock-worker-transport.mjs';
-import { C2W, W2C, msg } from '../web/src/protocol.js';
+import { createSessionProxy } from './../web/src/session-proxy.js';
+import { createChurnModel, CHURN_CLASS } from './../web/src/churn.js';
 
-const workerHostModule = process.env.FV_WORKER_HOST || './ref-worker-host.mjs';
-const { attachWorkerHost } = await import(workerHostModule);
+const coordModule = process.env.FV_COORDINATOR || './../web/src/lockstep.js';
+const { createLockstep } = await import(coordModule);
+const workerHostModule = process.env.FV_WORKER_HOST || './../web/src/session-worker.js';
+const hostMod = await import(workerHostModule);
+const installHost = hostMod.installWorkerHost || hostMod.createWorkerHost || hostMod.attachWorkerHost;
+if (typeof installHost !== 'function') throw new Error(`FV_WORKER_HOST module ${workerHostModule} exports no installWorkerHost/createWorkerHost/attachWorkerHost`);
 
 export const GEOMETRY = { sectorSize: 4096, sectorCount: 64, pageSize: 256, granule: 1 };
+// Mirrors web/src/playground.js's boot config EXACTLY (scaled to the 256 KiB
+// device) — including the `profile` (class weights: large weight 0 ⇒ writes cap
+// at the 20 KB medium class, so a single churn write never exceeds the chip) and
+// `slotCount`. Omitting the profile falls back to churn.js's default, which emits
+// 350 KB writes that a fresh 256 KB chip rejects with -4 (a real worker throws
+// synchronously in pump on that — see LANE-REPORT). The faithful config is the
+// point: the auto-workload the suite drives must behave as shipped.
+export const CHURN_CFG = {
+  seed: 0x00c0ffee,
+  targetLiveBytes: 96 * 1024,
+  targetWrittenBytes: 0xffffffff,
+  targetSlackBytes: 16 * 1024,
+  forceLargeAfterBytes: 0xffffffff,
+  slotCount: 256,
+  profile: {
+    namePrefix: 'w',
+    replacePercent: 25,
+    protectFirstLarge: false,
+    classes: [
+      { key: CHURN_CLASS.SMALL,  name: 'small',  weight: 800, minSize: 2 * 1024,  maxSize: 6 * 1024 },
+      { key: CHURN_CLASS.MEDIUM, name: 'medium', weight: 150, minSize: 8 * 1024,  maxSize: 20 * 1024 },
+      { key: CHURN_CLASS.LARGE,  name: 'large',  weight: 0,   minSize: 40 * 1024, maxSize: 40 * 1024 },
+    ],
+  },
+};
 export const FS_ORDER = ['fastffs', 'littlefs'];
 
 /**
- * One session's coordinator-side handle: owns the mainPort, tracks the latest
- * standing (grantAck fields) and the latest pulled frame.
+ * Build a real-path rig: real coordinator, real proxies, real worker hosts
+ * (real WASM), all over the mock transport. autoTick is off — drive frames
+ * manually via frame()/run() so delivery is deterministic.
+ *
+ * ASYNC because a REAL worker host's INIT builds its runner ASYNCHRONOUSLY (a
+ * WASM module load). setSessions() sends INIT; we must let that runner-build
+ * LAND before coord.reset() sends the RESET, otherwise RESET's gen-bump starves
+ * the in-flight INIT build (its `myGen !== gen` guard) and the worker is left
+ * runner-less — real commands then park forever. The mock-worker suites don't
+ * hit this (synchronous stub/mock workers); the real backend does. Once INIT
+ * has landed, reset() reuses the built runner via device.reset() (no reload).
  */
-function makeSessionHandle(fsId) {
-  const { mainPort, workerPort } = createTransport();
-  attachWorkerHost(workerPort);
-  const standing = { epoch: -1, round: -1, playbackNs: 0, cursor: 0, entriesDrained: 0, drainedCounters: null };
-  let lastFrame = null;
-  const acks = []; // every GRANT_ACK received, in order — the in-band per-round log
-  mainPort.onmessage = (ev) => {
-    const m = ev.data;
-    if (m.type === W2C.GRANT_ACK) {
-      acks.push(m);
-      // coordinator keeps max per round (protocol.js W2C.GRANT_ACK doc)
-      if (m.round >= standing.round) Object.assign(standing, m);
-    } else if (m.type === W2C.FRAME) {
-      lastFrame = m;
-    }
-  };
-  return {
-    fsId, mainPort, standing, acks,
-    getFrame: () => lastFrame,
-    send: (type, payload) => mainPort.postMessage(msg(type, payload)),
-  };
+export async function makeRig({ speed = Infinity, gcRatio = 0.5 } = {}) {
+  const churn = createChurnModel(CHURN_CFG);
+  const coord = createLockstep({ churn, gcRatio, autoTick: false });
+  const hosts = {};
+  const proxies = [];
+  for (const fsId of FS_ORDER) {
+    const { mainPort, workerPort } = createTransport();
+    hosts[fsId] = installHost(workerPort, {});          // REAL worker host on the worker side
+    proxies.push(createSessionProxy(mainPort, { fsId, name: fsId, geometry: GEOMETRY }));
+  }
+  coord.setSessions(proxies);                           // sends INIT (async runner build)
+  await flushTurns(8);                                  // let every worker's runner build land
+  coord.reset();                                        // now safe — reuses the built runner
+  coord.setSpeed(speed);
+  await flushTurns(4);                                  // let the RESET rebuild land
+  const byId = Object.fromEntries(proxies.map((p) => [p.fsId, p]));
+  const rig = { coord, proxies, hosts, byId, churn };
+  await bootFormat(rig);                                // the ADR-0024 boot flow: format ships as a broadcast command
+  return rig;
 }
 
 /**
- * Build a rig: N session handles (fastffs, littlefs by default), each INIT'd
- * at epoch 0. Returns helpers to drive grant rounds and pull.
+ * The ADR-0024 boot / header-Reset flow (spec/ui.md, coord-wire testBootResetFlow):
+ * a fresh worker chip is BLANK (INIT/RESET build+reset the device but never
+ * format+mount). The ONE real format ships as a broadcast COMMAND after reset —
+ * there is no `format` wire field. Every real-WASM scenario needs a mounted chip,
+ * so makeRig() runs this once, and any scenario that calls coord.reset() itself
+ * must call bootFormat(rig) again before issuing real workload. Consumes sequence
+ * index 0 (the format command); real workload starts at index 1.
  */
-export async function makeRig({ fsIds = FS_ORDER, name } = {}) {
-  const sessions = fsIds.map((fsId) => makeSessionHandle(fsId));
-  let epoch = 0;
-  for (const s of sessions) s.send(C2W.INIT, { epoch, fsId: s.fsId, geometry: GEOMETRY, name: name || s.fsId });
-  await flushTurns(2);
-
-  const byId = Object.fromEntries(sessions.map((s) => [s.fsId, s]));
-
-  function broadcastEntries(entries) {
-    for (const s of sessions) s.send(C2W.ENTRIES, { epoch, entries });
-  }
-
-  let round = 0;
-  /** Send one GRANT round to every session and wait for every session's ack
-   *  of THIS round (the I2 barrier from the test's side). */
-  async function grantRound({ entryLimit, playLimitNs, scale = 1 }, { maxTurns = 50 } = {}) {
-    const r = round++;
-    for (const s of sessions) s.send(C2W.GRANT, { epoch, round: r, entryLimit, playLimitNs, scale });
-    for (let i = 0; i < maxTurns; i++) {
-      await flushTurns(1);
-      if (sessions.every((s) => s.standing.round >= r)) return r;
-    }
-    throw new Error(`grantRound: not all sessions acked round ${r} within ${maxTurns} turns`);
-  }
-
-  async function pull(fsId, opts) {
-    byId[fsId].send(C2W.PULL, { epoch, ...opts });
-    await flushTurns(2);
-    return byId[fsId].getFrame();
-  }
-
-  async function reset() {
-    epoch += 1;
-    for (const s of sessions) s.send(C2W.RESET, { epoch });
-    await flushTurns(2);
-  }
-
-  /** §8 teardown: drop a session from the barrier-wait set (setSessions-style
-   *  removal) WITHOUT closing its port yet — a late/straggler ack from it must
-   *  not corrupt survivor bookkeeping or wedge grantRound's barrier. */
-  function dropSession(fsId) {
-    const i = sessions.findIndex((s) => s.fsId === fsId);
-    if (i >= 0) sessions.splice(i, 1);
-  }
-  /** §8 teardown: close a (already-dropped) session's port — models
-   *  `worker.terminate()` post-settle. No further messages are delivered
-   *  either direction after this. */
-  function terminateSession(fsId) {
-    byId[fsId].mainPort.close();
-  }
-
-  return { sessions, byId, broadcastEntries, grantRound, pull, reset, dropSession, terminateSession, getEpoch: () => epoch };
+export async function bootFormat(rig) {
+  const { index } = rig.coord.broadcast('await format()', 'format()');
+  const savedMode = rig.coord.mode;
+  rig.coord.setMode('pace');
+  await pumpUntil(rig, () => allDrainedTo(rig, index), 'bootFormat');
+  rig.coord.setMode(savedMode);
+  return index;
 }
 
-/** Grant repeatedly (large entryLimit/playLimitNs) until every session's
- *  entriesDrained reaches `n`, or throw after `maxRounds`. */
-export async function drainTo(rig, n, { entryLimit = 1e9, playLimitNs = 1e15, maxRounds = 200 } = {}) {
-  for (let i = 0; i < maxRounds; i++) {
-    await rig.grantRound({ entryLimit, playLimitNs });
-    if (rig.sessions.every((s) => s.standing.entriesDrained >= n)) return;
+// One coordinator frame + enough macrotask turns for grant->worker delivery,
+// worker execution (a real async command settles over several macrotasks via
+// the quiescence re-check, ADR-0019), and ack->proxy delivery. 4 turns is a
+// safe steady-state budget; pumpUntil below adds frames until a condition holds
+// for anything that spans more.
+export async function frame(rig, turns = 4) {
+  rig.coord._tick();
+  await flushTurns(turns);
+}
+export async function run(rig, n, sampleEach) {
+  for (let i = 0; i < n; i++) { await frame(rig); if (sampleEach) sampleEach(i); }
+}
+
+/** Tick frames until pred() holds (or throw at the bound — a hang is a failure,
+ *  never an infinite wait). */
+export async function pumpUntil(rig, pred, label, maxFrames = 400) {
+  for (let i = 0; i < maxFrames; i++) {
+    if (pred()) return i;
+    await frame(rig);
   }
-  throw new Error(`drainTo(${n}): sessions never reached entriesDrained>=${n} within ${maxRounds} rounds (standings: ${JSON.stringify(rig.sessions.map((s) => s.standing.entriesDrained))})`);
+  if (pred()) return maxFrames;
+  throw new Error(`pumpUntil(${label}) exceeded ${maxFrames} frames — coordinator never converged (frozen FS / broken lock?)`);
+}
+
+export const snapById = (rig) => Object.fromEntries(rig.coord.snapshots().map((s) => [s.fsId, s]));
+export const cursorsEqualAt = (rig, n) => rig.proxies.every((p) => p.acked.cursor === n);
+export const allDrainedTo = (rig, idx) => rig.proxies.every((p) => p.acked.entriesDrained >= idx);
+
+/** Pull a session worker's journal over the wire (§7) and return its lines.
+ *  The ONLY channel data leaves a session by — used for dispatch counting and
+ *  journal-print byte-identity (no byte side-channel exists). */
+export async function pullJournal(rig, fsId, { limit = 2000 } = {}) {
+  rig.byId[fsId].pull({ journal: { since: -1, limit } });
+  await flushTurns(3);
+  const f = rig.byId[fsId].frame;
+  return f && f.journal ? f.journal : [];
 }
 
 export { flushTurns };

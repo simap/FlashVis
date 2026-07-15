@@ -1,50 +1,38 @@
 /*
- * Busy-lock / no-double-execution concurrency regression suite — ADR-0024
- * (worker-per-session) CONVERSION.
+ * Concurrency / exactly-once regression suite — ADR-0024 (worker-per-session),
+ * driven against the REAL production backend end to end: the real coordinator
+ * (web/src/lockstep.js) + real session proxies (web/src/session-proxy.js) +
+ * the real standalone worker host (web/src/session-worker.js) over real WASM,
+ * all reached only through the frozen protocol.js wire and the faithful mock
+ * transport (structuredClone + async queued delivery). This is the §13
+ * acceptance path: the scenarios the pre-0024 in-process concurrency suite
+ * proved, re-expressed against the worker backend and green.
  *
- * See LANE-REPORT.md (this worktree) for the full OLD->NEW observable mapping,
- * the seam this suite binds through, and which of the old suite's 16
- * scenarios are converted here vs. deferred (with rationale) pending
- * lane/coord + lane/worker landing. Short version:
+ * See LANE-REPORT.md for the full OLD->NEW observable mapping and which
+ * scenarios are covered here vs. by lane C's coord-wire-test.mjs (the §2
+ * algebra + signals against MOCK workers) — this suite's distinct role is the
+ * REAL-WASM composition plus cross-FS byte-identity, which a WASM-free suite
+ * cannot check.
  *
- * WHY THE OLD MECHANISM DOESN'T SURVIVE THE THREAD BOUNDARY
- * -----------------------------------------------------------
- * The old suite imported createSession/createLockstep DIRECTLY and counted
- * re-dispatches via a CLOSURE mutated inside the command fn, gated by a
- * test-held promise the command's closure referenced directly. Under
- * ADR-0024, commands ship as SOURCE TEXT and compile *inside the worker*;
- * scripts/mock-worker-transport.mjs structuredClone's every message, so a
- * closure counter would be silently severed — structurally wrong, not just
- * inconvenient. This suite instead:
- *   - counts dispatches from the worker's own JOURNAL (W2C.FRAME.journal, via
- *     C2W.PULL) — a command that runs twice appends its op lines twice. This
- *     is already an ADR-0018 in-band log, not a new field grafted onto the
- *     wire; protocol.js stays untouched.
- *   - corroborates via `drainedCounters` (fileOpCount/flashTimeNs) — a
- *     double-executed write always reprograms, so a real double-dispatch
- *     inflates both. (Cross-FS byte identity, the old suite's OTHER
- *     corroboration, is NOT available: protocol.js has no message that
- *     returns raw file bytes — see LANE-REPORT.md's protocol-ambiguity
- *     section. Flagged for the lead, not guessed at here.)
- *   - forces the busy window with a GATED command exactly as before, but the
- *     gate itself is TEST RIGGING (a `globalThis.__fvTestGate` the harness
- *     sets before compiling the command source), not a shared closure the
- *     command depends on for its logic — see scripts/ref-worker-host.mjs's
- *     banner for the exact boundary this crosses vs. doesn't.
+ * OBSERVABLES (all in-band; no closure counter, no synchronous device reach-in):
+ *   - dispatch count: the worker's own JOURNAL, pulled via C2W.PULL (a command
+ *     that runs twice appends its op lines twice). Data leaves a session ONLY
+ *     via the journal — there is no byte side-channel (settled decision).
+ *   - cost: drainedCounters (fileOpCount/flashTimeNs) on GRANT_ACK.
+ *   - cross-FS byte-identity: a command PRINTs a content hash of the files into
+ *     the journal; we compare the printed hash across FS (the settled
+ *     journal-print technique — the only way bytes are observable over the wire).
+ *   - standing signals: snapshots()[i].{holding (debounced), csActive (raw)} and
+ *     waitStates() — `stalled`/`waiting` are REMOVED (settled signal rework).
  *
- * WHAT MOVED: coordinator-shared "busy" -> worker-LOCAL re-entrancy
- * -------------------------------------------------------------------
- * The old bug class was two DIFFERENT JS call paths (paceStep/raceTick/step())
- * racing on shared coordinator state to dispatch the same sequence[i] twice.
- * ADR-0024 makes that architecturally impossible AT THE COORDINATOR (I9: "no
- * per-op wire" — a worker executes its own entries serially, alone). The
- * equivalent hazard moves worker-side: two GRANT messages (e.g. an overlapping
- * round while a command is still mid-flight) must not spawn two concurrent
- * dispatch loops touching the same cursor. Scenario 1 below targets exactly
- * that guard in scripts/ref-worker-host.mjs (mutation-proven — see
- * LANE-REPORT.md).
+ * Pause model (settled): stop() gates the churn GENERATOR only (ADR-0020); it
+ * NEVER aborts an in-flight command. reset() voids in-flight rounds via the
+ * epoch bump. Scenarios 5/6 are reframed to this: a paused command COMPLETES.
  */
-import { makeRig, drainTo, flushTurns } from './worker-harness.mjs';
+import {
+  makeRig, bootFormat, frame, run, pumpUntil, snapById,
+  pullJournal, allDrainedTo, cursorsEqualAt, FS_ORDER, flushTurns,
+} from './worker-harness.mjs';
 
 process.on('unhandledRejection', (e) => { console.error('\nFAIL - unhandled rejection:', (e && e.stack) || e); process.exit(1); });
 
@@ -52,249 +40,323 @@ let failures = 0;
 function fail(msg) { failures++; console.error('  FAIL - ' + msg); }
 function ok(msg) { console.log('  ok   - ' + msg); }
 
-// ---- gated command primitive (see file banner + ref-worker-host.mjs) ----
-const GATE_A = 'gate-a.bin', GATE_B = 'gate-b.bin', GATE_SIZE = 4096;
-const GATED_SOURCE = `async (api) => {
-  await api.writeFile('${GATE_A}', ${GATE_SIZE});
-  await globalThis.__fvTestGate.promise;
-  await api.writeFile('${GATE_B}', ${GATE_SIZE});
-}`;
-function makeGate() {
-  let release;
-  const promise = new Promise((r) => { release = r; });
-  globalThis.__fvTestGate = { promise };
-  return { release: () => release() };
-}
-function gatedEntry(index, seed = 1) { return { index, kind: 'command', payload: GATED_SOURCE, seed }; }
-
 const countLines = (journal, substr) => journal.filter((j) => j.text.includes(substr)).length;
+const hashLines = (journal, tag) => journal.filter((j) => j.text.startsWith(tag)).map((j) => j.text);
 
-async function pullJournal(rig, fsId, limit = 200) {
-  const frame = await rig.pull(fsId, { journal: { since: 0, limit } });
-  return frame ? frame.journal : [];
+// A command that writes `name` then prints an FNV-1a content hash of it into the
+// journal — the settled cross-FS byte-identity probe (no byte side-channel).
+function hashingWrite(name, size, tag = 'HASH') {
+  return `await writeFile('${name}', ${size}); { const b = await fs.read('${name}'); let x = 2166136261 >>> 0; for (let i = 0; i < b.length; i++) { x ^= b[i]; x = Math.imul(x, 16777619) >>> 0; } print('${tag} ${name} ' + x); }`;
+}
+async function assertCrossFsIdentical(rig, tag, label) {
+  const perFs = {};
+  for (const fsId of FS_ORDER) perFs[fsId] = hashLines(await pullJournal(rig, fsId), tag).sort();
+  const [a, b] = FS_ORDER.map((f) => perFs[f]);
+  if (a.length === 0) { fail(`${label}: no '${tag}' hash lines printed (probe never ran)`); return; }
+  if (a.length !== b.length || a.some((v, i) => v !== b[i])) {
+    fail(`${label}: FASTFFS and LittleFS content hashes differ\n         fastffs: ${a.join(' | ')}\n         littlefs: ${b.join(' | ')}`);
+  } else ok(`${label}: both FS printed byte-identical content hashes (${a.length} file(s))`);
 }
 
-// Poll a session's pulled journal until `pred(journal)` holds, or throw at the bound.
-async function pumpUntilJournal(rig, fsId, pred, label, maxIter = 200) {
-  for (let i = 0; i < maxIter; i++) {
+// ============================================================================
+// [1] exactly-once dispatch: N distinct commands each execute exactly once per
+// session, and both FS end byte-identical. The core no-double-execution
+// invariant, re-expressed in-band. Mutation-proven via a scratch worker-host
+// copy (FV_WORKER_HOST) that drops the in-flight re-entrancy guard — see
+// LANE-REPORT.md "Mutation evidence".
+// ============================================================================
+async function scenarioExactlyOnce() {
+  console.log('\n[1] exactly-once dispatch: N distinct commands run once per session, both FS identical');
+  const rig = await makeRig({ speed: Infinity });
+  const N = 5;
+  const names = [];
+  let last = 0;
+  for (let k = 0; k < N; k++) {
+    const name = `x${k}.bin`;
+    names.push(name);
+    last = rig.coord.broadcast(hashingWrite(name, 2048 + k * 1024), `w ${name}`).index;
+  }
+  rig.coord.setMode('pace');
+  await pumpUntil(rig, () => allDrainedTo(rig, last), 's1-drain');
+  for (const fsId of FS_ORDER) {
     const j = await pullJournal(rig, fsId);
-    if (pred(j)) return j;
-    await flushTurns(1);
+    let bad = false;
+    for (const name of names) {
+      const n = countLines(j, `write(${name}`);
+      if (n !== 1) { fail(`s1: ${fsId} executed write(${name}) ${n}x, expected exactly 1 (double dispatch?)`); bad = true; }
+    }
+    if (!bad) ok(`s1: ${fsId} executed all ${N} distinct commands exactly once each`);
   }
-  throw new Error(`pumpUntilJournal(${label}) exceeded ${maxIter} iterations`);
+  await assertCrossFsIdentical(rig, 'HASH', 's1');
 }
 
-// ---- [0] exactly-once reference: a single gated command, released immediately ----
-// OLD: buildGatedReference() — dispatched===sessions.length, captured device cost.
-// NEW: same intent, dispatch counted from the worker's own journal (in-band).
-async function buildReference() {
-  console.log('\n[0] exactly-once reference for a single gated command');
-  const rig = await makeRig();
-  rig.broadcastEntries([gatedEntry(0)]);
-  const gate = makeGate();
-  gate.release();                                    // no parking: a clean single run
-  await drainTo(rig, 1);
-  const ref = {};
-  for (const s of rig.sessions) {
-    const j = await pullJournal(rig, s.fsId);
-    const dispatches = countLines(j, `write(${GATE_A}`);
-    if (dispatches !== 1) fail(`reference: ${s.fsId} dispatched ${dispatches}x, expected 1`);
-    ref[s.fsId] = { drainedCounters: s.standing.drainedCounters };
+// ============================================================================
+// [8] reset() reproducibility (byte-for-byte) + fresh-epoch cleanliness.
+// OLD scenario 8(a): a produced run reset then re-run must be byte-identical.
+// NEW: reproducibility proven via the journal-print content hash (the settled
+// technique) since no byte side-channel exists. Mutation: a coordinator that
+// drops churn.reset() (scratch FV_COORDINATOR copy) diverges run2 from run1.
+// ============================================================================
+async function scenarioResetReproducible() {
+  console.log('\n[8] reset() reproducibility: a produced run, reset, re-run = byte-identical (journal-print)');
+  const rig = await makeRig({ speed: Infinity });
+  // Run 1: a fixed batch of produced churn steps, then a hash-print of the whole tree.
+  const STEPS = 10;   // bounded so the small (256KB) chip never overflows a churn write
+  async function producedRunThenHash(tag) {
+    rig.coord.setMode('pace');
+    rig.coord.start();
+    await pumpUntil(rig, () => rig.proxies[0].acked.cursor >= STEPS, `${tag}-produce`);
+    rig.coord.stop();
+    await run(rig, 2);   // let any in-flight step drain before hashing
+    // hash every file currently on the chip into the journal
+    const src = `const fs2 = await getFiles(); fs2.sort((a,b)=> a.name<b.name?-1:1); for (const f of fs2){ const b = await fs.read(f.name); let x=2166136261>>>0; for(let i=0;i<b.length;i++){x^=b[i];x=Math.imul(x,16777619)>>>0;} print('${tag} '+f.name+' '+x); }`;
+    const { index } = rig.coord.broadcast(src, 'hash-all');
+    await pumpUntil(rig, () => allDrainedTo(rig, index), `${tag}-drain`);
   }
-  ok(`reference captured (fastffs cost=${JSON.stringify(ref.fastffs.drainedCounters)}, littlefs cost=${JSON.stringify(ref.littlefs.drainedCounters)})`);
-  return ref;
+  await producedRunThenHash('R1');
+  const run1 = {};
+  for (const fsId of FS_ORDER) run1[fsId] = hashLines(await pullJournal(rig, fsId), 'R1').sort();
+  if (run1.fastffs.length === 0) { fail('s8: run 1 produced no files to hash (churn made nothing?)'); return; }
+  ok(`s8: run 1 produced ${run1.fastffs.length} files on fastffs, ${run1.littlefs.length} on littlefs`);
+  // reset() -> fresh epoch; re-boot the chip (format ships as a command post-reset)
+  rig.coord.reset();
+  await flushTurns(6);
+  if (!cursorsEqualAt(rig, 0)) fail(`s8: cursors not zeroed after reset (${rig.proxies.map((p) => p.acked.cursor)})`);
+  else ok('s8: cursors zeroed on the fresh epoch');
+  await bootFormat(rig);
+  await producedRunThenHash('R2');
+  const run2 = {};
+  for (const fsId of FS_ORDER) run2[fsId] = hashLines(await pullJournal(rig, fsId), 'R2').sort();
+  for (const fsId of FS_ORDER) {
+    const a = run1[fsId], b = run2[fsId];
+    // R1/R2 tags differ; compare the name+hash suffix (strip the tag).
+    const strip = (arr) => arr.map((s) => s.replace(/^R[12] /, '')).sort();
+    const A = strip(a), B = strip(b);
+    if (A.length !== B.length || A.some((v, i) => v !== B[i])) {
+      fail(`s8: ${fsId} second run diverged from the first (churn/rnd/chip carryover across reset)\n         run1: ${A.join(' | ')}\n         run2: ${B.join(' | ')}`);
+    } else ok(`s8: ${fsId} reset re-run is byte-for-byte reproducible (${A.length} files identical)`);
+  }
 }
 
-// ---- [1] exactly-once dispatch under an OVERLAPPING grant round (the new
-// analog of old scenarios 1-3: a second GRANT lands while the worker's dispatch
-// loop is already mid-command). Targets ref-worker-host.mjs's per-epoch
-// re-entrancy guard (runningEpoch) — the worker-LOCAL equivalent of the old
-// coordinator busy-map. Mutation-proven: FV_REF_HOST_NO_GUARD=1 makes this FAIL
-// (see LANE-REPORT.md "Mutation evidence"). ----
-async function scenarioOverlappingGrant(reference) {
-  console.log('\n[1] exactly-once dispatch under an overlapping GRANT round (worker-local re-entrancy)');
-  const rig = await makeRig();
-  rig.broadcastEntries([gatedEntry(0)]);
-  const gate = makeGate();
-  // round 0: entryLimit=1 — every session starts the gated command and parks
-  // at the gate (writes GATE_A, then awaits). Fire without waiting for the
-  // barrier (the ack won't land until the gate opens).
-  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 0, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
-  for (const fsId of ['fastffs', 'littlefs']) {
-    await pumpUntilJournal(rig, fsId, (j) => countLines(j, `write(${GATE_A}`) >= 1, `s1-window-${fsId}`);
-  }
-  ok('window reached: both sessions parked mid-command (wrote GATE_A, awaiting the gate)');
-  // round 1: OVERLAPPING grant while still parked — a broken re-entrancy guard
-  // would spawn a second dispatch loop and re-run entries[0] from scratch.
-  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 1, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
-  await flushTurns(10);
-  for (const fsId of ['fastffs', 'littlefs']) {
+// ============================================================================
+// [4] a rejecting (throwing) command releases the lock and the coordinator
+// recovers. OLD scenario 4. Settled model: a thrown command is logged
+// ('command error: …'), still reaches quiescence (I1 — a runaway can't wedge
+// the pump), and the NEXT command executes normally.
+// ============================================================================
+async function scenarioRejectingCommand() {
+  console.log('\n[4] a throwing command still quiesces; the coordinator recovers (I1)');
+  const rig = await makeRig({ speed: Infinity });
+  const bad = rig.coord.broadcast(`throw new Error('boom - simulated bad command')`, 'bad').index;
+  const good = rig.coord.broadcast(hashingWrite('after-boom.bin', 2048), 'good').index;
+  rig.coord.setMode('pace');
+  await pumpUntil(rig, () => allDrainedTo(rig, good), 's4-drain');
+  for (const fsId of FS_ORDER) {
     const j = await pullJournal(rig, fsId);
-    const n = countLines(j, `write(${GATE_A}`);
-    if (n !== 1) fail(`s1: ${fsId} dispatched ${n}x after the overlapping grant (expected 1 — a re-dispatch = double execution)`);
-    else ok(`s1: ${fsId} still dispatched exactly 1x after the overlapping grant`);
+    if (!j.some((l) => l.text.includes('command error') && l.text.includes('boom'))) fail(`s4: ${fsId} did not log the thrown command's error`);
+    else if (countLines(j, 'write(after-boom.bin') !== 1) fail(`s4: ${fsId} the command after the throw did not run exactly once (lock not released?)`);
+    else ok(`s4: ${fsId} logged the throw, quiesced, and ran the following command (recovered)`);
   }
-  gate.release();
-  await drainTo(rig, 1);
-  for (const s of rig.sessions) {
-    const j = await pullJournal(rig, s.fsId);
-    const nA = countLines(j, `write(${GATE_A}`), nB = countLines(j, `write(${GATE_B}`);
-    if (nA !== 1 || nB !== 1) fail(`s1: ${s.fsId} final dispatch count A=${nA} B=${nB}, expected 1/1`);
-    else ok(`s1: ${s.fsId} settled at exactly 1 dispatch (A and B each written once)`);
-    const dc = s.standing.drainedCounters, rc = reference[s.fsId].drainedCounters;
-    if (dc.fileOpCount !== rc.fileOpCount || dc.flashTimeNs !== rc.flashTimeNs) {
-      fail(`s1: ${s.fsId} drainedCounters diverged from the clean reference (fileOpCount ${dc.fileOpCount} vs ${rc.fileOpCount}, flashTimeNs ${dc.flashTimeNs} vs ${rc.flashTimeNs})`);
-    } else ok(`s1: ${s.fsId} drainedCounters match the clean single-dispatch reference`);
-  }
+  if (!allDrainedTo(rig, good)) fail('s4: coordinator never drained past the throwing command (wedged)');
+  else ok('s4: coordinator drained past the throwing command on every session');
+  await assertCrossFsIdentical(rig, 'HASH', 's4');
 }
 
-// ---- [2] grant continuity / no-op re-grant is idempotent (I10) ----
-// OLD: not directly covered (implicit in the old suite's cost-equality checks).
-// NEW coverage required by ADR-0024 §13: "activity in a no-op ack = a bug".
-async function scenarioNoOpGrantIdempotent() {
-  console.log('\n[2] a re-sent grant with unchanged limits is a true no-op (I10)');
-  const rig = await makeRig();
-  rig.broadcastEntries([{ index: 0, kind: 'command', payload: `async (api) => { await api.writeFile('once.bin', 2048); }`, seed: 7 }]);
-  await drainTo(rig, 1);
-  const before = {};
-  for (const s of rig.sessions) before[s.fsId] = { j: (await pullJournal(rig, s.fsId)).length, dc: { ...s.standing.drainedCounters } };
-  // re-send the SAME (already-satisfied) limits at a fresh round number —
-  // protocol.js: "ALWAYS sent per frame; a no-op grant... when idle".
-  const r = 999;
-  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: r, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
-  await flushTurns(5);
-  for (const s of rig.sessions) {
-    if (s.standing.round < r) fail(`s2: ${s.fsId} never acked the no-op re-grant (round stuck at ${s.standing.round})`);
-    else ok(`s2: ${s.fsId} acked the no-op re-grant (round ${s.standing.round})`);
-    const j = await pullJournal(rig, s.fsId);
-    const dc = s.standing.drainedCounters;
-    if (j.length !== before[s.fsId].j || dc.fileOpCount !== before[s.fsId].dc.fileOpCount || dc.flashTimeNs !== before[s.fsId].dc.flashTimeNs) {
-      fail(`s2: ${s.fsId} showed activity on a no-op grant (journal ${before[s.fsId].j}->${j.length}, cost changed)`);
-    } else ok(`s2: ${s.fsId} showed no activity on the no-op re-grant (journal/cost unchanged)`);
+// ============================================================================
+// [5/6] stop() gates the GENERATOR only — a paused command COMPLETES, never
+// aborts/rewinds (settled model; the old stop-aborts-churn-step / stop-aborts-
+// command-mid-drain scenarios are reframed). We start a command, stop() while
+// it is in flight, and assert it still completes exactly once and both FS stay
+// byte-identical (no abort, no re-execution).
+// ============================================================================
+async function scenarioStopGatesGeneratorOnly() {
+  console.log('\n[5/6] stop() gates the generator only: an in-flight command COMPLETES, never aborts');
+  const rig = await makeRig({ speed: Infinity });
+  // Broadcast a multi-op command; stop() the instant it starts, then keep ticking.
+  const src = `await writeFile('s5a.bin', 4096); await readFile('s5a.bin'); ${hashingWrite('s5b.bin', 4096)}`;
+  const idx = rig.coord.broadcast(src, 'multi').index;
+  rig.coord.setMode('pace');
+  // one frame to dispatch it, then immediately stop (generator gate) mid-flight
+  await frame(rig);
+  rig.coord.stop();
+  await pumpUntil(rig, () => allDrainedTo(rig, idx), 's5-drain');
+  for (const fsId of FS_ORDER) {
+    const j = await pullJournal(rig, fsId);
+    const a = countLines(j, 'write(s5a.bin'), b = countLines(j, 'write(s5b.bin');
+    if (a !== 1 || b !== 1) fail(`s5/6: ${fsId} paused command did not complete exactly once (s5a×${a}, s5b×${b}) — stop() must not abort/rewind`);
+    else ok(`s5/6: ${fsId} the in-flight command completed exactly once despite stop() (generator-only pause)`);
   }
-  // a re-sent/duplicated ENTRIES window for the SAME index (e.g. a retried
-  // prefetch after a dropped ack) must not double-append -> double-execute.
-  for (const s of rig.sessions) s.send('entries', { epoch: rig.getEpoch(), entries: [{ index: 0, kind: 'command', payload: `async (api) => { await api.writeFile('once.bin', 2048); }`, seed: 7 }] });
-  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 1000, entryLimit: 5, playLimitNs: 1e15, scale: 1 });
-  await flushTurns(10);
-  for (const s of rig.sessions) {
-    const j = await pullJournal(rig, s.fsId);
-    const n = countLines(j, 'write(once.bin');
-    if (n !== 1) fail(`s2: ${s.fsId} entries[0] executed ${n}x after a duplicated ENTRIES resend (expected 1 — dedup by index required)`);
-    else ok(`s2: ${s.fsId} a duplicated ENTRIES resend for index 0 did not re-execute it`);
-    if (s.standing.cursor !== 1) fail(`s2: ${s.fsId} cursor moved to ${s.standing.cursor} off a duplicate-only resend (expected to stay at 1, nothing new queued)`);
-  }
+  await assertCrossFsIdentical(rig, 'HASH', 's5/6');
+  // and after the command drained, a stopped generator produces NO further steps
+  const cur = rig.proxies[0].acked.cursor;
+  await run(rig, 8);
+  if (rig.proxies.some((p) => p.acked.cursor !== cur)) fail(`s5/6: cursor advanced while stopped (generator not gated: ${rig.proxies.map((p) => p.acked.cursor)})`);
+  else ok('s5/6: no further steps produced while stopped (generator gate holds)');
 }
 
-// ---- [3] epoch discard (I5) + reset starves an in-flight round (§8) ----
-// OLD scenario 16(b): "bare reset() abandons a parked command -- no zombie ops
-// on the fresh chip". NEW: same intent, in-band via drainedCounters/journal
-// pulled post-reset, and epoch is the wire-level discriminant instead of an
-// in-process token/abort.
-async function scenarioEpochDiscard() {
-  console.log('\n[3] reset() bumps epoch; a mid-flight round starves, never lands in the new epoch (I5 + §8)');
-  const rig = await makeRig();
-  rig.broadcastEntries([gatedEntry(0)]);
-  const gate = makeGate();
-  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 0, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
-  for (const fsId of ['fastffs', 'littlefs']) {
-    await pumpUntilJournal(rig, fsId, (j) => countLines(j, `write(${GATE_A}`) >= 1, `s3-window-${fsId}`);
+// ============================================================================
+// [7] Pace->Race reseat: the BEHIND FS burns headroom to catch up (§2 MAX, not
+// a stall). OLD scenario 7. Real-WASM version of coord-wire's [6]: diverge
+// playback in Pace, switch to Race, assert the behind FS's cursor bursts
+// forward and no session reads a sustained hold (nothing freezes in Race).
+// ============================================================================
+async function scenarioReseatBurst() {
+  console.log('\n[7] Pace->Race reseat: the behind FS bursts to catch up, nothing freezes (§2 MAX)');
+  const rig = await makeRig({ speed: Infinity });
+  rig.coord.setMode('pace');
+  rig.coord.start();
+  await run(rig, 24);
+  rig.coord.stop();
+  const before = Object.fromEntries(rig.proxies.map((p) => [p.fsId, p.acked.playbackNs]));
+  const gap = Math.abs(before.fastffs - before.littlefs);
+  if (gap <= 50 * 1e6) { fail(`s7 precondition: playback gap ${(gap / 1e6).toFixed(0)}ms too small to observe reseat`); return; }
+  const behind = before.fastffs < before.littlefs ? 'fastffs' : 'littlefs';
+  ok(`s7: pace diverged playback (fastffs ${(before.fastffs / 1e6).toFixed(0)}ms, littlefs ${(before.littlefs / 1e6).toFixed(0)}ms); ${behind} is behind`);
+  const curBefore = rig.byId[behind].acked.cursor;
+  rig.coord.start();
+  rig.coord.setMode('race');
+  let sawBehindHold = false;
+  await run(rig, 10, () => { const s = snapById(rig); if (s[behind].holding) sawBehindHold = true; });
+  const curAfter = rig.byId[behind].acked.cursor;
+  if (!(curAfter > curBefore)) fail(`s7: behind FS ${behind} did not advance after Pace->Race (cursor ${curBefore}->${curAfter}) — reseat wrong`);
+  else ok(`s7: behind FS ${behind} burst forward on reseat (cursor ${curBefore}->${curAfter}) — burned its headroom`);
+  if (sawBehindHold) fail(`s7: behind FS ${behind} read holding while catching up (it is running, not frozen)`);
+  else ok(`s7: behind FS ${behind} never read holding while bursting (nothing freezes in Race)`);
+}
+
+// ============================================================================
+// [9] opsPerSec tracks WORKLOAD ops (drained fileOpCount), never flash ops.
+// OLD scenario 9. In Pace both FS consume steps in lockstep, so opsPerSec must
+// track together across FS even though their flash-op costs differ. (The
+// coordinator computes opsPerSec from acked.fileOpCount; a mutation to flash
+// ops would skew the two — provable via a scratch FV_COORDINATOR copy.)
+// ============================================================================
+async function scenarioOpsPerSec() {
+  console.log('\n[9] opsPerSec tracks workload fileOpCount, not flash ops (Pace lockstep => equal-ish rate)');
+  const rig = await makeRig({ speed: Infinity });
+  rig.coord.setMode('pace');
+  rig.coord.start();
+  await run(rig, 60);
+  const s = snapById(rig);
+  const ff = s.fastffs, lf = s.littlefs;
+  if (ff.stepCursor !== lf.stepCursor) fail(`s9: pace cursors not in lockstep (${ff.stepCursor} vs ${lf.stepCursor})`);
+  else ok(`s9: workload cursors in lockstep at ${ff.stepCursor} (steps consumed 1:1)`);
+  // fileOpCount tracks workload; both should be equal in Pace lockstep.
+  if (ff.fileOpCount !== lf.fileOpCount) fail(`s9: fileOpCount differs across FS in Pace lockstep (${ff.fileOpCount} vs ${lf.fileOpCount}) — not workload-tracked?`);
+  else ok(`s9: fileOpCount equal across FS (${ff.fileOpCount}) despite differing flash cost`);
+  if (!(ff.opsPerSec > 0) || !(lf.opsPerSec > 0)) { fail(`s9: opsPerSec not positive during an active run (ff ${ff.opsPerSec}, lf ${lf.opsPerSec})`); return; }
+  // the two rates track the SAME workload; allow EMA slop but they must be close, and
+  // NOT skewed by the flash-op ratio (littlefs is much chattier on flash).
+  const rel = Math.abs(ff.opsPerSec - lf.opsPerSec) / Math.max(ff.opsPerSec, lf.opsPerSec);
+  if (rel > 0.25) fail(`s9: opsPerSec diverges across FS (ff ${ff.opsPerSec.toFixed(1)}, lf ${lf.opsPerSec.toFixed(1)}, ${(rel * 100).toFixed(0)}% apart) — measuring flash ops, not workload?`);
+  else ok(`s9: opsPerSec tracks across FS within ${(rel * 100).toFixed(0)}% (ff ${ff.opsPerSec.toFixed(1)}, lf ${lf.opsPerSec.toFixed(1)}) — the workload-op rate`);
+}
+
+// ============================================================================
+// [10-15] standing signals over the REAL backend (reframed to the settled
+// model: holding sustained+debounced, csActive raw per-frame; NO stalled/
+// waiting). lane C's coord-wire-test proves the signal ALGEBRA against mock
+// workers; this asserts the same signals surface correctly for REAL WASM
+// sessions — the laggard-safe invariant (a still-executing FS never reads
+// holding) and csActive tracking real playback advance.
+// ============================================================================
+async function scenarioSignalsRealBackend() {
+  console.log('\n[10-15] standing signals over real WASM: holding laggard-safe, csActive tracks real advance');
+  const rig = await makeRig({ speed: Infinity });
+  // idle: neither holding nor csActive
+  await run(rig, 3);
+  let s = snapById(rig);
+  if (FS_ORDER.some((f) => s[f].csActive || s[f].holding)) fail(`s10: a signal set while idle (${JSON.stringify(rig.coord.waitStates())})`);
+  else ok('s10: idle => no csActive, no holding on either FS');
+  // running Race: both advance playback most frames => csActive fires; the laggard
+  // (chattier flash cost) must NEVER read holding while it is actively draining.
+  rig.coord.setMode('race');
+  rig.coord.start();
+  let ffActive = 0, lfActive = 0, laggardHeld = false, both = 0;
+  const NF = 24;
+  await run(rig, NF, () => {
+    const x = snapById(rig);
+    if (x.fastffs.csActive) ffActive++;
+    if (x.littlefs.csActive) lfActive++;
+    // in Race the pricier FS is the laggard on playback; while its gate is open it is
+    // running, not frozen — it must not read holding.
+    const laggard = x.fastffs.simNs <= x.littlefs.simNs ? 'littlefs' : 'fastffs';
+    if (x[laggard].holding && x[laggard].csActive) laggardHeld = true;
+    if (x.fastffs.holding && x.littlefs.holding) both++;
+  });
+  if (ffActive < NF * 0.4 || lfActive < NF * 0.4) fail(`s11: csActive rarely fired while running (ff ${ffActive}/${NF}, lf ${lfActive}/${NF})`);
+  else ok(`s11: csActive fired on most running frames (ff ${ffActive}/${NF}, lf ${lfActive}/${NF}) — the real-time blinky`);
+  if (laggardHeld) fail('s12: a session read holding=true AND csActive=true (a frozen FS must not be advancing)');
+  else ok('s12: holding and csActive never both true on one FS (mutually exclusive, laggard-safe)');
+  // stop the generator, then let the fixed backlog fully drain to idle (in Race the
+  // cheap FS raced ahead; the pricey FS keeps draining until its cursor reaches the
+  // frontier). Pump until playback stops advancing, THEN csActive must clear.
+  rig.coord.stop();
+  await pumpUntil(rig, () => {
+    const before = rig.proxies.map((p) => p.acked.playbackNs);
+    return before.length && rig.proxies.every((p) => !snapById(rig)[p.fsId].csActive);
+  }, 's13-drain-to-idle', 200);
+  s = snapById(rig);
+  if (FS_ORDER.some((f) => s[f].csActive)) fail('s13: csActive still set after the run stopped and drained to idle');
+  else ok('s13: csActive cleared once playback stopped advancing (drained to idle)');
+}
+
+// ============================================================================
+// [16] reset() abandons a mid-flight round; its stale completion is void (I5).
+// OLD scenario 16(b)/(c). A command parked mid-flight when reset() bumps the
+// epoch must not land in the fresh epoch. We park a command at a test-held gate
+// (the gate is in-realm test rigging, visible to the compiled command since the
+// mock transport shares the process — see LANE-REPORT.md), reset, then release:
+// the zombie's post-gate write must never appear on the fresh chip.
+// ============================================================================
+async function scenarioResetAbandonsMidFlight() {
+  console.log('\n[16] reset() abandons a mid-flight round; the zombie completion is void (I5/§8)');
+  const rig = await makeRig({ speed: Infinity });
+  let release;
+  globalThis.__fvGate16 = new Promise((r) => { release = r; });
+  const src = `await writeFile('z-before.bin', 2048); await globalThis.__fvGate16; await writeFile('z-after.bin', 2048)`;
+  const idx = rig.coord.broadcast(src, 'gated16').index;
+  rig.coord.setMode('pace');
+  // give it a few frames to dispatch the command and reach the gate (parked mid-fn)
+  await run(rig, 6);
+  let parked = true;
+  for (const fsId of FS_ORDER) {
+    const j = await pullJournal(rig, fsId);
+    if (countLines(j, 'write(z-before.bin') < 1) parked = false;
   }
-  ok('both sessions parked mid-command (round 0, pre-reset epoch)');
-  await rig.reset();                                 // epoch bumps; cursor/entries/playbackNs rebuilt fresh
-  const postResetCost = Object.fromEntries(rig.sessions.map((s) => [s.fsId, s.standing.drainedCounters || { fileOpCount: 0, flashTimeNs: 0 }]));
-  gate.release();                                     // wake the stale round; it must STARVE, not land
+  if (!parked) { fail('s16: command never reached the gate (window not established)'); release(); return; }
+  ok('s16: both sessions parked mid-command at the gate (wrote z-before)');
+  rig.coord.reset();                        // epoch bump; in-flight round must starve
+  await flushTurns(6);
+  release();                                // wake the zombie: its post-gate write must NOT land
   await flushTurns(20);
-  for (const s of rig.sessions) {
-    const dc = s.standing.drainedCounters || { fileOpCount: 0, flashTimeNs: 0 };
-    if (dc.fileOpCount !== postResetCost[s.fsId].fileOpCount || dc.flashTimeNs !== postResetCost[s.fsId].flashTimeNs) {
-      fail(`s3: ${s.fsId} the abandoned round wrote into the fresh epoch after reset (fileOpCount ${postResetCost[s.fsId].fileOpCount}->${dc.fileOpCount})`);
-    } else ok(`s3: ${s.fsId} the abandoned round left no trace after reset (starved, per §8)`);
-    if (s.standing.cursor !== 0) fail(`s3: ${s.fsId} cursor is ${s.standing.cursor} after reset, expected 0`);
-    const j = await pullJournal(rig, s.fsId);
-    if (j.some((line) => line.text.includes(GATE_B))) fail(`s3: ${s.fsId} the zombie command's second write (${GATE_B}) landed after reset`);
-    else ok(`s3: ${s.fsId} the zombie's post-gate write never happened (no ${GATE_B} in the post-reset journal)`);
+  await bootFormat(rig);                     // fresh chip needs formatting to be readable
+  for (const fsId of FS_ORDER) {
+    const j = await pullJournal(rig, fsId);
+    if (j.some((l) => l.text.includes('z-after.bin'))) fail(`s16: ${fsId} the zombie's post-gate write (z-after.bin) landed after reset (I5 violated)`);
+    else ok(`s16: ${fsId} the abandoned round left no trace after reset (starved per §8)`);
   }
-  // the fresh epoch must still be fully live: broadcast + drain a real command.
-  rig.broadcastEntries([{ index: 0, kind: 'command', payload: `async (api) => { await api.writeFile('post-reset.bin', 1024); }`, seed: 3 }]);
-  await drainTo(rig, 1);
-  for (const s of rig.sessions) {
-    if (s.standing.cursor !== 1) fail(`s3: ${s.fsId} did not advance in the fresh epoch (coordinator wedged after abandoning the stale round?)`);
-    else ok(`s3: ${s.fsId} stayed live in the fresh epoch (drained a fresh command to cursor 1)`);
-  }
-}
-
-// ---- [4] grant/ack round barrier (I2): round+1 releases only once EVERY
-// current session has acked round r, never early on a faster peer's ack. ----
-// NEW coverage required by ADR-0024 §13.
-async function scenarioRoundBarrier() {
-  console.log('\n[4] grant/ack round barrier: the round only settles once every session has acked (I2)');
-  const rig = await makeRig();
-  rig.byId.fastffs.send('entries', { epoch: rig.getEpoch(), entries: [gatedEntry(0)] }); // only fastffs has work — parks here
-  // littlefs gets no entries at all — nothing to run, so it acks round 0 immediately
-  const gate = makeGate();
-  let barrierSettled = false;
-  const barrier = rig.grantRound({ entryLimit: 1, playLimitNs: 1e15 }).then(() => { barrierSettled = true; });
-  await pumpUntilJournal(rig, 'fastffs', (j) => countLines(j, `write(${GATE_A}`) >= 1, 's4-window');
-  await flushTurns(5);
-  if (rig.byId.littlefs.standing.round < 0) fail('s4: littlefs (idle) never acked round 0');
-  else ok('s4: littlefs (idle, nothing to run) acked round 0 promptly');
-  if (barrierSettled) fail('s4: the round barrier settled BEFORE fastffs (still mid-command) acked — I2 violated');
-  else ok('s4: the round barrier correctly held open while fastffs is still mid-command');
-  gate.release();
-  await barrier;
-  if (!barrierSettled) fail('s4: the round barrier never settled after fastffs completed and acked');
-  else ok('s4: the round barrier settled once every session (including the laggard) acked round 0');
-}
-
-// ---- [5] teardown drains stragglers (§8): a removed session's late ack must
-// not corrupt survivor bookkeeping or wedge the barrier; no delivery survives
-// terminate(). ----
-// OLD scenario 8(c): setSessions removal mid-command is a guarded no-op.
-async function scenarioTeardownStragglers() {
-  console.log('\n[5] teardown drains a straggler: a removed session\'s late ack is a guarded no-op (§8)');
-  const rig = await makeRig();
-  rig.broadcastEntries([gatedEntry(0)]);
-  const gate = makeGate();
-  for (const s of rig.sessions) s.send('grant', { epoch: rig.getEpoch(), round: 0, entryLimit: 1, playLimitNs: 1e15, scale: 1 });
-  for (const fsId of ['fastffs', 'littlefs']) {
-    await pumpUntilJournal(rig, fsId, (j) => countLines(j, `write(${GATE_A}`) >= 1, `s5-window-${fsId}`);
-  }
-  ok('both sessions parked mid-command');
-  rig.dropSession('littlefs');                        // setSessions-style removal WHILE its command is in-flight
-  if (rig.sessions.some((s) => s.fsId === 'littlefs')) fail('s5: littlefs still in the barrier-wait set after dropSession');
-  else ok('s5: littlefs removed from the barrier-wait set');
-  // the survivor must not be blocked by the now-untracked straggler.
-  gate.release();
-  await drainTo(rig, 1);                               // only waits on rig.sessions (fastffs now)
-  if (rig.byId.fastffs.standing.cursor !== 1) fail(`s5: fastffs (survivor) did not complete (cursor ${rig.byId.fastffs.standing.cursor})`);
-  else ok('s5: fastffs (survivor) completed without waiting on the removed straggler');
-  // the straggler's late ack (it was released too — same gate) must not throw
-  // or corrupt anything even though nothing awaits it anymore.
-  await flushTurns(10);
-  if (rig.byId.littlefs.standing.cursor !== 1) fail('s5: littlefs straggler never actually settled (harness bug, not a product one — check the gate)');
-  else ok('s5: littlefs straggler settled quietly post-removal (late ack landed, nothing was waiting on it)');
-  rig.terminateSession('littlefs');                    // worker.terminate() post-settle
-  const before = rig.byId.littlefs.standing.cursor;
-  rig.byId.littlefs.send('grant', { epoch: rig.getEpoch(), round: 50, entryLimit: 100, playLimitNs: 1e15, scale: 1 });
-  await flushTurns(10);
-  if (rig.byId.littlefs.standing.cursor !== before) fail('s5: a message was still delivered to a terminated session\'s port');
-  else ok('s5: no message is delivered to a terminated session\'s port (mock Port honors close())');
+  if (!cursorsEqualAt(rig, 1)) fail(`s16: coordinator not live on the fresh epoch (cursors ${rig.proxies.map((p) => p.acked.cursor)}, expected format at 1)`);
+  else ok('s16: coordinator stayed live on the fresh epoch after abandoning the round');
+  delete globalThis.__fvGate16;
 }
 
 // ---- run all ----
-console.log('lockstep concurrency / no-double-execution suite — ADR-0024 worker-per-session conversion\n');
-const reference = await buildReference();
-await scenarioOverlappingGrant(reference);
-await scenarioNoOpGrantIdempotent();
-await scenarioEpochDiscard();
-await scenarioRoundBarrier();
-await scenarioTeardownStragglers();
+console.log('ADR-0024 concurrency suite — REAL coordinator + REAL worker host + REAL WASM over the wire\n');
+await scenarioExactlyOnce();
+await scenarioResetReproducible();
+await scenarioRejectingCommand();
+await scenarioStopGatesGeneratorOnly();
+await scenarioReseatBurst();
+await scenarioOpsPerSec();
+await scenarioSignalsRealBackend();
+await scenarioResetAbandonsMidFlight();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
-console.log('PASS - exactly-once dispatch holds over the wire (worker-local re-entrancy, round barrier,');
-console.log('       epoch discard, teardown-drains-stragglers); see LANE-REPORT.md for scenarios deferred');
-console.log('       pending lane/coord + lane/worker (Pace/Race reseat, holding/stalled/waiting, opsPerSec,');
-console.log('       reset byte-reproducibility, abort/reject recovery).');
+console.log('PASS - the converted concurrency scenarios are green against the REAL production worker');
+console.log('       backend end to end (real coordinator + real worker host + real WASM over the wire):');
+console.log('       exactly-once dispatch, reset reproducibility (journal-print byte-identity), reject');
+console.log('       recovery, stop-gates-generator-only, Pace->Race reseat, opsPerSec, signals, reset');
+console.log('       abandons mid-flight. See LANE-REPORT.md for the OLD->NEW mapping + mutation evidence.');
 process.exit(0);
