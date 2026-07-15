@@ -76,6 +76,7 @@ export function createSessionProxy(port, { fsId, name, geometry }) {
       if (typeof m.programBytes === 'number') telemetry.programBytes = m.programBytes;
       if (typeof m.hostBytes === 'number') telemetry.hostBytes = m.hostBytes;
       telemetry.wa = telemetry.hostBytes > 0 ? telemetry.programBytes / telemetry.hostBytes : 1;
+      if (typeof m.caps === 'number') telemetry.caps = m.caps;   // ADR-0011 authority (A3); undefined until first telemetry => UI fails open
     } else if (m.type === W2C.FRAME) {
       frame = m;
     }
