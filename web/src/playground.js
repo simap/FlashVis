@@ -529,18 +529,17 @@ async function boot() {
     bootSequence();          // B10: prep-wrapped, same as page-load boot
   });
 
-  // slider 0..100 → sim-ns per real-ms (log scale). Real flash time = 1e6.
+  // slider 0..100 → sim-ns per real-ms (log scale). Real flash time = 1e6. Top (v=100)
+  // is 1e7 = 10× real-time (MAX_SCALE): NO "max no delay". An infinite scale is off-spec
+  // (§2 Δ must be finite, else the Race bound in playLimitNs is ignored by the flat-out
+  // worker). The coordinator also clamps to MAX_SCALE, so this stays in lockstep with it.
   function applySpeed(v) {
-    let scale, label;
-    if (v >= 100) { scale = Infinity; label = 'max · no delay'; }
-    else {
-      const lo = Math.log10(3000), hi = Math.log10(1e8);
-      scale = Math.pow(10, lo + (hi - lo) * (v / 99));
-      const x = scale / 1e6;
-      label = (x >= 0.9 && x <= 1.15) ? '≈ real-time'
-        : x < 1 ? `${(1 / x < 10 ? (1 / x).toFixed(1) : Math.round(1 / x))}× slow-mo`
-        : `${x < 10 ? x.toFixed(1) : Math.round(x)}× real-time`;
-    }
+    const lo = Math.log10(3000), hi = Math.log10(1e7);   // top = 1e7 (10× real-time)
+    const scale = Math.pow(10, lo + (hi - lo) * (v / 100));   // v=100 → exactly 1e7
+    const x = scale / 1e6;
+    const label = (x >= 0.9 && x <= 1.15) ? '≈ real-time'
+      : x < 1 ? `${(1 / x < 10 ? (1 / x).toFixed(1) : Math.round(1 / x))}× slow-mo`
+      : `${x < 10 ? x.toFixed(1) : Math.round(x)}× real-time`;
     coordinator.setSpeed(scale);
     // The same scale the coordinator paces playback with also times each die's
     // fill-reveal transition (lockstep.js: "the numeric copy the die animation

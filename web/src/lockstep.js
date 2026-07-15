@@ -57,9 +57,16 @@ const CMD_SEED = 0x900d5eed;
 // grant cadence deterministic and the watermark cleanly derived.
 const TARGET_FPS = 60;
 const MS_PER_FRAME = 1000 / TARGET_FPS;
-// No-delay (scale = Infinity): a fixed sim-ns chunk per frame so workers run flat-out
-// yet stay pinned to the same advancing ceiling (sim-synced), not racing off by speed.
-const NO_DELAY_STEP_NS = 50 * 1e6;
+// §2 requires Δ = scale / targetFPS to be FINITE (the player is "capped at playLimitNs"
+// unconditionally). An infinite scale / no-delay path is off-spec: at scale = Infinity the
+// worker's drain budget is Infinity, so it ignores playLimitNs and the §2 bound (which lives
+// entirely in playLimitNs) does nothing, and Race flash times diverge at "max". So there is
+// NO infinite scale: setSpeed clamps to MAX_SCALE and everything flows the finite path, so
+// the bounded playLimitNs is always the ceiling and the 2×chunk bound holds at every slider
+// position including the top. USER-SET to 1e7 = 10× real-time (real-time = 1e6 sim-ns/ms):
+// past ~5× the workers go execution-bound and the bound pins the leader (holding shows):
+// keeping the top at 10× lets that be observed.
+const MAX_SCALE = 1e7;   // 10× real-time; the §2 "Δ is finite" cap (user-set)
 
 // (The old STALL_GAP_NS is retired: §2 MAX-not-min means no SUSTAINED Race stall exists
 // — a laggard burns headroom and catches up. The one sustained standing signal is the
@@ -126,8 +133,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   let ratio = gcRatio;
   let mode = 'pace';                // 'race' | 'pace' — Pace is the boot default
   let running = false;
-  let scale = 20000;                // sim-ns per real-ms — the SAME scale the players use
-  let atMax = false;                // no-delay flag — set by setSpeed(Infinity)
+  let scale = 20000;                // sim-ns per real-ms, the SAME scale the players use (always finite, ≤ MAX_SCALE)
   let epoch = 0;
 
   // ---- §2 state ----
@@ -235,8 +241,8 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     }
   }
 
-  const chunkNs = () => (atMax ? NO_DELAY_STEP_NS : scale * MS_PER_FRAME);
-  const wireScale = () => (atMax ? Infinity : scale);
+  const chunkNs = () => scale * MS_PER_FRAME;   // §2 Δ, always finite
+  const wireScale = () => scale;                // always finite ⇒ the worker runs its metered (playLimitNs-capped) path
 
   // Pace join: advance the shared index one entry at a time, only when every session
   // has drained the current shared step (∀ entriesDrained ≥ sharedIndex). On each
@@ -451,7 +457,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     get mode() { return mode; },
     /** scale: sim-ns per real-ms (Infinity ⇒ no delay). Rides grant.scale (§2): the
      *  next frame's grant carries it, so a SPEED change lands in ≤ one frame. */
-    setSpeed(next) { scale = next; atMax = !isFinite(next); lastComputedRound = -1; },
+    setSpeed(next) { scale = Math.min(next, MAX_SCALE); lastComputedRound = -1; },   // clamp: no infinite scale (§2 Δ finite)
     start() { running = true; },
     /** Pause: gate the churn GENERATOR only (ADR-0020 / §4 — no stop message). Grants
      *  keep flowing (no-ops); in-flight worker ops drain to quiescence on their own. */
