@@ -542,6 +542,13 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
           fsId: p.fsId, name: p.name,
           stepCursor: p.acked.cursor,
           fileOpCount: p.acked.fileOpCount,
+          // flashTimeNs is the PACED flash time (drainedCounters, advances with the §2
+          // playbackNs the grant bounds), so in Race it converges across FS within the
+          // 2x chunk bound: this is the flash time the FS card should show. simNs is the
+          // EXECUTION counter (telemetry only): it vaults atomically when a command runs,
+          // so it leads paced playback by up to one command and does NOT converge. Both
+          // are exposed; the card reads flashTimeNs (playground read swapped at merge).
+          flashTimeNs: p.acked.flashTimeNs,
           simNs: t.simNs,
           wa: t.wa,
           files: t.fsinfo.files,
