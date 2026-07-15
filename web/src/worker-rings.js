@@ -1,9 +1,9 @@
 /*
- * worker-rings.js — append-only, monotonic-id ring buffer for the worker-side
+ * worker-rings.js: append-only, monotonic-id ring buffer for the worker-side
  * journal + viz-event logs (ADR-0024 §7). Ids are never reused (issued from a
  * single ever-increasing counter), so `since` is a stable cursor and a gap
  * (firstId > since+1) is arithmetically detectable by the caller as ring
- * eviction. Bounded at `max` (>= protocol.js's JOURNAL_MIN floor) — the ring
+ * eviction. Bounded at `max` (>= protocol.js's JOURNAL_MIN floor); the ring
  * bound is worker-local, not a wire concept.
  */
 export function createRing(max) {
@@ -26,7 +26,7 @@ export function createRing(max) {
       if (limit != null && out.length > limit) return out.slice(out.length - limit);
       return out;
     },
-    /** The newest `limit` items (or all, if `limit` is null) — the (re)attach mode. */
+    /** The newest `limit` items (or all, if `limit` is null): the (re)attach mode. */
     newest(limit) {
       if (limit == null) return items.slice();
       return items.slice(Math.max(0, items.length - limit));

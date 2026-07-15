@@ -1,9 +1,9 @@
 /*
- * session-worker-test.mjs — message-level test for web/src/session-worker.js
+ * session-worker-test.mjs: message-level test for web/src/session-worker.js
  * against a REAL device (scripts/worker-stub-runner.mjs behind runner.js's
  * seam; dist WASM is gitignored). Complements scripts/worker-conformance-test.mjs
  * (which drives the synthetic-cost state machine): this exercises the REAL
- * execution path — real churn writes, a real ADR-0019 sandbox command from raw
+ * execution path: real churn writes, a real ADR-0019 sandbox command from raw
  * source text, real heat/shown/erase-event FRAME payloads, and telemetry.
  */
 import { createTransport, flushTurns } from './mock-worker-transport.mjs';
@@ -35,7 +35,7 @@ async function run() {
   await flushTurns(4);   // let INIT's async runner build land
 
   // Raw console source (ADR-0019 sandbox model): bare-name statements, no
-  // async(api)=>{} wrapper — the worker wraps it in the per-session sandbox.
+  // async(api)=>{} wrapper: the worker wraps it in the per-session sandbox.
   const COMMAND_SRC = "await writeFile('c.bin', 2048); await writeFile('d.bin', 2048); await gc()";
   mainPort.postMessage(msg(C2W.ENTRIES, {
     epoch: EPOCH,
@@ -51,7 +51,7 @@ async function run() {
   // ---- 1. THE TWO-LAYER TIMED PLAYER (ADR-0024 §2/§6): EXECUTION is eager,
   //         PLAYBACK is metered against playLimitNs. A tiny playLimitNs=1 must
   //         hold playbackNs at the ceiling (paced) even though execution (cursor)
-  //         races ahead — playbackNs is the currency, NOT the executed op cost.
+  //         races ahead: playbackNs is the currency, NOT the executed op cost.
   //         (This is the B6/B7/B8 fix: pre-fix, playbackNs vaulted to entry 0's
   //         full ~24ms write cost on one-op overshoot.) ----
   mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round: 1, entryLimit: 2, playLimitNs: 1, scale: 20000 }));
@@ -61,20 +61,20 @@ async function run() {
   else ok('round 1 acked (I10: every grant acked on receipt)');
   if (ack1 && ack1.cursor >= 1) ok(`execution ran eagerly despite playLimitNs=1 (cursor=${ack1.cursor}, decoupled from playback)`);
   else fail(`execution did not run (cursor=${ack1 && ack1.cursor})`);
-  if (ack1 && ack1.playbackNs === 1) ok('PACED: playbackNs held exactly at playLimitNs=1 (continuous intra-event — NOT vaulted to entry 0\'s full flash cost)');
+  if (ack1 && ack1.playbackNs === 1) ok('PACED: playbackNs held exactly at playLimitNs=1 (continuous intra-event, NOT vaulted to entry 0\'s full flash cost)');
   else fail(`playbackNs not paced to the ceiling: expected 1, got ${ack1 && ack1.playbackNs} (B7: sim outran the gate)`);
   if (ack1 && ack1.entriesDrained === -1) ok('entriesDrained = -1: entry 0 executed but NOT yet drained (its ~24ms of flash has not played back under a 1ns budget)');
   else fail(`entriesDrained should be -1 (entry 0 not drained), got ${ack1 && ack1.entriesDrained}`);
 
   // ---- 2. open the gate + entryLimit at no-delay: all 4 entries EXECUTE, incl.
-  //         the async command (index 3, quiesces over macrotasks — I1), and the
+  //         the async command (index 3, quiesces over macrotasks, I1), and the
   //         metered player DRAINS the whole backlog flat-out-but-chunked ----
   mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round: 2, entryLimit: 4, playLimitNs: 1e12, scale: Infinity }));
   await wait(200);   // command quiesces + no-delay player drains the queue
   const ackLater = inbox.grantAck[inbox.grantAck.length - 1];
   if (ackLater.cursor === 4) ok('all 4 entries executed (churn ×2, gc, command) once the gate opened');
   else fail(`cursor did not reach 4 (got ${ackLater.cursor})`);
-  if (ackLater.entriesDrained === 3) ok('entriesDrained reached 3 = highest index (all 4 drained; command completed AND metered-drained — §6)');
+  if (ackLater.entriesDrained === 3) ok('entriesDrained reached 3 = highest index (all 4 drained; command completed AND metered-drained, §6)');
   else fail(`entriesDrained not 3 (${ackLater.entriesDrained})`);
   if (ackLater.playbackNs > 1) ok(`playbackNs advanced to real flash time once drained (${(ackLater.playbackNs / 1e6).toFixed(1)} ms)`);
   else fail(`playbackNs did not advance after drain (${ackLater.playbackNs})`);
@@ -104,7 +104,7 @@ async function run() {
   else fail('FRAME.shown wrong shape/type');
   const eraseEvents = f.events.filter((e) => e.kind === 'erase');
   if (eraseEvents.length > 0 && eraseEvents.every((e) => typeof e.id === 'number' && typeof e.sector === 'number' && typeof e.ms === 'number'))
-    ok(`FRAME.events carries erase EventEntries {id,kind:'erase',sector,ms} (${eraseEvents.length} from gc erases) — sourced from device ERASE ops, not command lifecycle`);
+    ok(`FRAME.events carries erase EventEntries {id,kind:'erase',sector,ms} (${eraseEvents.length} from gc erases), sourced from device ERASE ops, not command lifecycle`);
   else fail(`no well-formed erase EventEntries (got ${JSON.stringify(f.events.slice(0, 3))})`);
   if (f.events.every((e) => e.kind !== 'command')) ok('no command-lifecycle entries polluting the events ring (they live in the journal)');
   else fail('command lifecycle leaked into the events ring');
@@ -169,13 +169,13 @@ async function run() {
   await wait(80);
   const b2ack = w2.grantAck[w2.grantAck.length - 1];
   if (b2ack && b2ack.epoch === 11 && b2ack.cursor === 1 && b2ack.playbackNs > 0)
-    ok('B2: RESET before the INIT build landed still yields a runner — real write executed + drained (not runner-less)');
+    ok('B2: RESET before the INIT build landed still yields a runner, real write executed + drained (not runner-less)');
   else fail(`B2: session runner-less after RESET-races-INIT (ack=${JSON.stringify(b2ack)})`);
 
   // ---- 8. B18: erase sweeps must surface at SLOW-MO, not just fast. The events
   //         cursor the coordinator feeds back each frame is the eventHead we last
   //         reported (playground.js: eventsSince = frame.eventHead), and eventHead
-  //         is nextId — ONE PAST the highest id issued. Honoring it verbatim
+  //         is nextId, ONE PAST the highest id issued. Honoring it verbatim
   //         against an EXCLUSIVE ring (id > since) dropped the very next erase. At
   //         fast speed many erases land per frame so the drop is invisible; at
   //         slow-mo exactly ONE lands between pulls and it IS the dropped one, so
@@ -220,12 +220,12 @@ async function run() {
     }
     const uniqueErases = seen.size;
     const dups = [...seen.values()].filter((n) => n > 1).length;
-    if (uniqueErases >= 10) ok(`B18: erase sweeps surface at slow-mo via the head-as-since cursor (${uniqueErases}/12 gc erases; pre-fix: 0 — the boundary event was dropped every frame)`);
-    else fail(`B18: erase sweeps NOT surfacing at slow-mo (got ${uniqueErases}/12) — inverted visibility regressed`);
-    if (dups === 0) ok('B18: each erase surfaces exactly once — the head->inclusive-since bridge does not double-animate');
-    else fail(`B18: ${dups} erase(s) surfaced more than once — the cursor bridge over-returns`);
-    if (maxMs > 300) ok(`B18: slow-mo erase holds for a long scaled ms (${maxMs.toFixed(0)}ms) — the 21ms erase is genuinely visible, not a MIN_ANIM flash`);
-    else fail(`B18: slow-mo erase ms too short (${maxMs.toFixed(0)}ms) — duration not scaling with slow-mo`);
+    if (uniqueErases >= 10) ok(`B18: erase sweeps surface at slow-mo via the head-as-since cursor (${uniqueErases}/12 gc erases; pre-fix: 0, the boundary event was dropped every frame)`);
+    else fail(`B18: erase sweeps NOT surfacing at slow-mo (got ${uniqueErases}/12), inverted visibility regressed`);
+    if (dups === 0) ok('B18: each erase surfaces exactly once, the head->inclusive-since bridge does not double-animate');
+    else fail(`B18: ${dups} erase(s) surfaced more than once, the cursor bridge over-returns`);
+    if (maxMs > 300) ok(`B18: slow-mo erase holds for a long scaled ms (${maxMs.toFixed(0)}ms), the 21ms erase is genuinely visible, not a MIN_ANIM flash`);
+    else fail(`B18: slow-mo erase ms too short (${maxMs.toFixed(0)}ms), duration not scaling with slow-mo`);
     // B19: the same head-as-since cursor over the JOURNAL stream. Each write/gc entry
     // journals an op line; at slow-mo one entry drains per pull window, so the boundary
     // line was dropped pre-fix (missing tape lines). Assert every op line surfaces AND
@@ -233,9 +233,9 @@ async function run() {
     const jdups = [...jseen.values()].filter((n) => n > 1).length;
     // 12 writes + 12 gc each emit an op line (gc's batch carries its erase) = 24 op lines.
     if (jseen.size >= 20) ok(`B19: journal tape lines surface at slow-mo via the head-as-since cursor (${jseen.size} lines; pre-fix the boundary line of each window was dropped)`);
-    else fail(`B19: journal tape lines missing at slow-mo (got ${jseen.size}, expected ~24) — boundary-line drop regressed`);
-    if (jdups === 0) ok('B19: no journal line returned twice on the wire — the journal bridge does not duplicate tape lines');
-    else fail(`B19: ${jdups} journal line(s) returned more than once — the journal cursor bridge over-returns`);
+    else fail(`B19: journal tape lines missing at slow-mo (got ${jseen.size}, expected ~24), boundary-line drop regressed`);
+    if (jdups === 0) ok('B19: no journal line returned twice on the wire, the journal bridge does not duplicate tape lines');
+    else fail(`B19: ${jdups} journal line(s) returned more than once, the journal cursor bridge over-returns`);
   }
 
   console.log('');

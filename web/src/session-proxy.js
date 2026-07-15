@@ -1,5 +1,5 @@
 /*
- * session-proxy.js — the coordinator's (C) view of one session worker (ADR-0024).
+ * session-proxy.js: the coordinator's (C) view of one session worker (ADR-0024).
  *
  * Before ADR-0024 the coordinator held a real in-process `session` object and read
  * its device/runner SYNCHRONOUSLY (s.device.stats.simNs, s.pending(), s.runner.*).
@@ -11,12 +11,12 @@
  *
  * Everything the old coordinator read off a live session object is here reconstructed
  * from the wire:
- *   acked.playbackNs   — the protocol currency; last acked playback position (§2)
- *   acked.cursor       — this session's sequence cursor (was cursors.get(s))
- *   acked.entriesDrained — highest entry executed AND tape-drained (Pace join/rebase)
- *   acked.round        — last grant round this worker acked (the §2 barrier signal)
- *   acked.{fileOpCount,flashTimeNs} — drainedCounters (ADR-0023 cost view)
- *   telemetry.*        — heartbeat scalars (simNs is telemetry-only, NEVER currency)
+ *   acked.playbackNs   : the protocol currency; last acked playback position (§2)
+ *   acked.cursor       : this session's sequence cursor (was cursors.get(s))
+ *   acked.entriesDrained : highest entry executed AND tape-drained (Pace join/rebase)
+ *   acked.round        : last grant round this worker acked (the §2 barrier signal)
+ *   acked.{fileOpCount,flashTimeNs} : drainedCounters (ADR-0023 cost view)
+ *   telemetry.*        : heartbeat scalars (simNs is telemetry-only, NEVER currency)
  *
  * I5 (epoch coherence): a message whose epoch != the proxy's current epoch is
  * discarded here, at the boundary, so a straggler from before a reset() can never
@@ -35,7 +35,7 @@ const nowMs = () => (typeof performance !== 'undefined' && performance.now ? per
 export function createSessionProxy(port, { fsId, name, geometry }) {
   let epoch = 0;
   // Coordinator-visible wire state, all reconstructed from acks/telemetry. Never a
-  // live device/runner reference — the whole point of ADR-0024 is that those are on
+  // live device/runner reference: the whole point of ADR-0024 is that those are on
   // the other thread. Kept as one mutable object each so the coordinator can read
   // fields cheaply every frame without allocating.
   const acked = { round: -1, playbackNs: 0, cursor: 0, entriesDrained: -1, fileOpCount: 0, flashTimeNs: 0 };
@@ -96,9 +96,9 @@ export function createSessionProxy(port, { fsId, name, geometry }) {
 
     // ---- C→worker sends (every send stamps the current epoch) ----
     init() { port.postMessage(msg(C2W.INIT, { epoch, fsId, geometry, name })); },
-    /** Prefetch entries (authorizes nothing — GRANT authorizes). No-op on empty. */
+    /** Prefetch entries (authorizes nothing, GRANT authorizes). No-op on empty. */
     entries(list) { if (list && list.length) port.postMessage(msg(C2W.ENTRIES, { epoch, entries: list })); },
-    /** Control plane: { round, entryLimit, playLimitNs, scale } — sent EVERY frame (I10). */
+    /** Control plane: { round, entryLimit, playLimitNs, scale }, sent EVERY frame (I10). */
     grant(g) { port.postMessage(msg(C2W.GRANT, { epoch, ...g })); },
     pull(sel) { port.postMessage(msg(C2W.PULL, { epoch, ...(sel || {}) })); },
     /** Bump to a new epoch and tell the worker to rebuild (I5); local state zeroes. */

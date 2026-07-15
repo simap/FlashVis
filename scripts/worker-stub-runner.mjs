@@ -1,12 +1,12 @@
 /*
- * worker-stub-runner.mjs — test-only runner.js stand-in for session-worker.js
+ * worker-stub-runner.mjs: test-only runner.js stand-in for session-worker.js
  * tests. dist/*.mjs (the real WASM filesystems) is gitignored and not present
- * in every worktree (see the lane brief) — device.js itself has NO WASM
+ * in every worktree (see the lane brief); device.js itself has NO WASM
  * dependency, so this stub wires a REAL createNorDevice (real timing, real
  * read/prog/erase events, so heat/wear/playback pacing are exercised
  * faithfully) behind a small in-memory file table, matching runner.js's API
  * surface (device, write/read/remove/stat/names/mkdir/gcStep/liveMap/format/
- * mount/unmount/fsinfo). Not a faithful FS simulation — just enough that
+ * mount/unmount/fsinfo). Not a faithful FS simulation, just enough that
  * every op actually touches the device, like scripts/stub-backend.mjs does
  * for the UI layer.
  */
@@ -18,7 +18,7 @@ export async function createStubRunner(geometry = {}) {
   const pageSize = geometry.pageSize ?? 256;
   const device = createNorDevice({ sectorSize, sectorCount, pageSize });
 
-  // Fake WASM heap the device's read/prog can copy to/from — device.js expects
+  // Fake WASM heap the device's read/prog can copy to/from: device.js expects
   // `mod.HEAPU8`; give it a plain ArrayBuffer-backed view, big enough for one op.
   const HEAP = new Uint8Array(1 << 20);
   device.attach({ HEAPU8: HEAP });
@@ -26,7 +26,7 @@ export async function createStubRunner(geometry = {}) {
   const files = new Map();     // name -> Uint8Array
   let nextOff = 0;
   const pageAlloc = (len) => {
-    // Bump-allocate pages sequentially, wrapping — enough to generate real
+    // Bump-allocate pages sequentially, wrapping, enough to generate real
     // prog/erase device traffic without a real block allocator.
     const off = nextOff % device.size;
     nextOff += Math.ceil(len / pageSize) * pageSize;
@@ -70,7 +70,7 @@ export async function createStubRunner(geometry = {}) {
     mkdir() { return true; },
     list() { return [...files.entries()].map(([name, u8]) => ({ name, size: u8.length })); },
 
-    // One opportunistic GC step: erase the next sector in rotation — real
+    // One opportunistic GC step: erase the next sector in rotation, real
     // device traffic (wear bump), independent of file content.
     _gcSector: 0,
     gcStep() { const s = runner._gcSector; runner._gcSector = (s + 1) % sectorCount; device.erase(s * sectorSize, sectorSize); return 0; },

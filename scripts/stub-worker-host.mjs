@@ -1,9 +1,9 @@
 /*
- * stub-worker-host.mjs — a minimal, protocol.js-conformant worker-side host,
+ * stub-worker-host.mjs: a minimal, protocol.js-conformant worker-side host,
  * built ONLY to shape/run scripts/worker-conformance-test.mjs while the real
  * worker host (lane/worker) doesn't exist in this worktree yet.
  *
- * This is NOT a device/runner simulation — no WASM, no flash bytes. It models
+ * This is NOT a device/runner simulation, no WASM, no flash bytes. It models
  * exactly the message-level state machine ADR-0024 §2/§4/§5/§9 describe:
  * entries land via ENTRIES, a GRANT opens the gate `index < entryLimit &&
  * playbackNs < playLimitNs`, executing an entry advances playbackNs/cursor/
@@ -16,7 +16,7 @@
  * SEAM: scripts/worker-conformance-test.mjs imports this via
  *   const { installWorkerHost } = await import(process.env.FV_WORKER_HOST || './stub-worker-host.mjs');
  * exactly the FV_LOCKSTEP/FV_SESSION pattern (lockstep-concurrency-test.mjs,
- * command-error-test.mjs) — pointing the suite at the real host (lane/worker)
+ * command-error-test.mjs), pointing the suite at the real host (lane/worker)
  * once it lands is that one env var / one import line, no other suite change.
  * The real host MUST satisfy the exact same assertions this stub is built to
  * pass; nothing here is a shortcut the real host gets to skip.
@@ -98,7 +98,7 @@ export function installWorkerHost(workerPort) {
       if (entry.kind === 'command' && entry.payload && entry.payload.prep === false) {
         // §9 exit join: this call executing entry j at all already presumes the
         // coordinator withheld entryLimit at j until every session's
-        // entriesDrained >= j-1 — that withholding is coordinator-side (the
+        // entriesDrained >= j-1, that withholding is coordinator-side (the
         // test plays coordinator); the worker's own obligation is: execute it
         // instantly and zero the DISPLAYED counters (flashTime, fileOpCount)
         // at the exit, per §9.
@@ -113,7 +113,7 @@ export function installWorkerHost(workerPort) {
 
       if (entry.kind === 'command' && entry.payload && entry.payload.ticks > 1) {
         // Multi-round settling: I1 says a command's quiescence ack IS its
-        // completion — nothing (playbackNs/cursor/entriesDrained/counters)
+        // completion, nothing (playbackNs/cursor/entriesDrained/counters)
         // may move for this entry until the tick count reaches zero.
         if (!pendingCommand || pendingCommand.index !== cursor) {
           pendingCommand = { index: cursor, ticksRemaining: entry.payload.ticks };

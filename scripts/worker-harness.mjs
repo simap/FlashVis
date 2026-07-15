@@ -1,8 +1,8 @@
 /*
- * worker-harness.mjs — rig for the ADR-0024 concurrency suite's REAL-PATH cut.
+ * worker-harness.mjs: rig for the ADR-0024 concurrency suite's REAL-PATH cut.
  *
  * Composes the whole production stack end to end over the faithful mock
- * transport (scripts/mock-worker-transport.mjs — structuredClone + async
+ * transport (scripts/mock-worker-transport.mjs: structuredClone + async
  * queued delivery):
  *
  *   createChurnModel  →  createLockstep (real coordinator, §2 algebra)
@@ -19,17 +19,17 @@
  * Two mutation/integration seams carry forward the FV_LOCKSTEP/FV_SESSION
  * pattern from the pre-0024 suite:
  *
- *   FV_COORDINATOR  module exporting createLockstep — the real coordinator
+ *   FV_COORDINATOR  module exporting createLockstep, the real coordinator
  *                   (web/src/lockstep.js) by default; point at a scratch copy
  *                   with one guard reintroduced-as-a-bug to prove a scenario
  *                   fails under its target defect.
  *   FV_WORKER_HOST  module exporting installWorkerHost (alias createWorkerHost /
- *                   attachWorkerHost also accepted) — the real production host
+ *                   attachWorkerHost also accepted), the real production host
  *                   (web/src/session-worker.js) by default; same mutation role
  *                   for worker-side guards.
  *
  * (The old ref-worker-host.mjs, which wrapped the retained main-thread
- * session.js, is retired now that the real standalone worker host is here —
+ * session.js, is retired now that the real standalone worker host is here,
  * see LANE-REPORT.md.)
  */
 import { createTransport, flushTurns } from './mock-worker-transport.mjs';
@@ -45,11 +45,11 @@ if (typeof installHost !== 'function') throw new Error(`FV_WORKER_HOST module ${
 
 export const GEOMETRY = { sectorSize: 4096, sectorCount: 64, pageSize: 256, granule: 1 };
 // Mirrors web/src/playground.js's boot config EXACTLY (scaled to the 256 KiB
-// device) — including the `profile` (class weights: large weight 0 ⇒ writes cap
+// device), including the `profile` (class weights: large weight 0 ⇒ writes cap
 // at the 20 KB medium class, so a single churn write never exceeds the chip) and
 // `slotCount`. Omitting the profile falls back to churn.js's default, which emits
 // 350 KB writes that a fresh 256 KB chip rejects with -4 (a real worker throws
-// synchronously in pump on that — see LANE-REPORT). The faithful config is the
+// synchronously in pump on that, see LANE-REPORT). The faithful config is the
 // point: the auto-workload the suite drives must behave as shipped.
 export const CHURN_CFG = {
   seed: 0x00c0ffee,
@@ -73,14 +73,14 @@ export const FS_ORDER = ['fastffs', 'littlefs'];
 
 /**
  * Build a real-path rig: real coordinator, real proxies, real worker hosts
- * (real WASM), all over the mock transport. autoTick is off — drive frames
+ * (real WASM), all over the mock transport. autoTick is off, drive frames
  * manually via frame()/run() so delivery is deterministic.
  *
  * ASYNC because a REAL worker host's INIT builds its runner ASYNCHRONOUSLY (a
  * WASM module load). setSessions() sends INIT; we must let that runner-build
  * LAND before coord.reset() sends the RESET, otherwise RESET's gen-bump starves
  * the in-flight INIT build (its `myGen !== gen` guard) and the worker is left
- * runner-less — real commands then park forever. The mock-worker suites don't
+ * runner-less: real commands then park forever. The mock-worker suites don't
  * hit this (synchronous stub/mock workers); the real backend does. Once INIT
  * has landed, reset() reuses the built runner via device.reset() (no reload).
  */
@@ -96,7 +96,7 @@ export async function makeRig({ speed = Infinity, gcRatio = 0.5 } = {}) {
   }
   coord.setSessions(proxies);                           // sends INIT (async runner build)
   await flushTurns(8);                                  // let every worker's runner build land
-  coord.reset();                                        // now safe — reuses the built runner
+  coord.reset();                                        // now safe, reuses the built runner
   coord.setSpeed(speed);
   await flushTurns(4);                                  // let the RESET rebuild land
   const byId = Object.fromEntries(proxies.map((p) => [p.fsId, p]));
@@ -108,7 +108,7 @@ export async function makeRig({ speed = Infinity, gcRatio = 0.5 } = {}) {
 /**
  * The ADR-0024 boot / header-Reset flow (spec/ui.md, coord-wire testBootResetFlow):
  * a fresh worker chip is BLANK (INIT/RESET build+reset the device but never
- * format+mount). The ONE real format ships as a broadcast COMMAND after reset —
+ * format+mount). The ONE real format ships as a broadcast COMMAND after reset,
  * there is no `format` wire field. Every real-WASM scenario needs a mounted chip,
  * so makeRig() runs this once, and any scenario that calls coord.reset() itself
  * must call bootFormat(rig) again before issuing real workload. Consumes sequence
@@ -136,7 +136,7 @@ export async function run(rig, n, sampleEach) {
   for (let i = 0; i < n; i++) { await frame(rig); if (sampleEach) sampleEach(i); }
 }
 
-/** Tick frames until pred() holds (or throw at the bound — a hang is a failure,
+/** Tick frames until pred() holds (or throw at the bound: a hang is a failure,
  *  never an infinite wait). */
 export async function pumpUntil(rig, pred, label, maxFrames = 400) {
   for (let i = 0; i < maxFrames; i++) {
@@ -144,7 +144,7 @@ export async function pumpUntil(rig, pred, label, maxFrames = 400) {
     await frame(rig);
   }
   if (pred()) return maxFrames;
-  throw new Error(`pumpUntil(${label}) exceeded ${maxFrames} frames — coordinator never converged (frozen FS / broken lock?)`);
+  throw new Error(`pumpUntil(${label}) exceeded ${maxFrames} frames, coordinator never converged (frozen FS / broken lock?)`);
 }
 
 export const snapById = (rig) => Object.fromEntries(rig.coord.snapshots().map((s) => [s.fsId, s]));
@@ -152,7 +152,7 @@ export const cursorsEqualAt = (rig, n) => rig.proxies.every((p) => p.acked.curso
 export const allDrainedTo = (rig, idx) => rig.proxies.every((p) => p.acked.entriesDrained >= idx);
 
 /** Pull a session worker's journal over the wire (§7) and return its lines.
- *  The ONLY channel data leaves a session by — used for dispatch counting and
+ *  The ONLY channel data leaves a session by, used for dispatch counting and
  *  journal-print byte-identity (no byte side-channel exists). */
 export async function pullJournal(rig, fsId, { limit = 2000 } = {}) {
   rig.byId[fsId].pull({ journal: { since: -1, limit } });

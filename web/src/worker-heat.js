@@ -1,21 +1,21 @@
 /*
- * worker-heat.js — headless per-page heat/shown accumulator (ADR-0024 §6/§7
- * "heat" relocation). This is viz.js's numeric core — per-page read/prog heat
- * coalescence + shown fill — with every DOM/animation call stripped out. The
+ * worker-heat.js: headless per-page heat/shown accumulator (ADR-0024 §6/§7
+ * "heat" relocation). This is viz.js's numeric core, per-page read/prog heat
+ * coalescence + shown fill, with every DOM/animation call stripped out. The
  * worker only ACCUMULATES; a PULL (FRAME) reads a decayed snapshot.
  *
  * This is the accumulator half; the timed player (queue + metering tick) lives
  * in session-worker.js. applyEvent() is called from that player's DRAIN, one op
- * at a time, as playback paces through the queue (§7: glow is PACED — tint leads
- * glow) — NOT eagerly at execution. Every op still contributes its full HEAT_ADD
+ * at a time, as playback paces through the queue (§7: glow is PACED, tint leads
+ * glow), NOT eagerly at execution. Every op still contributes its full HEAT_ADD
  * (I8). Heat DECAY is computed closed-form at snapshot time from wall-clock
  * elapsed (ADR-0024 §7: "decay closed-form at bump/pull, no worker rAF").
  *
  * ADR-0022 heat/render veto (I8): every op still contributes exactly HEAT_ADD
- * to its page — nothing here drops, throttles, samples, or coalesces an op
+ * to its page, nothing here drops, throttles, samples, or coalesces an op
  * away. Only the accumulation LOCUS moved.
  */
-const HEAT_ADD = 1;                 // intensity added per read/prog page op — same constant as viz.js
+const HEAT_ADD = 1;                 // intensity added per read/prog page op, same constant as viz.js
 const HEAT_HALF_MS = 500;           // unscaled glow half-life (real ms)
 const HEAT_HALF_MIN = 50;           // floor so a burst stays visible at max speed
 const HEAT_HALF_MAX = 3000;         // ceiling so a slow-mo glow can't linger forever
@@ -70,11 +70,11 @@ export function createHeatPlayer(geometry) {
     },
 
     /** Expand a device event into per-page PLAYBACK steps (ADR-0009 "multi-page ops
-     *  split to sweep page-by-page" — B17). A read/prog over N pages becomes N steps
+     *  split to sweep page-by-page", B17). A read/prog over N pages becomes N steps
      *  of ns/N each, so the timed player lights one page per slot as it crosses the
      *  op's playback span (the whole glow no longer lands in a single frame). An
      *  erase stays one whole-sector step. The per-page ns sum to ev.ns exactly, so
-     *  playback timing is unchanged — this is intra-op granularity only. Apply each
+     *  playback timing is unchanged, this is intra-op granularity only. Apply each
      *  returned step at the START of its slot via applyStep(). */
     stepsFor(ev) {
       if (ev.op === 'erase') return [{ ns: ev.ns || 0, op: 'erase', sector: ev.sector }];
@@ -91,7 +91,7 @@ export function createHeatPlayer(geometry) {
       return steps;
     },
 
-    /** Apply ONE per-page step (from stepsFor) to shown/heat — its full HEAT_ADD (I8). */
+    /** Apply ONE per-page step (from stepsFor) to shown/heat: its full HEAT_ADD (I8). */
     applyStep(ps) {
       if (ps.op === 'prog') progPage(ps.page, ps.off, ps.len);
       else if (ps.op === 'read') bump(ps.page, 'read');
@@ -100,7 +100,7 @@ export function createHeatPlayer(geometry) {
 
     /** Decay (closed-form since the last snapshot) then return the current heat
      *  as {read, prog} Float32Arrays (FrameHeat, protocol.js). Call from FRAME
-     *  assembly / epoch bump only — never a periodic timer. */
+     *  assembly / epoch bump only, never a periodic timer. */
     snapshotHeat(scale) {
       const now = Date.now();
       const dt = Math.max(0, now - lastDecayAt);
