@@ -28,6 +28,7 @@
     "test:realsmoke": "node scripts/real-smoke.mjs",
     "test:bootformat": "node scripts/boot-format-test.mjs",
     "test:concurrency": "node scripts/lockstep-concurrency-test.mjs",
+    "test:coordwire": "node scripts/coord-wire-test.mjs",
     "test:commanderror": "node scripts/command-error-test.mjs",
     "test:tapeleak": "node scripts/tape-leak-test.mjs",
     "test:vizheat": "node scripts/viz-heat-test.mjs",
