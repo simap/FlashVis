@@ -1,18 +1,13 @@
 /*
- * session-worker-test.mjs — message-level conformance test for
- * web/src/session-worker.js (ADR-0024 lane W). Drives the worker host
- * through scripts/mock-worker-transport.mjs (structuredClone + async ordered
- * delivery — a faithful in-realm Worker-port model, ADR-0024 §13) acting as
- * the coordinator: INIT / ENTRIES / GRANT / PULL / RESET in, asserting
- * GRANT_ACK / FRAME / TELEMETRY shapes and the §2 gate out.
- *
- * dist/*.mjs (real WASM filesystems) is gitignored and not present in every
- * worktree — this test injects scripts/worker-stub-runner.mjs (a real
- * device.js behind a small in-memory file table) via session-worker.js's
- * `createRunner` seam, per the lane brief.
+ * session-worker-test.mjs — message-level test for web/src/session-worker.js
+ * against a REAL device (scripts/worker-stub-runner.mjs behind runner.js's
+ * seam; dist WASM is gitignored). Complements scripts/worker-conformance-test.mjs
+ * (which drives the synthetic-cost state machine): this exercises the REAL
+ * execution path — real churn writes, a real ADR-0019 sandbox command from raw
+ * source text, real heat/shown/erase-event FRAME payloads, and telemetry.
  */
 import { createTransport, flushTurns } from './mock-worker-transport.mjs';
-import { createWorkerHost } from '../web/src/session-worker.js';
+import { installWorkerHost } from '../web/src/session-worker.js';
 import { createStubRunner } from './worker-stub-runner.mjs';
 import { C2W, W2C, msg } from '../web/src/protocol.js';
 
@@ -25,7 +20,7 @@ const GEOMETRY = { sectorSize: 4096, sectorCount: 8, pageSize: 256 };
 
 async function run() {
   const { mainPort, workerPort } = createTransport();
-  createWorkerHost(workerPort, { createRunner: createStubRunner });
+  installWorkerHost(workerPort, { createRunner: createStubRunner });
 
   const inbox = { grantAck: [], frame: [], telemetry: [] };
   mainPort.onmessage = (e) => {
@@ -39,8 +34,9 @@ async function run() {
   mainPort.postMessage(msg(C2W.INIT, { epoch: EPOCH, fsId: 'stub', geometry: GEOMETRY, name: 'stub' }));
   await flushTurns(4);   // let INIT's async runner build land
 
-  // ---- entries: two churn writes, one gc, one command (two more writes) ----
-  const COMMAND_SRC = "async (api) => { await api.writeFile('c.bin', 2048); await api.writeFile('d.bin', 2048); }";
+  // Raw console source (ADR-0019 sandbox model): bare-name statements, no
+  // async(api)=>{} wrapper — the worker wraps it in the per-session sandbox.
+  const COMMAND_SRC = "await writeFile('c.bin', 2048); await writeFile('d.bin', 2048); await gc()";
   mainPort.postMessage(msg(C2W.ENTRIES, {
     epoch: EPOCH,
     entries: [
@@ -52,106 +48,108 @@ async function run() {
   }));
   await flushTurns(2);
 
-  // ---- 1. §2 gate: a tiny playLimitNs caps playback to ONE op's worth (the
-  //         gate is only re-checked BETWEEN ops — "one-op overshoot" — so
-  //         with entryLimit:2 and playLimitNs:1, entry 0 (the one op already
-  //         queued when the gate was open) fully plays out, but entry 1's
-  //         playback never STARTS: entriesDrained must stop at 0, not 1, even
-  //         though execution (fast, synchronous) may race both entries ahead ----
-  mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round: 1, entryLimit: 2, playLimitNs: 1, scale: Infinity }));
+  // ---- 1. §2 gate: playLimitNs=1 lets exactly ONE entry execute (one-op
+  //         overshoot), then the gate shuts even though entryLimit permits more ----
+  mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round: 1, entryLimit: 2, playLimitNs: 1, scale: 20000 }));
   await flushTurns(2);
-  await wait(40);   // let at least one 16ms tick run so the player has a chance to drain
+  const ack1 = inbox.grantAck.filter((a) => a.round === 1).pop();
+  if (!ack1) fail('no grantAck for round 1 (I10)');
+  else ok('round 1 acked (I10: every grant acked on receipt)');
+  if (ack1 && ack1.cursor === 1) ok('gate: exactly entry 0 executed (one-op overshoot past playLimitNs=1)');
+  else fail(`gate: expected cursor 1, got ${ack1 && ack1.cursor} (playLimitNs=1 not honored)`);
+  if (ack1 && ack1.playbackNs > 1) ok(`playbackNs (${ack1.playbackNs}) reflects entry 0's real flash cost (overshoot)`);
+  else fail(`playbackNs did not advance to entry 0's real cost (${ack1 && ack1.playbackNs})`);
+  if (ack1 && ack1.entriesDrained === ack1.cursor) ok('entriesDrained tracks cursor (execution == drain, this model)');
+  else fail(`entriesDrained (${ack1 && ack1.entriesDrained}) != cursor (${ack1 && ack1.cursor})`);
 
-  const acksRound1 = inbox.grantAck.filter((a) => a.round === 1);
-  if (!acksRound1.length) fail('no grantAck received for round 1 (I10: every grant must be acked on receipt)');
-  else ok(`round 1 acked (${acksRound1.length} ack(s))`);
-  const lastAck1 = acksRound1[acksRound1.length - 1];
-  if (lastAck1 && lastAck1.cursor >= 1) ok(`entry 0 executed (cursor=${lastAck1.cursor}) despite the tiny playback cap — execution and playback are decoupled`);
-  else fail(`entry 0 did not execute even though entryLimit=2 (cursor=${lastAck1 && lastAck1.cursor})`);
-  if (lastAck1 && lastAck1.entriesDrained === 0) ok(`entriesDrained stopped at entry 0 (${lastAck1.entriesDrained}) — one-op overshoot played entry 0 out, but entry 1's playback never started past the watermark`);
-  else fail(`entriesDrained should be exactly 0, got ${lastAck1 && lastAck1.entriesDrained} (playLimitNs=1 gate not honored)`);
-
-  // ---- 2. raise playLimitNs + entryLimit across further "frames" (a no-op
-  //         grant when unchanged is I10; here every round genuinely changes) ----
-  let round = 2;
-  let playLimitNs = 60_000_000;   // covers entry 0's ~24.3ms write comfortably
-  for (; round <= 6; round++) {
-    mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round, entryLimit: 4, playLimitNs, scale: Infinity }));
-    await flushTurns(2);
-    await wait(30);
-    playLimitNs += 200_000_000;
+  // ---- 2. open the gate + entryLimit: all 4 entries run, incl. the async
+  //         command (index 3) which completes only at quiescence (I1) ----
+  for (let round = 2; round <= 5; round++) {
+    mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH, round, entryLimit: 4, playLimitNs: 1_000_000_000, scale: 20000 }));
+    await flushTurns(3);   // macrotasks let the async command quiesce between grants
   }
-  const acksLater = inbox.grantAck.filter((a) => a.round === round - 1);
-  const lastAckLater = acksLater[acksLater.length - 1] || inbox.grantAck[inbox.grantAck.length - 1];
-  if (lastAckLater.cursor === 4) ok('all 4 entries executed once entryLimit opened up (cursor=4)');
-  else fail(`cursor did not reach 4 (got ${lastAckLater.cursor}) after raising entryLimit/playLimitNs`);
-  if (lastAckLater.entriesDrained >= 3) ok(`entriesDrained caught up to the tail (${lastAckLater.entriesDrained}) once playback had headroom`);
-  else fail(`entriesDrained did not catch up (${lastAckLater.entriesDrained}) despite ample playLimitNs`);
+  const ackLater = inbox.grantAck[inbox.grantAck.length - 1];
+  if (ackLater.cursor === 4) ok('all 4 entries executed (churn ×2, gc, command) once the gate opened');
+  else fail(`cursor did not reach 4 (got ${ackLater.cursor})`);
+  if (ackLater.entriesDrained === 4) ok('entriesDrained reached 4 (command completed AND drained)');
+  else fail(`entriesDrained not 4 (${ackLater.entriesDrained})`);
+  if (ackLater.drainedCounters.fileOpCount >= 4) ok(`fileOpCount accrued from real ops (${ackLater.drainedCounters.fileOpCount}: 2 churn + 2 command writes; gc excluded)`);
+  else fail(`fileOpCount too low (${ackLater.drainedCounters.fileOpCount})`);
 
-  // ---- 3. quiescence-as-ack (I1): the command entry (index 3) completed —
-  //         both writeFile calls it issued must actually have landed ----
-  await mainPort.postMessage(msg(C2W.PULL, { epoch: EPOCH, journal: { since: -1, limit: 400 } }));
+  // ---- 3. command ran from raw sandbox source: its two writeFile ops landed ----
+  mainPort.postMessage(msg(C2W.PULL, { epoch: EPOCH, journal: { since: -1, limit: 400 } }));
   await flushTurns(2);
-  const frame1 = inbox.frame[inbox.frame.length - 1];
-  if (!frame1) fail('no FRAME received for a journal PULL');
-  else {
-    const texts = frame1.journal.map((j) => j.text).join(' | ');
-    if (/write\(c\.bin, 2048 B\)/.test(texts) && /write\(d\.bin, 2048 B\)/.test(texts))
-      ok('command entry\'s two writeFile ops both landed in the journal (quiescence ran the whole command)');
-    else fail(`command ops missing from journal: ${texts}`);
-    const doneLine = frame1.journal.find((j) => j.entryIndex === 3 && j.kind === 'done');
-    if (doneLine) ok('command entry has a done journal line (quiescence recorded)');
-    else fail('no done journal line for the command entry');
-  }
+  const jf = inbox.frame[inbox.frame.length - 1];
+  const jtexts = jf.journal.map((j) => j.text).join(' | ');
+  if (/write\(c\.bin, 2048 B\)/.test(jtexts) && /write\(d\.bin, 2048 B\)/.test(jtexts))
+    ok('raw-source command executed via the sandbox (both writeFile ops in the journal)');
+  else fail(`command ops missing from journal: ${jtexts}`);
+  if (jf.journal.some((j) => j.entryIndex === 3 && j.kind === 'done')) ok('command has a done journal line (quiescence recorded, kind:done in JOURNAL not events)');
+  else fail('no done journal line for the command');
 
-  // ---- 4. FRAME shape: heat / shown+wear / journalHead / eventHead ----
-  await mainPort.postMessage(msg(C2W.PULL, { epoch: EPOCH, heat: true, wear: true, journal: { since: -1, limit: 400 }, events: { since: -1, limit: 400 } }));
+  // ---- 4. FRAME shape (protocol.js pinned typedefs): heat.read/prog,
+  //         shown.pages/wear, events[] (erase EventEntries), heads ----
+  mainPort.postMessage(msg(C2W.PULL, { epoch: EPOCH, heat: true, wear: true, journal: { since: -1, limit: 400 }, events: { since: -1, limit: 400 } }));
   await flushTurns(2);
-  const frame2 = inbox.frame[inbox.frame.length - 1];
+  const f = inbox.frame[inbox.frame.length - 1];
   const npages = (GEOMETRY.sectorSize / GEOMETRY.pageSize) * GEOMETRY.sectorCount;
-  if (frame2.heat && frame2.heat.readHeat.length === npages && frame2.heat.progHeat.length === npages) ok('heat is full per-page state, sized to the geometry');
-  else fail('heat field missing or wrong length');
-  if (frame2.shown && frame2.shown.shown.length === npages && frame2.shown.wear.length === GEOMETRY.sectorCount) ok('shown+wear sized correctly');
-  else fail('shown/wear field missing or wrong length');
-  if (typeof frame2.journalHead === 'number' && typeof frame2.eventHead === 'number') ok(`journalHead/eventHead present (${frame2.journalHead}/${frame2.eventHead})`);
+  if (f.heat && f.heat.read instanceof Float32Array && f.heat.prog instanceof Float32Array && f.heat.read.length === npages) ok('FRAME.heat = {read, prog} Float32Array[pageCount] (FrameHeat)');
+  else fail('FRAME.heat wrong shape/type');
+  if (f.shown && f.shown.pages instanceof Uint16Array && f.shown.pages.length === npages && f.shown.wear instanceof Uint32Array && f.shown.wear.length === GEOMETRY.sectorCount) ok('FRAME.shown = {pages:Uint16Array, wear:Uint32Array} (FrameShown)');
+  else fail('FRAME.shown wrong shape/type');
+  const eraseEvents = f.events.filter((e) => e.kind === 'erase');
+  if (eraseEvents.length > 0 && eraseEvents.every((e) => typeof e.id === 'number' && typeof e.sector === 'number' && typeof e.ms === 'number'))
+    ok(`FRAME.events carries erase EventEntries {id,kind:'erase',sector,ms} (${eraseEvents.length} from gc erases) — sourced from device ERASE ops, not command lifecycle`);
+  else fail(`no well-formed erase EventEntries (got ${JSON.stringify(f.events.slice(0, 3))})`);
+  if (f.events.every((e) => e.kind !== 'command')) ok('no command-lifecycle entries polluting the events ring (they live in the journal)');
+  else fail('command lifecycle leaked into the events ring');
+  if (typeof f.journalHead === 'number' && typeof f.eventHead === 'number') ok(`journalHead/eventHead present (${f.journalHead}/${f.eventHead})`);
   else fail('journalHead/eventHead missing');
 
-  // ---- 5. TELEMETRY: unconditional ~250ms heartbeat ----
+  // ---- 5. liveMap PULL: version + classes (FrameLiveMap) ----
+  mainPort.postMessage(msg(C2W.PULL, { epoch: EPOCH, liveMap: { since: -1 } }));
+  await flushTurns(2);
+  const lf = inbox.frame[inbox.frame.length - 1];
+  if (lf.liveMap && typeof lf.liveMap.version === 'number' && lf.liveMap.classes instanceof Uint8Array) ok('FRAME.liveMap = {version, classes:Uint8Array} (FrameLiveMap), sent iff version > since');
+  else fail(`FRAME.liveMap wrong shape (${JSON.stringify(lf.liveMap)})`);
+
+  // ---- 6. TELEMETRY: unconditional ~250ms heartbeat incl. write-amp fields ----
   const before = inbox.telemetry.length;
   await wait(320);
-  if (inbox.telemetry.length > before) ok(`telemetry heartbeat fired (${inbox.telemetry.length - before} message(s) in ~320ms)`);
-  else fail('no telemetry heartbeat observed in ~320ms (should be unconditional every ~250ms)');
+  if (inbox.telemetry.length > before) ok(`telemetry heartbeat fired (${inbox.telemetry.length - before} in ~320ms)`);
+  else fail('no telemetry heartbeat in ~320ms');
   const t = inbox.telemetry[inbox.telemetry.length - 1];
-  if (t && t.fsinfo && t.livenessCounts && typeof t.exec_fileOpCount === 'number' && typeof t.exec_simNs === 'number') ok('telemetry payload shape correct');
-  else fail('telemetry payload missing a field');
+  if (t && t.fsinfo && t.livenessCounts && typeof t.exec_fileOpCount === 'number' && typeof t.exec_simNs === 'number') ok('telemetry base fields present');
+  else fail('telemetry base field missing');
+  if (t && typeof t.programBytes === 'number' && typeof t.hostBytes === 'number' && t.programBytes > 0 && t.hostBytes > 0)
+    ok(`telemetry carries programBytes/hostBytes for write-amp (${t.programBytes}/${t.hostBytes})`);
+  else fail(`telemetry programBytes/hostBytes missing or zero (${t && t.programBytes}/${t && t.hostBytes})`);
 
-  // ---- 6. epoch discard (I5): a stale-epoch GRANT is ignored ----
-  const ackCountBefore = inbox.grantAck.length;
-  mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH + 1, round: 99, entryLimit: 4, playLimitNs: 1e9, scale: Infinity }));
+  // ---- 7. epoch discard (I5) ----
+  const nAcks = inbox.grantAck.length;
+  mainPort.postMessage(msg(C2W.GRANT, { epoch: EPOCH + 5, round: 99, entryLimit: 4, playLimitNs: 1e9, scale: 20000 }));
   await flushTurns(2);
-  if (inbox.grantAck.length === ackCountBefore) ok('a grant with a stale/future epoch was discarded (I5)');
-  else fail('a mismatched-epoch grant was NOT discarded');
+  if (inbox.grantAck.length === nAcks) ok('stale/future-epoch GRANT discarded (I5)');
+  else fail('mismatched-epoch grant not discarded');
 
-  // ---- 7. RESET: halts, wipes flash, entries/cursor void, epoch bumps ----
+  // ---- 8. RESET: wipes flash + local state, bumps epoch ----
   const NEW_EPOCH = 2;
   mainPort.postMessage(msg(C2W.RESET, { epoch: NEW_EPOCH }));
   await flushTurns(2);
-  mainPort.postMessage(msg(C2W.GRANT, { epoch: NEW_EPOCH, round: 1, entryLimit: 0, playLimitNs: 0, scale: Infinity }));
+  mainPort.postMessage(msg(C2W.GRANT, { epoch: NEW_EPOCH, round: 1, entryLimit: 0, playLimitNs: 0, scale: 20000 }));
   await flushTurns(2);
-  const postResetAck = inbox.grantAck[inbox.grantAck.length - 1];
-  if (postResetAck.epoch === NEW_EPOCH && postResetAck.cursor === 0 && postResetAck.playbackNs === 0)
-    ok('RESET voided cursor/playbackNs and moved to the new epoch');
-  else fail(`RESET did not fully void state: ${JSON.stringify(postResetAck)}`);
-
-  await mainPort.postMessage(msg(C2W.PULL, { epoch: NEW_EPOCH, journal: { newest: true, limit: 400 } }));
+  const rAck = inbox.grantAck[inbox.grantAck.length - 1];
+  if (rAck.epoch === NEW_EPOCH && rAck.cursor === 0 && rAck.playbackNs === 0) ok('RESET voided cursor/playbackNs and moved to the new epoch');
+  else fail(`RESET did not fully void state: ${JSON.stringify(rAck)}`);
+  mainPort.postMessage(msg(C2W.PULL, { epoch: NEW_EPOCH, journal: { newest: true, limit: 400 } }));
   await flushTurns(2);
-  const frame3 = inbox.frame[inbox.frame.length - 1];
-  if (frame3.journal.length === 0) ok('journal is empty after RESET (fresh epoch, no stale lines)');
-  else fail(`journal not empty after RESET: ${frame3.journal.length} lines`);
+  const rf = inbox.frame[inbox.frame.length - 1];
+  if (rf.journal.length === 0) ok('journal empty after RESET (fresh epoch)');
+  else fail(`journal not empty after RESET (${rf.journal.length})`);
 
   console.log('');
   if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
-  console.log('PASS - session-worker.js answers INIT/ENTRIES/GRANT/PULL/RESET correctly (§2 gate, I1 quiescence, I5 epoch discard verified).');
+  console.log('PASS - real-execution path: §2 gate, raw-source sandbox command (I1), FRAME typedefs (heat/shown/liveMap/erase events), write-amp telemetry, I5 discard, RESET.');
   process.exit(0);
 }
 

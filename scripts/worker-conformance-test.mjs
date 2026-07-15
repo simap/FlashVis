@@ -38,7 +38,10 @@
  */
 import { C2W, W2C, msg } from '../web/src/protocol.js';
 import { createTransport, flushTurns } from './mock-worker-transport.mjs';
-const { installWorkerHost } = await import(process.env.FV_WORKER_HOST || './stub-worker-host.mjs');
+// Default target is lane/worker's real host now that it exists in-tree (the
+// header's "update the default import once it lands" — assertions untouched).
+// FV_WORKER_HOST still overrides (e.g. back to ./stub-worker-host.mjs).
+const { installWorkerHost } = await import(process.env.FV_WORKER_HOST || '../web/src/session-worker.js');
 
 process.on('unhandledRejection', (e) => { console.error('\nFAIL - unhandled rejection:', (e && e.stack) || e); process.exit(1); });
 
