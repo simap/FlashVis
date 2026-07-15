@@ -59,8 +59,8 @@ async function run() {
   else fail(`gate: expected cursor 1, got ${ack1 && ack1.cursor} (playLimitNs=1 not honored)`);
   if (ack1 && ack1.playbackNs > 1) ok(`playbackNs (${ack1.playbackNs}) reflects entry 0's real flash cost (overshoot)`);
   else fail(`playbackNs did not advance to entry 0's real cost (${ack1 && ack1.playbackNs})`);
-  if (ack1 && ack1.entriesDrained === ack1.cursor) ok('entriesDrained tracks cursor (execution == drain, this model)');
-  else fail(`entriesDrained (${ack1 && ack1.entriesDrained}) != cursor (${ack1 && ack1.cursor})`);
+  if (ack1 && ack1.entriesDrained === ack1.cursor - 1) ok('entriesDrained = highest drained INDEX (cursor-1; execution == drain, this model)');
+  else fail(`entriesDrained (${ack1 && ack1.entriesDrained}) != cursor-1 (${ack1 && ack1.cursor - 1})`);
 
   // ---- 2. open the gate + entryLimit: all 4 entries run, incl. the async
   //         command (index 3) which completes only at quiescence (I1) ----
@@ -71,8 +71,8 @@ async function run() {
   const ackLater = inbox.grantAck[inbox.grantAck.length - 1];
   if (ackLater.cursor === 4) ok('all 4 entries executed (churn ×2, gc, command) once the gate opened');
   else fail(`cursor did not reach 4 (got ${ackLater.cursor})`);
-  if (ackLater.entriesDrained === 4) ok('entriesDrained reached 4 (command completed AND drained)');
-  else fail(`entriesDrained not 4 (${ackLater.entriesDrained})`);
+  if (ackLater.entriesDrained === 3) ok('entriesDrained reached 3 = highest index (all 4 drained; command completed AND drained)');
+  else fail(`entriesDrained not 3 (${ackLater.entriesDrained})`);
   if (ackLater.drainedCounters.fileOpCount >= 4) ok(`fileOpCount accrued from real ops (${ackLater.drainedCounters.fileOpCount}: 2 churn + 2 command writes; gc excluded)`);
   else fail(`fileOpCount too low (${ackLater.drainedCounters.fileOpCount})`);
 

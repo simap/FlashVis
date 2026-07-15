@@ -14,8 +14,9 @@
  * overshoot: the entry straddling playLimitNs runs in full, then the gate
  * shuts). So playbackNs is the §2 currency, chunk-granular per frame-grant;
  * cross-frame animation smoothness is the renderer's job (heat coalescing +
- * erase EventEntries), not a worker-side timed player. entriesDrained tracks
- * cursor (execution and drain coincide in this model). A COMMAND entry is
+ * erase EventEntries), not a worker-side timed player. entriesDrained is the
+ * highest INDEX drained = cursor-1 (execution and drain coincide in this
+ * model), -1 when none. A COMMAND entry is
  * atomic and async: it parks the cursor until quiescence (I1) — the ack that
  * reports quiescence IS its completion.
  *
@@ -148,7 +149,10 @@ export function installWorkerHost(port, opts = {}) {
 
   function ack() {
     send(W2C.GRANT_ACK, {
-      round, playbackNs, cursor, entriesDrained: cursor,
+      // entriesDrained = highest entry INDEX executed AND tape-drained; -1 when
+      // none yet (protocol.js). In this drain-synchronous model execution and
+      // drain coincide, so cursor entries fully drained ⇒ highest index cursor-1.
+      round, playbackNs, cursor, entriesDrained: cursor - 1,
       drainedCounters: { fileOpCount: dispFileOps, flashTimeNs: dispFlashNs },
     });
   }

@@ -191,7 +191,7 @@ async function testI1() {
   const round3 = await grant(s, { epoch: 1, round: 3, entryLimit: 1, playLimitNs: 100_000_000 });
   assertEq(round3.cursor, 1, 'tick 3/3: quiescence ack IS completion — cursor advances exactly here');
   assertEq(round3.playbackNs, 9_000_000, 'tick 3/3: the WHOLE entry cost lands atomically at quiescence');
-  assertEq(round3.entriesDrained, 1, 'tick 3/3: entriesDrained matches — completed AND drained together');
+  assertEq(round3.entriesDrained, 0, 'tick 3/3: entriesDrained = highest drained INDEX (entry 0) — completed AND drained together');
   assertEq(round3.drainedCounters.fileOpCount, 1, 'tick 3/3: fileOpCount credited exactly at quiescence, in-band');
 }
 
@@ -334,14 +334,14 @@ async function testPrepBracketJoin() {
   // because prep suspends metering, not because the budget covers them.
   const TINY_PLAYLIMIT = 5000;
   const aWithheld = await grant(a, { epoch: 1, round: 1, entryLimit: J, playLimitNs: TINY_PLAYLIMIT });
-  assertEq(aWithheld.entriesDrained, J, 'A: drained everything up TO the withheld entry (0..J-1), despite a budget far below entries 3/4\'s cost — prep suspends metering');
+  assertEq(aWithheld.entriesDrained, J - 1, 'A: drained everything up TO the withheld entry (highest index J-1), despite a budget far below entries 3/4\'s cost — prep suspends metering');
   assertEq(aWithheld.cursor, J, 'A: cursor sits exactly at the withheld entry, not past it');
 
   // B lags behind: only grant it enough to reach entry 1 (not yet through
   // the bracket) — the join condition (entriesDrained >= J-1 for ALL
   // sessions) is NOT yet satisfied.
   const bLag = await grant(b, { epoch: 1, round: 1, entryLimit: 2, playLimitNs: 1_000_000 });
-  assertEq(bLag.entriesDrained, 2, 'B: lagging, only drained through entry 1');
+  assertEq(bLag.entriesDrained, 1, 'B: lagging, only drained through entry 1 (highest index 1)');
   assertTrue(bLag.entriesDrained < J - 1, 'B has NOT reached the join threshold (entriesDrained >= J-1) yet');
 
   // Coordinator must NOT release entry J to anyone yet. Re-granting A with
@@ -353,7 +353,7 @@ async function testPrepBracketJoin() {
 
   // B catches up to the join threshold (entriesDrained >= J-1).
   const bCaughtUp = await grant(b, { epoch: 1, round: 2, entryLimit: J, playLimitNs: TINY_PLAYLIMIT });
-  assertEq(bCaughtUp.entriesDrained, J, 'B: now drained through J-1 (entryLimit=J caps it there) — prep entries instant despite tiny playLimit');
+  assertEq(bCaughtUp.entriesDrained, J - 1, 'B: now drained through J-1 (entryLimit=J caps it there; highest index J-1) — prep entries instant despite tiny playLimit');
   assertTrue(bCaughtUp.entriesDrained >= J - 1, 'B has now reached the join threshold');
 
   // Join satisfied for both (A already was at J-1-drained-equivalent via
