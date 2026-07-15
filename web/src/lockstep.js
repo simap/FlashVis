@@ -26,7 +26,10 @@
  * A grant is sent to every session EVERY frame — a no-op (unchanged limits) when the
  * round has not advanced (I10). Determinism (I7): one coordinator sequence, the
  * gc/event coin is a SEEDED PRNG, commands ship as SOURCE with a per-command seed the
- * worker compiles against. holding/stalled/waiting are derived purely from ack state.
+ * worker compiles against. The standing signals are derived purely from ack state:
+ * `csActive` (raw per-frame: did playbackNs advance this frame) and `holding`
+ * (debounced ~300ms: this session finished the shared step while a peer has not — the
+ * sustained fast-FS-frozen-at-the-join wait, spec/ui.md).
  */
 import { CHURN_EVENT } from './churn.js';
 
@@ -58,11 +61,17 @@ const MS_PER_FRAME = 1000 / TARGET_FPS;
 // yet stay pinned to the same advancing ceiling (sim-synced), not racing off by speed.
 const NO_DELAY_STEP_NS = 50 * 1e6;
 
-// Race stall/standing threshold: an idle, ceiling-gated FS reads as WAITING ON THE
-// OTHERS only when its playback sits more than this above the field minimum — the FS
-// at the min never flags, and an FS merely metered to one chunk between ops stays
-// under it. (playbackNs replaces the old simNs here; the ceiling replaces raceClock.)
-const STALL_GAP_NS = 50 * 1e6;
+// (The old STALL_GAP_NS is retired: §2 MAX-not-min means no SUSTAINED Race stall exists
+// — a laggard burns headroom and catches up. The one sustained standing signal is the
+// Pace / catch-up HOLD below: a fast FS frozen at the step-join waiting for a slow peer.)
+// "Holding" card debounce (spec/ui.md: "'Holding' card label — debounced (~300 ms) so
+// it doesn't flicker"). The RAW hold predicate can toggle within a frame or two at a
+// step boundary; the card only lights after the raw signal has held continuously for
+// this long, and clears the instant it drops. csActive (the CS pin / status dot) is
+// the RAW per-frame blinky and is NOT debounced. Read per-frame (not cached at import)
+// so the __flashvisHoldShowMs test seam can be set after the module loads (as playground
+// reads it at closure-build time).
+const holdDebounceMs = () => (typeof globalThis !== 'undefined' && globalThis.__flashvisHoldShowMs != null) ? globalThis.__flashvisHoldShowMs : 300;
 
 // opsPerSec (ADR-0020/0023): EMA of the drained fileOpCount rate, smoothed ~2s so the
 // coarse per-step arrivals average into a steady bar and decay to 0 when idle.
@@ -105,6 +114,18 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   // one-shot step nudges (paused single-step; see step())
   let forceProduce = false;         // Pace: allow one shared-index advance while paused
   let raceStepLimit = -1;           // Race: authorize up to this index once, ungated
+
+  // ---- standing signals, updated once per frame() (both modes) ----
+  // csActive: RAW per-frame — did this session's playbackNs advance since last frame?
+  //   Drives the CS pin / status dot (raw real-time blinky, spec/ui.md). No debounce.
+  // holdingRaw: this session finished the shared step / leads on cursor while a peer
+  //   has NOT — the SUSTAINED "fast FS frozen at the join waiting for the slow peer"
+  //   state (real in Pace slow-mo; also at Race↔Pace catch-up). Debounced into
+  //   `holdingShown` (~holdDebounceMs()) for the "Holding" card.
+  const prevPlayback = new Map();   // proxy -> playbackNs at the previous frame
+  const csActive = new Map();       // proxy -> raw "advanced this frame" bool
+  const holdRawSince = new Map();   // proxy -> nowMs() when holdingRaw first turned true (null when false)
+  const holdingShown = new Map();   // proxy -> debounced hold bool (the card)
 
   // ---- opsPerSec sampling ----
   const opsEma = new Map();
@@ -218,6 +239,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     }
     shipEntries();                                             // paceAdvance may have generated a new entry
     for (const p of proxies) p.grant(cached.get(p));           // grant EVERY frame (I10)
+    updateSignals(nowMs());                                    // csActive (raw) + holding (debounced)
   }
 
   if (autoTick && typeof setInterval !== 'undefined') setInterval(frame, 16);
@@ -230,26 +252,55 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     if (!g) return false;
     return p.acked.playbackNs < g.playLimitNs - 1e-6 && p.acked.cursor < g.entryLimit;
   }
-  function holdingNow(p) {
+  // RAW hold: p is idle (gate shut) yet a peer is still working the SAME shared step /
+  // is behind on the cursor — i.e. p is the FAST FS FROZEN AT THE JOIN waiting for the
+  // slow peer. This is SUSTAINED, not a flicker: in Pace slow-mo the fast FS finishes
+  // its step in ~90ms then sits frozen ~1.8s while the slow peer grinds; it also fires
+  // during a Race↔Pace catch-up (a cursor-lead FS parked until the laggard reaches it).
+  // Mode-agnostic: in STEADY Race the lead FS keeps its gate OPEN (more entries under
+  // the shared ceiling), so it is never "frozen" and this stays false — matching the
+  // spec note that steady Race generally won't fire.
+  function holdingRaw(p) {
     if (!proxies.includes(p)) return false;
-    if (gateOpen(p)) return false;                             // still working — never the one others wait for
-    if (mode === 'race') {
-      const hasWork = p.acked.cursor < sequence.length || running;
-      if (!hasWork) return false;
-      const minPb = Math.min(...proxies.map((q) => q.acked.playbackNs));
-      return (p.acked.playbackNs - minPb) > STALL_GAP_NS;      // metered at the ceiling, far above the field min
-    }
-    // Pace: p finished the shared step (or leads the min cursor) while a peer has not.
+    if (gateOpen(p)) return false;                             // still has work to run — not frozen
     const c = p.acked.cursor;
     let peerWorking = false, leads = false;
     for (const q of proxies) {
       if (q === p) continue;
-      if (q.acked.entriesDrained < sharedIndex) peerWorking = true;   // peer hasn't finished the shared step
-      if (q.acked.cursor < c) { peerWorking = true; leads = true; }
+      const behindStep = q.acked.entriesDrained < sharedIndex; // hasn't finished the shared step
+      const behindCursor = q.acked.cursor < c;                 // strictly behind p on the sequence
+      if (behindCursor) leads = true;
+      // the peer is genuinely the thing being waited ON: still executing (gate open) or
+      // not yet done the shared step. A peer that is merely idle-behind at end-of-run
+      // (nothing left to do) is NOT "working", so p does not read as holding for it.
+      if ((behindStep || behindCursor) && (behindStep || gateOpen(q))) peerWorking = true;
     }
-    const doneStep = p.acked.entriesDrained >= sharedIndex;
-    return peerWorking && (leads || doneStep);
+    const finishedStep = p.acked.entriesDrained >= sharedIndex;
+    return peerWorking && (finishedStep || leads);
   }
+  // Update the per-frame signals. Called once per frame() so csActive is a true
+  // per-frame delta and the hold debounce advances on real time.
+  function updateSignals(now) {
+    for (const p of proxies) {
+      const pb = p.acked.playbackNs;
+      const advanced = pb > (prevPlayback.get(p) ?? 0) + 1e-6;   // advanced this frame?
+      csActive.set(p, advanced);
+      prevPlayback.set(p, pb);
+      // A session that advanced this frame is ACTIVE, never frozen — so csActive and
+      // holding are mutually exclusive by construction (the frame a fast FS finishes
+      // its step it both moved AND becomes a hold candidate; it counts as active that
+      // frame and only reads holding from the next, genuinely frozen, frame on).
+      if (!advanced && holdingRaw(p)) {
+        if (holdRawSince.get(p) == null) holdRawSince.set(p, now);
+        holdingShown.set(p, (now - holdRawSince.get(p)) >= holdDebounceMs());
+      } else {
+        holdRawSince.set(p, null);
+        holdingShown.set(p, false);                              // clears instantly (spec/ui.md)
+      }
+    }
+  }
+  const isHolding = (p) => holdingShown.get(p) === true;
+  const isCsActive = (p) => csActive.get(p) === true;
 
   return {
     /** Replace the participating set (session PROXIES). New proxies are init()'d and
@@ -259,6 +310,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       const next = new Set(list);
       for (const p of [...baseline.keys()]) if (!next.has(p)) {
         baseline.delete(p); cached.delete(p); shipped.delete(p); opsEma.delete(p); lastOps.delete(p);
+        prevPlayback.delete(p); csActive.delete(p); holdRawSince.delete(p); holdingShown.delete(p);
       }
       proxies = list.slice();
       for (const p of proxies) if (!baseline.has(p)) {
@@ -324,6 +376,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       churn.reset();
       for (const p of proxies) { baseline.set(p, 0); shipped.set(p, 0); cached.delete(p); p.reset(epoch); }
       opsEma.clear(); lastOps.clear(); lastSampleNow = 0;
+      prevPlayback.clear(); csActive.clear(); holdRawSince.clear(); holdingShown.clear();
     },
     get epoch() { return epoch; },
     /** Append one ATOMIC COMMAND at the frontier ("present"). `payload` is the wire
@@ -359,27 +412,31 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
         const lc = t.livenessCounts;
         const programmed = lc.live + lc.obsolete + lc.metadata;
         const garbagePct = programmed ? lc.obsolete / programmed : 0;
-        const hn = holdingNow(p);
+        // The two pinned C↔V standing-signal contracts (spec/ui.md): `holding` is the
+        // DEBOUNCED "Holding" card (sustained fast-FS-frozen-at-the-join), `csActive`
+        // is the RAW per-frame CS-pin/status-dot blinky (playback advanced this frame).
+        const holding = isHolding(p);
         return {
           fsId: p.fsId, name: p.name,
           stepCursor: p.acked.cursor,
           fileOpCount: p.acked.fileOpCount,
           simNs: t.simNs,
-          wa: t.wa ?? null,
+          wa: t.wa,
           files: t.fsinfo.files,
           garbagePct,
           opsPerSec: Math.max(0, opsEma.get(p) ?? 0),
-          holding: mode === 'pace' && hn,
-          stalled: mode === 'race' && hn,
-          waiting: hn,
+          holding,
+          csActive: isCsActive(p),
         };
       });
     },
-    /** Cheap per-fsId holding map (the unified signal, no telemetry walk) for the
-     *  per-frame FS-card pins / status dots. */
+    /** Cheap per-fsId standing-signal map (no telemetry walk) for the per-frame pins /
+     *  status dots. Each entry is `{ csActive, holding }` — csActive raw (CS pin /
+     *  status dot blinky), holding debounced (the "Holding" card). Same two values
+     *  snapshots() carries, for consumers that poll per frame without the full snap. */
     waitStates() {
       const out = {};
-      for (const p of proxies) out[p.fsId] = holdingNow(p);
+      for (const p of proxies) out[p.fsId] = { csActive: isCsActive(p), holding: isHolding(p) };
       return out;
     },
     /** Test seam: drive one frame manually (autoTick:false). */
