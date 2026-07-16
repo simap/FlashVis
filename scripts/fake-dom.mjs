@@ -1,6 +1,6 @@
 /*
  * A minimal fake DOM so the browser modules (viz, playground) can boot headless
- * in Node against the REAL WASM — no jsdom, no browser. Reused by dom-smoke.mjs
+ * in Node against the REAL WASM: no jsdom, no browser. Reused by real-smoke.mjs
  * and any focused variant (timed player, barrier pacing, live-map, dir iterator).
  *
  * CRITICAL: never define `global.window`. Emscripten sniffs it and switches to

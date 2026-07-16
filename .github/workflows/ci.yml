@@ -1,6 +1,6 @@
-# CI mirror of `npm run ci`: build the FASTFFS + LittleFS WASM and run the full
-# guard suite (both pipelines, byte-exact integrity, console/dom-smoke, real
-# backend, lockstep concurrency, and the leak/heat guards).
+# CI mirror of `npm run ci`: build all five FS to WASM and run the full guard
+# suite (every pipeline, byte-exact integrity, console API, the real-smoke
+# whole-playground boot, lockstep concurrency, and the worker wire/ring guards).
 #
 # Day-to-day this project is verified locally with `npm run ci`; this workflow
 # just makes the same checks enforce on push once the repo is on GitHub.

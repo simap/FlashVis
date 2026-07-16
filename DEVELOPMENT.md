@@ -14,7 +14,7 @@ this file just indexes them.
 
 `package.json` is the source of truth; README lists the user-facing ones. The one-shot:
 
-    npm run ci     # build:fastffs + the three guards (fastffs, integrity, dom-smoke)
+    npm run ci     # build (all five FS) + npm test (the full guard suite)
 
 Rebuild the WASM (`npm run build:fastffs`) after any change to `bindings/fastffs/shim.c` or the
 FASTFFS submodule. The web JS (`web/src/*.js`) is plain ESM — just refresh, no build. `dist/` is
@@ -31,13 +31,21 @@ gitignored (build artifact); CI rebuilds it.
 
 ## Verifying without a browser
 
-`npm run ci` (or `npm test`) runs three headless guards against the real WASM:
+`npm run ci` (or `npm test`) runs the headless guard suite against the real WASM. The load-bearing
+ones, per filesystem plus the cross-cutting ones:
 
-- `scripts/fastffs-test.mjs` — pipeline proof: format / mount / write / read plus the device
-  traffic the driver issued.
-- `scripts/integrity-test.mjs` — byte-exact through 3000 churn ops + GC (backend fidelity).
-- `scripts/dom-smoke.mjs` — boots the *whole* playground (viz + control panel + WASM) on a fake
-  DOM (`scripts/fake-dom.mjs`), drives a write, and asserts the HUD and op-log reflected it.
+- `scripts/fastffs-test.mjs`: pipeline proof, format / mount / write / read plus the device
+  traffic the driver issued. Each FS has a peer (`littlefs-`, `spiffs-`, `jesfs-`, `fatfs-test.mjs`).
+- `scripts/integrity-test.mjs`: byte-exact through 3000 churn ops + GC (backend fidelity). Each FS
+  has an `-integrity` peer.
+- `scripts/real-smoke.mjs`: boots the *whole* playground (viz + control panel + WASM) on a fake
+  DOM (`scripts/fake-dom.mjs`) over the real worker wire, drives a write, and asserts the HUD and
+  op-log reflected it. `scripts/playground-boot-test.mjs` is the focused boot variant.
+- `scripts/worker-conformance-test.mjs`: message-level executable spec for the ADR-0024 wire.
+  `worker-rings-test.mjs`, `coord-wire-test.mjs`, and `lockstep-concurrency-test.mjs` guard the
+  ring bound, the wire, and the barrier.
+
+`package.json`'s `test` script is the full list.
 
 `fake-dom.mjs` is reusable for focused variants (timed player, barrier pacing, live-map, dir
 iterator). **Key rule, enforced there:** never define `global.window` — emscripten would switch to

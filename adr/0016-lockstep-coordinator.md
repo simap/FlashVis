@@ -46,9 +46,9 @@ move together; each session's `simNs` accrues independently.
 **Mode-switch reconciliation is `paceStep()`'s job.** Race leaves cursors diverged; `paceStep()`
 runs the shared index only on sessions whose cursor equals it (`due`) — a session past it sits in
 that round's barrier with nothing queued until laggards reach it, closing the gap one step per
-laggard. (Synchronously replaying a laggard's whole missing range on `setMode('pace')` hung the tab
-— tens of thousands of WASM calls with no yield point; caught by dom-smoke, which now exercises the
-Race→Pace transition.)
+laggard. (Synchronously replaying a laggard's whole missing range on `setMode('pace')` hung the tab:
+tens of thousands of WASM calls with no yield point; caught by the whole-playground smoke guard
+(now `scripts/real-smoke.mjs`), which exercises the Race→Pace transition.)
 
 **Manager wiring.** `activeSession` is now "the DISPLAYED session," reassigned by
 `setDisplayed(fsId)`. The picker becomes multi-select (at least one always selected); a Compare row
