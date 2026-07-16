@@ -60,6 +60,13 @@ for (let i = 0; i < 600 && !ready; i++) { await pump(1); ready = dom.getEl('boot
 ok(ready, 'playground reached bootStatus "ready" (boot did not hang or throw)');
 if (dom.getEl('specLive').textContent.includes('boot failed')) fail(`boot failed: ${dom.getEl('specLive').textContent}`);
 
+// ---- static geometry line: NOR device, ESP32-S3 timing; the "SOP-8" package
+// string must be scrubbed (moved here from real-smoke.mjs: it is a pure static
+// DOM contract renderGeo() builds at boot, provable on the stub wire). ----
+const geo = dom.getEl('geoLine').innerHTML || dom.getEl('geoLine').textContent || '';
+ok(/NOR/.test(geo), `geometry line names the NOR device: "${geo}"`);
+ok(!/SOP-8/.test(geo), `geometry line has no "SOP-8" package string: "${geo}"`);
+
 // ---- one die PER SESSION (ADR-0024 §7 PROPOSAL: per-session viz; focus swaps
 // visibility, so exactly one die is visible at a time) ----
 const dice = dom.getEl('dieStack').children;
