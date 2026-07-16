@@ -113,26 +113,6 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       undersells it), and the residual is compaction-only, run under allocation pressure. (Being
       extended to cover the three drivers below.)
 
-## Unlanded lane work to review
-Three branches carry work that never landed on `main` and is not patch-equivalent to anything on
-it. Every other lane/fix branch has been merged and its worktree removed; these three keep theirs.
-Each needs a land-or-drop decision:
-
-- [ ] **`lane/opcount-fresh`** @ `341daab`: "Implement ADR-0023: file-granular fileOpCount,
-      decoupled from the lockstep cursor". The one substantial feature branch outstanding.
-      [ADR-0023](adr/0023-file-op-count-vs-cursor.md) is the written decision, and the worker path
-      already ships a `fileOpCount` in `drainedCounters`, so the first question is whether this
-      branch is superseded by what landed with ADR-0024 or still adds the file-granular part.
-      Worktree: `/Users/benh/git/flashvis-opcount`.
-- [ ] **`lane/signal-fix`** @ `4452fb4`: "Reconcile churn auto-workload deletes to the real FS (no
-      delete-of-absent)". A correctness fix to the churn model's delete path; worth confirming
-      whether the bug it fixes still reproduces on `main`.
-      Worktree: `/Users/benh/git/flashvis-signalfix`.
-- [ ] **`lane/coord`** @ `1142055`: two `docs(diag)` commits arguing that the Race execution-simNs
-      residual is the one-command atomic floor (leapfrog, bounded), not a freeze bug. Diagnostic
-      write-ups, no code. Land as an ADR note or drop.
-      Worktree: `/Users/benh/git/flashvis-coord`.
-
 ## Borrow from FASTFFS later
 The FASTFFS repo has more reusable workload and fault machinery worth pulling rather than
 reinventing (the churn model and VFS workloads are already promoted into **Next** above):
