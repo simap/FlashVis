@@ -1,17 +1,16 @@
 /*
  * viz.js as a pure FRAME renderer (ADR-0024 §4/§6/§7): boots the REAL
- * web/src/viz.js against a fake DOM and geometry only (no device, no runner —
- * viz.js never touches simulated flash anymore), pushes synthetic FRAME
+ * web/src/viz.js against a fake DOM and geometry only (no device, no runner,  * viz.js never touches simulated flash anymore), pushes synthetic FRAME
  * payloads through applyFrame(), and asserts:
  *   (a) heat coalescence still renders O(active cells), zero per-op
- *       animate() calls — the ADR-0022 veto holds by construction (I8) even
+ *       animate() calls, the ADR-0022 veto holds by construction (I8) even
  *       though the accumulation locus moved worker-side (this file supplies
  *       an already-decayed full-state heat array, exactly what a real FRAME
  *       carries);
  *   (b) shown/wear/liveMap paint from full-state snapshots, not events;
  *   (c) the erase sweep still fires exactly one Element.animate() per
  *       'erase' event in frame.events (the one discrete trigger a
- *       full-snapshot pull can't represent — see the ASSUMPTION note in
+ *       full-snapshot pull can't represent, see the ASSUMPTION note in
  *       viz.js above applyEvents).
  */
 import { createViz } from '../web/src/viz.js';
