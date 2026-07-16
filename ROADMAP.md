@@ -90,6 +90,16 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       Why it matters: the §2 barrier releases round+1 only when every session acks, so a single
       dead worker stops every *other* session's clock too. Today that surfaces as the whole
       playground freezing, with no tape line and no dead marker on the fs card.
+- [ ] **Tape load-more / scrollback.** Half-built already, and undocumented until now: the page
+      keeps a `JOURNAL_MIN` (400) line window while every worker retains `JOURNAL_MAX` (2000)
+      behind it (`protocol.js`), so roughly 1600 lines of backlog per session already exist and
+      are already reachable. `PULL` serves `journal{since, limit}` off a monotonic-id ring whose
+      eviction is arithmetically detectable by the reader (`firstId > since+1`, `worker-rings.js`),
+      which is exactly what a pager needs. Missing is only the UI: a "load more" (or
+      scroll-to-top) control that pulls an older window and prepends it, plus a marker where the
+      ring evicted lines. Note `JOURNAL_MIN` currently does double duty as both the pull limit and
+      the retention cap (tape DOM and each session's scrollback copy), so paging older lines in
+      means those two uses separate: what is retained has to grow past what one pull fetches.
 - [ ] **Churn workload tuning knobs.** Expose the churn model's parameters in the UI — target
       live size, file-size distribution, create/replace/delete mix, seed — so the workload can be
       shaped (and reproduced) instead of hardcoded. (Later — the hardcoded model is fine for
