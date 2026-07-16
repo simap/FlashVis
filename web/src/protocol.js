@@ -207,9 +207,9 @@ const C2W_SET = new Set(Object.values(C2W));
 const W2C_SET = new Set(Object.values(W2C));
 
 /** True if `t` is a coordinator->worker message type. */
-export const isC2W = (t) => C2W_SET.has(t);
+const isC2W = (t) => C2W_SET.has(t);
 /** True if `t` is a worker->coordinator message type. */
-export const isW2C = (t) => W2C_SET.has(t);
+const isW2C = (t) => W2C_SET.has(t);
 
 /**
  * Build a typed message envelope. Every message is `{type, ...payload}` and every
