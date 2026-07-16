@@ -165,7 +165,7 @@ export function createViz(geometry) {
   const glowHot = new Set();
 
   let curAnimMs = MIN_ANIM;
-  let heatmapOn = false, selected = -1, inspectorEl = null, onSelectCb = null;
+  let heatmapOn = false, selected = -1, inspectorEl = null;
   let lastMap = null;
 
   // Playback speed for fill-reveal timing (ADR-0024 §6 keeps continuous glow on
@@ -380,7 +380,7 @@ export function createViz(geometry) {
   }
 
   return {
-    npages, pagesPerSector,
+    npages,
 
     mountDie(dieEl) {
       dieEl.style.setProperty('--sector-cols', sectorCols);
@@ -405,7 +405,7 @@ export function createViz(geometry) {
         }
         sec.addEventListener('click', () => {
           if (selected >= 0) sectorEls[selected].classList.remove('sel');
-          selected = s; sec.classList.add('sel'); renderInspector(s); onSelectCb?.(s);
+          selected = s; sec.classList.add('sel'); renderInspector(s);
         });
         dieEl.appendChild(sec); sectorEls[s] = sec;
       }
@@ -431,7 +431,6 @@ export function createViz(geometry) {
     clear() { resetDie(); },
 
     attachInspector(el) { inspectorEl = el; },
-    onSelect(cb) { onSelectCb = cb; },
     setHeatmap(on, dieEl) { heatmapOn = on; dieEl.classList.toggle('heat', on); if (on) refreshHeatmap(); },
     /** Set playback speed (sim-ns per real-ms; Infinity = no delay), so the fill
      *  REVEAL transition scales with the speed control the way the pre-0024 player

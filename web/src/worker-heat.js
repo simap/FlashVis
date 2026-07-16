@@ -53,8 +53,6 @@ export function createHeatPlayer(geometry) {
   }
 
   return {
-    npages, pagesPerSector, sectorCount,
-
     /** Apply ONE device event eagerly to shown/heat (the whole op at once). Used by
      *  the §9 prep bracket (instant, unmetered) and as the geometry-less fallback.
      *  Every page the op touches gets its full HEAT_ADD (I8). `reset` clears
