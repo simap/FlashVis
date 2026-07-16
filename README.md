@@ -46,13 +46,16 @@ driver*, not fabricated.
 
 ## Layout
 
-    bindings/fastffs/shim.c   FASTFFS backend (read/program/erase) + flat WASM API
+    bindings/<fs>/shim.c      per-FS backend (read/program/erase) + the uniform flat WASM API
     build/flash_hal.js        Emscripten JS library: HAL imports → device.js
-    build/build-fastffs.sh    emcc build → dist/fastffs.mjs (+ .wasm)
+    build/build-<fs>.sh       emcc build → dist/<fs>.mjs (+ .wasm), one per filesystem
     web/src/device.js         emulated NOR chip: byte program (1→0), sector erase, wear, events
-    web/index.html            visualizer (prototype; being rewired to the live event stream)
-    fs/fastffs/               FASTFFS (git submodule)
-    scripts/                  dev server + node pipeline test
+    web/src/session-worker.js one worker per FS session: runs the FS, owns the chip (ADR-0024)
+    web/src/lockstep.js       coordinator: one canonical churn sequence, per-session cursors
+    web/src/playground.js     boot, control panel, HUD; talks to workers via session-proxy.js
+    web/index.html            the visualizer (single static page)
+    fs/<fs>/                  the five filesystems (git submodules; fatfs/wear_levelling vendored)
+    scripts/                  dev server + the headless guard suite (see DEVELOPMENT.md)
     adr/                      architecture decision records — start at 0005
     ROADMAP.md                what's next
 
