@@ -22,7 +22,7 @@ bound (prior ADRs) — used by name, not redefined:
 
 new in 0024 (each used by its protocol name below):
   baseline        per-session, coordinator-internal, never sent
-  playLimitNs     granted watermark (generalizes raceClock)
+  playLimitNs     the granted playback ceiling (generalizes raceClock)
   entryLimit      execute-up-to index (Pace: the shared-step target; Race: the shipped frontier)
   entriesDrained  highest entry index executed AND tape-drained
   round           grant id
@@ -47,7 +47,7 @@ induced:  cross-session rendezvous now spans threads
 ## 2. Clock-release algebra  (new — the core of 0024)
 
 ```
-watermark:   playLimitNs_s = baseline_s + rel        (same rel ∀ s ∈ S: the shared ceiling)
+playLimitNs: playLimitNs_s = baseline_s + rel        (same rel ∀ s ∈ S: the shared ceiling)
              relMax = max_s (acked_s − baseline_s),  relMin = min_s (acked_s − baseline_s)
              rel_uncapped = relMax + Δ                          acked_s = last acked playbackNs
              rel = max( min(rel_uncapped, relMin + N·Δ), Δ )    N = RACE_LEAD_BOUND_FRAMES (= 2)
@@ -88,8 +88,13 @@ BOUNDED MAX  (Race lead cap: the accumulation guard)
 Δ = scale / targetFPS
     ⇒ coordination cost per real-second ≈ constant at every scale
     ⇒ slow: Δ ≪ one op ⇒ cross-FS pacing sub-op-fine where visible; coarsens only where imperceptible
+    ⇒ scale is CAPPED: MAX_SCALE = 1e7 (10× real-time). setSpeed THROWS on Infinity or negative,
+       never silently clamps (0 allowed, a future freeze option). Rationale: an unbounded scale
+       un-bounds Δ, so the release window and the N·Δ lead cap lose meaning; and the worker is
+       CPU-bound to ~5× real-time anyway, so 10× is finite headroom above what workers can reach.
+       No infinite / no-delay path exists.
 
-GATE       playbackNs ≤ playLimitNs_s          (± one-op overshoot) — no worker outruns its watermark
+GATE       playbackNs ≤ playLimitNs_s          (± one-op overshoot): no worker outruns its playLimitNs
 CEILING    Race: playLimitNs_s = baseline + min(relMax + Δ, relMin + N·Δ) (same for all) = the LEADER's
            consumed position + one chunk, but never more than N·Δ past the slowest achieved (BOUNDED MAX);
            paces every session to the shared real-time clock; a laggard's headroom
@@ -159,6 +164,8 @@ I1  ack-quiescence   Pace: playbackNs still between step ack and next issue ⇒ 
 I2  barrier          release round+1 ⟺ every current session acked round
 I3  bounded skew     execute next op while:  index < entryLimit  ∧  awaited op covered by playback
                        ∧ pending < BACKLOG_CAP  ∧  (executedTapeNs − playbackNs) < TAPE_CAP
+                       (TAPE_CAP is scale-relative: TAPE_CAP_FRAMES·Δ ≈ 4 frames of paced playback,
+                        NOT a fixed sim-ns cap, which re-breaks B14/B16)
                      a sync burst may vault caps in one macrotask (accepted)
 I4  derived limit    playLimitNs never accumulated (§2)
 I5  epoch coherence  msg.epoch ≠ current ⇒ discard; a bump voids {playLimitNs, scale, entries, prep-flag,
