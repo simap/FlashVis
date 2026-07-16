@@ -50,6 +50,10 @@ export function createSessionProxy(port, { fsId, name, geometry }) {
     telemetry.fsinfo = { files: 0, bytes: 0 };
     telemetry.livenessCounts = { live: 0, obsolete: 0, metadata: 0, liveSectors: 0 };
     telemetry.programBytes = 0; telemetry.hostBytes = 0; telemetry.wa = 1;
+    // NB: telemetry.caps is deliberately NOT cleared. caps is ff_caps() of the
+    // fsId's module (runner.js), so it is invariant per fsId, not per epoch, and
+    // RESET reuses the built runner. Clearing it would drop the UI back to
+    // CAPS_FALLBACK for ~250ms after every reset: a visible control flicker.
     frame = null;
   }
 

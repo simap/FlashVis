@@ -41,9 +41,10 @@ const FS_REGISTRY = {
 const DEFAULT_FS = 'fastffs';
 // A3: caps ride the wire now (TelemetryMsg.caps, ADR-0011 ff_caps single
 // source of truth). Until the first TELEMETRY for a session lands (or if a
-// worker never emits it), fall back to "everything capable" (all bits set)
-// so we fail OPEN: a missing/stale caps read must not incorrectly hide a
-// control the FS actually supports.
+// worker never emits it), fall back to every GATED bit set so we fail OPEN: a
+// missing/stale caps read must not incorrectly hide a control the FS actually
+// supports. Only these two are gated (see applyCapsGating); FF_CAP_SECTOR_CLASSES
+// and FF_CAP_APPEND gate nothing in the UI, so they are deliberately absent.
 const CAPS_FALLBACK = FF_CAP_GC | FF_CAP_LIVE_MAP;
 
 // Auto-workload churn config, scaled to the 256 KiB (4096×64) device.
