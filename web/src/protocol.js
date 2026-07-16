@@ -180,7 +180,8 @@ export const JOURNAL_MIN = 400;
  * @typedef {Object} TelemetryMsg     W2C.TELEMETRY  (~250ms, UNCONDITIONAL heartbeat)
  * @property {number} epoch
  * @property {object} fsinfo             {files, bytes}
- * @property {object} livenessCounts     {live, obsolete, metadata}
+ * @property {object} livenessCounts     {live, obsolete, metadata} page counts, plus liveSectors
+ *                                        (sectors holding >= 1 live page; erase granularity)
  * @property {number} exec_fileOpCount
  * @property {number} exec_simNs         telemetry only, never the currency
  * @property {number} programBytes       cumulative bytes programmed to flash (write-amp numerator)

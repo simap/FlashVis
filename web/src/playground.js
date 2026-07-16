@@ -367,7 +367,7 @@ async function boot() {
   function refreshHUD() {
     const t = proxyOf(focusedFsId).telemetry;
     const m = fviz().metrics();
-    const lc = t.livenessCounts || { live: 0, obsolete: 0, metadata: 0 };
+    const lc = t.livenessCounts || { live: 0, obsolete: 0, metadata: 0, liveSectors: 0 };
     const set = (id, v) => { const e = $(id); if (e) e.textContent = v; };
     set('sAmp', t.wa != null ? t.wa.toFixed(1) + '×' : 'n/a');
     set('fAmp', t.wa != null ? t.wa.toFixed(1) + '×' : 'n/a');
@@ -378,6 +378,7 @@ async function boot() {
     set('fSim', fmtTime(t.simNs || 0));
     const programmed = lc.live + lc.obsolete + lc.metadata;
     set('sObs', programmed ? Math.round(100 * lc.obsolete / programmed) + '%' : '0%');
+    set('sLive', lc.liveSectors || 0);
     const npages = fviz().npages;
     const uProg = $('uProg'); if (uProg) uProg.style.width = (100 * lc.live / npages) + '%';
     const uObs = $('uObs'); if (uObs) uObs.style.width = (100 * lc.obsolete / npages) + '%';

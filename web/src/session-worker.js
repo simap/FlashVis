@@ -186,7 +186,7 @@ export function installWorkerHost(port, opts = {}) {
   let pendingTick = null;                          // synthetic multi-tick command settling: { index, rem }
   let realCmd = null;                              // real async command in flight: { index, done }
   let telemetryTimer = null;
-  let mapDirty = true, cachedMap = null, cachedCounts = { live: 0, obsolete: 0, metadata: 0 }, livenessGen = 0;
+  let mapDirty = true, cachedMap = null, cachedCounts = { live: 0, obsolete: 0, metadata: 0, liveSectors: 0 }, livenessGen = 0;
   let lastLivenessWalk = 0;                        // §7/A4: throttle the walk to ≥250ms since last
 
   // ---- the worker-side timed player's playback queue (relocated viz.js `queue`) ----
@@ -214,13 +214,25 @@ export function installWorkerHost(port, opts = {}) {
     lastLivenessWalk = now;
     livenessGen++;
     cachedMap = runner.liveMap();
-    if (!cachedMap) { cachedCounts = { live: 0, obsolete: 0, metadata: 0 }; return; }
+    if (!cachedMap) { cachedCounts = { live: 0, obsolete: 0, metadata: 0, liveSectors: 0 }; return; }
     let live = 0, obsolete = 0, metadata = 0;
     for (let p = 0; p < cachedMap.length; p++) {
       const c = cachedMap[p];
       if (c === 3) live++; else if (c === 2) obsolete++; else if (c === 1 || c >= 4) metadata++;
     }
-    cachedCounts = { live, obsolete, metadata };
+    // A sector is live if ANY of its pages is live (class 3): the "Live sectors"
+    // readout is sector-granular because erase is, so one live page pins the
+    // whole sector against reclamation. Counted off this same walk rather than
+    // main-thread, so it agrees with the live/obsolete counts beside it in the
+    // HUD (viz's map is DISPLAYED state, which lags these at slow-mo).
+    const pps = Math.max(1, (geometry.sectorSize / geometry.pageSize) | 0);
+    let liveSectors = 0;
+    for (let base = 0; base < cachedMap.length; base += pps) {
+      for (let k = 0; k < pps && base + k < cachedMap.length; k++) {
+        if (cachedMap[base + k] === 3) { liveSectors++; break; }
+      }
+    }
+    cachedCounts = { live, obsolete, metadata, liveSectors };
   }
 
   function ack() {
@@ -594,7 +606,7 @@ export function installWorkerHost(port, opts = {}) {
     playbackNs = 0; dispFileOps = 0; dispFlashNs = 0; execFileOps = 0;
     prepActive = false; pendingTick = null; realCmd = null;
     pbQueue = []; executedTapeNs = 0; captureBatch = null; entryFileOps = 0;
-    mapDirty = true; cachedMap = null; cachedCounts = { live: 0, obsolete: 0, metadata: 0 }; livenessGen = 0; lastLivenessWalk = 0;
+    mapDirty = true; cachedMap = null; cachedCounts = { live: 0, obsolete: 0, metadata: 0, liveSectors: 0 }; livenessGen = 0; lastLivenessWalk = 0;
     startTimers();
   }
 

@@ -39,7 +39,7 @@ export function createSessionProxy(port, { fsId, name, geometry }) {
   // the other thread. Kept as one mutable object each so the coordinator can read
   // fields cheaply every frame without allocating.
   const acked = { round: -1, playbackNs: 0, cursor: 0, entriesDrained: -1, fileOpCount: 0, flashTimeNs: 0 };
-  const telemetry = { simNs: 0, fsinfo: { files: 0, bytes: 0 }, livenessCounts: { live: 0, obsolete: 0, metadata: 0 }, exec_fileOpCount: 0, programBytes: 0, hostBytes: 0, wa: 1 };
+  const telemetry = { simNs: 0, fsinfo: { files: 0, bytes: 0 }, livenessCounts: { live: 0, obsolete: 0, metadata: 0, liveSectors: 0 }, exec_fileOpCount: 0, programBytes: 0, hostBytes: 0, wa: 1 };
   let frame = null;          // last render FRAME (focus-only; the coordinator forwards it to the view layer)
   let lastHeardAt = 0;       // wall-ms of the last message (telemetry heartbeat = liveness, §8 crash detect)
 
@@ -48,7 +48,7 @@ export function createSessionProxy(port, { fsId, name, geometry }) {
     acked.fileOpCount = 0; acked.flashTimeNs = 0;
     telemetry.simNs = 0; telemetry.exec_fileOpCount = 0;
     telemetry.fsinfo = { files: 0, bytes: 0 };
-    telemetry.livenessCounts = { live: 0, obsolete: 0, metadata: 0 };
+    telemetry.livenessCounts = { live: 0, obsolete: 0, metadata: 0, liveSectors: 0 };
     telemetry.programBytes = 0; telemetry.hostBytes = 0; telemetry.wa = 1;
     frame = null;
   }
