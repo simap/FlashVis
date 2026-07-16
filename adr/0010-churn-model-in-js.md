@@ -29,12 +29,23 @@ lives in the draw order, not any one profile.** The workload drives toward a tar
 slack headroom, applying each event to the FS then the model so both stay in lockstep; the model
 resets on every format/granule change (restart from seed against an empty chip).
 
+**The executor is open-loop.** It issues exactly the events the model emits: no FS-state-dependent
+branch (e.g. an `exists()` guard), no added op, no reordering. The model is the sole source of the
+sequence, and no filesystem's state ever feeds back into what is issued. Anything else diverges one
+filesystem's issued stream from another's, which forfeits (c) above.
+
 ## Consequences
 
 - Steady state: default 96 KiB live target / 112 KiB ceiling on the 256 KiB device; a 30,000-step
   run settled at ~111 KiB with `model.liveBytes == fsinfo.bytes` and no out-of-space.
 - Byte-exact PRNG lets the sim reproduce a FASTFFS benchmark run and feed every filesystem the
   identical logical workload, which is what makes the lockstep Race/Pace comparison meaningful.
+- The open loop makes the model an *optimistic oracle*: it records every event it emits, whatever the
+  filesystem did with it. A filesystem that rejects an event (an over-capacity write, say) leaves the
+  model marking a file live that it never stored, and a later delete of that name finds nothing. That
+  is faithful, not a bug: it is one filesystem failing a workload the others survived, which is the
+  comparison. Any correction belongs to the model's own bookkeeping, never to a branch in the
+  executor.
 - Cost: pinned to the C model's draw order. A change to the C sequence silently breaks parity; the
   parity harness is the guard. The idiomatic split means the two can't be diffed mechanically.
 
@@ -44,18 +55,3 @@ resets on every format/granule change (restart from seed against an empty chip).
   forfeits benchmark reproducibility and cross-FS equivalence.
 - **Compile `churn_model.c` to WASM and drive it from JS.** Rejected: a build step and pointer
   marshalling for a tiny deterministic generator, and it makes the workload opaque to the console.
-
-## Update, 2026-07-16: open-loop executor over the lockstep seam
-
-Application moved from `workloadStep` in `playground.js` to the coordinator (ADR-0016), which owns
-the one canonical sequence, plus a per-session executor that now runs in its own worker
-(`session-worker.js` `execRealEntry`, ADR-0024); the byte-exact model is unchanged. That seam makes
-one constraint load-bearing: **the executor is open-loop**. It issues exactly the oracle's events,
-with no FS-state-dependent branch (e.g. an `exists()` guard) or added op, since either diverges one
-filesystem's issued stream from another's. An `exists()`-guarded delete was tried and reverted.
-
-The over-capacity write that used to exercise this (the 350 KiB class on a 256 KiB chip) ships
-disabled (`weight: 0`, `playground.js`), so on the shipped workload the oracle's slot table and the
-filesystems agree. Re-enabling that class as a churn knob brings the divergence back: the oracle can
-then mark a file live that a filesystem never stored. Any correction for that belongs to the
-oracle's bookkeeping, never to a branch in the executor.
