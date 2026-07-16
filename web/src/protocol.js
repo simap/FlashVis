@@ -74,9 +74,24 @@ export const W2C = Object.freeze({
   TELEMETRY: 'telemetry', // scalars ~250ms; UNCONDITIONAL = liveness heartbeat
 });
 
-// JOURNAL_MAX >= 400 (ADR-0024 §4). Current in-process session uses 2000; the ring
-// bound is worker-local: this constant is the contract floor, not a cap.
+/*
+ * ── Journal / event sizing (ADR-0024 §4/§7) ─────────────────────────────────
+ * The two numbers of the tape, kept together so they are read (and retuned) as
+ * the pair they are:
+ *
+ *   JOURNAL_MIN  the UI window. Tape lines the page requests per PULL
+ *                ({since|newest, limit}) and the most it keeps, both in the
+ *                tape DOM and in each session's own scrollback copy.
+ *   JOURNAL_MAX  the worker-side ring bound. How much each session retains
+ *                BEHIND that window, so the backlog a future load-more /
+ *                scrollback would page into already exists on the worker.
+ *
+ * The gap between them is the point: the worker remembers more than the page
+ * shows. Both are preliminary and untuned; nothing validates or enforces a
+ * relationship between them, deliberately, so either can be moved on its own.
+ */
 export const JOURNAL_MIN = 400;
+export const JOURNAL_MAX = 2000;
 
 /*
  * ── Message shapes (JSDoc typedefs; §4 of the ADR) ──────────────────────────

@@ -44,7 +44,7 @@
  * (makeSandbox/compileSource), timed() op capture, journal + prep, and the
  * viz.js timed player (frame()/MAX_OPS_PER_FRAME/continuous intra-event).
  */
-import { C2W, W2C, msg } from './protocol.js';
+import { C2W, W2C, msg, JOURNAL_MAX } from './protocol.js';
 import { createRunner as defaultCreateRunner } from './runner.js';
 import { CHURN_EVENT } from './churn.js';
 import { createHeatPlayer } from './worker-heat.js';
@@ -52,7 +52,6 @@ import { createRing } from './worker-rings.js';
 
 // ---- local tunables (worker-internal; NOT wire fields) ----
 const TELEMETRY_MS = 250;           // W2C.TELEMETRY cadence (§4/§8: unconditional heartbeat)
-const JOURNAL_MAX = 2000;           // ring bound; protocol.js's JOURNAL_MIN (400) is the wire floor
 const MIN_ANIM = 110, MAX_ANIM = 9000;   // erase-sweep animated-slot bounds (viz.js parity), for EventEntry.ms
 // ADR-0022 drain pacing (relocated verbatim from viz.js): cap device steps drained
 // per playback tick, carrying the remainder forward, so a huge burst (a prep-mode

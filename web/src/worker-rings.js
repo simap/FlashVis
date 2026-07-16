@@ -3,8 +3,8 @@
  * journal + viz-event logs (ADR-0024 §7). Ids are never reused (issued from a
  * single ever-increasing counter), so `since` is a stable cursor and a gap
  * (firstId > since+1) is arithmetically detectable by the caller as ring
- * eviction. Bounded at `max` (>= protocol.js's JOURNAL_MIN floor); the ring
- * bound is worker-local, not a wire concept.
+ * eviction. Bounded at `max` (protocol.js's JOURNAL_MAX): the retention behind
+ * the page's JOURNAL_MIN window, not itself a wire field.
  */
 export function createRing(max) {
   let items = [];

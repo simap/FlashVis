@@ -31,6 +31,7 @@ import { createLockstep } from './lockstep.js';
 import { createSessionProxy } from './session-proxy.js';
 import { createViz } from './viz.js';
 import { FF_CAP_GC, FF_CAP_LIVE_MAP } from './runner.js';
+import { JOURNAL_MIN } from './protocol.js';
 
 // FS registry (ADR-0015): fsId → display name. All live from page load
 // (ADR-0017).
@@ -225,7 +226,7 @@ async function boot() {
     el.dataset.jid = e.id;
     el.textContent = e.text;
     out.appendChild(el);
-    while (out.children.length > 400) out.removeChild(out.firstChild);
+    while (out.children.length > JOURNAL_MIN) out.removeChild(out.firstChild);
     out.scrollTop = out.scrollHeight;
   }
   // Ingest a pulled journal into the focused session's OWN scrollback copy
@@ -236,7 +237,7 @@ async function boot() {
       if (st.tapeSeen.has(e.id)) continue;
       st.tapeSeen.add(e.id);
       st.journalEntries.push(e);
-      if (st.journalEntries.length > 400) st.journalEntries.shift();
+      if (st.journalEntries.length > JOURNAL_MIN) st.journalEntries.shift();
       appendTapeEntry(e);
     }
   }
@@ -438,13 +439,13 @@ async function boot() {
     st.proxy.pull(st.attachedFresh ? {
       heat: true, wear: true,
       liveMap: { since: -1 },                          // full CURRENT liveMap
-      journal: { since: st.journalSince, limit: 400 }, // carry the tape forward (scrollback, no replay risk)
-      events: { newest: true, limit: 0 },              // HEAD only: no historical erase sweep
+      journal: { since: st.journalSince, limit: JOURNAL_MIN }, // carry the tape forward (scrollback, no replay risk)
+      events: { newest: true, limit: 0 },                      // HEAD only: no historical erase sweep
     } : {
       heat: true, wear: true,
       liveMap: { since: st.liveMapSince },
-      journal: { since: st.journalSince, limit: 400 },
-      events: { since: st.eventsSince, limit: 400 },   // only genuinely-new events animate
+      journal: { since: st.journalSince, limit: JOURNAL_MIN },
+      events: { since: st.eventsSince, limit: JOURNAL_MIN },   // only genuinely-new events animate
     });
     raf(renderTick);
   }
