@@ -284,13 +284,12 @@ async function boot() {
       // mode. A mode-hardcoded "waiting" string could show even when
       // nothing is actually waiting.
       // Both totals ALWAYS show, in both modes (spec/ui.md "FS cards"): flash
-      // time (PACED flashTimeNs, the §2 grant-bounded clock, so Race flash times
-      // converge; NOT the execution simNs which vaults per command) first, then
-      // ops (fileOpCount), equal weight. Only the bottom rate + bar switch by mode.
-      $('fsTime-' + snap.fsId).textContent = fmtTime(snap.flashTimeNs);
+      // time (execution counter simNs) first, then ops (fileOpCount), equal
+      // weight. Only the bottom rate + leader bar switch by mode.
+      $('fsTime-' + snap.fsId).textContent = fmtTime(snap.simNs);
       $('fsOps-' + snap.fsId).textContent = String(snap.fileOpCount);
       $('fsBar-' + snap.fsId).style.width = (leaderGood > 0 ? Math.round((good / leaderGood) * 100) : 0) + '%';
-      $('fsTag-' + snap.fsId).textContent = mode === 'race' ? `${fmtRate(snap.opsPerSec || 0)} ops/s` : fmtPerOp(snap.flashTimeNs, snap.fileOpCount);
+      $('fsTag-' + snap.fsId).textContent = mode === 'race' ? `${fmtRate(snap.opsPerSec || 0)} ops/s` : fmtPerOp(snap.simNs, snap.fileOpCount);
     }
   }
 
