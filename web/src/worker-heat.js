@@ -106,9 +106,7 @@ export function createHeatPlayer(geometry) {
       const dt = Math.max(0, now - lastDecayAt);
       lastDecayAt = now;
       if (dt > 0 && glowHot.size) {
-        const halfLife = isFinite(scale)
-          ? clamp(HEAT_HALF_MS * HEAT_SCALE_REF / scale, HEAT_HALF_MIN, HEAT_HALF_MAX)
-          : HEAT_HALF_MIN;
+        const halfLife = clamp(HEAT_HALF_MS * HEAT_SCALE_REF / scale, HEAT_HALF_MIN, HEAT_HALF_MAX);
         const k = Math.pow(0.5, dt / halfLife);
         for (const p of glowHot) {
           readHeat[p] *= k; progHeat[p] *= k;

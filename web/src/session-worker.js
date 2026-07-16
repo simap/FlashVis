@@ -22,9 +22,9 @@
  *      (§2), draining the queue CONTINUOUSLY intra-event (a 21ms erase holds
  *      across frames, not one flash, curRem carries forward) and applying heat
  *      as it drains. playbackNs, the §2 currency reported in grantAck, advances
- *      only here, so it paces to real-time: 5× slow-mo ⇒ ~1/5 real-time, no-delay
- *      ⇒ flat-out but chunked at MAX_OPS_PER_FRAME (ADR-0022 drain pacing,
- *      carry-forward: paces the drain, drops nothing; the I8 heat veto holds).
+ *      only here, so it paces to real-time: 5× slow-mo ⇒ ~1/5 real-time, chunked
+ *      at MAX_OPS_PER_FRAME (ADR-0022 drain pacing, carry-forward: paces the
+ *      drain, drops nothing; the I8 heat veto holds).
  *      Race honours a finite scale because the same playLimitNs ceiling gates it
  *      (B9). entriesDrained = highest entry INDEX whose queued events have all
  *      drained; a Pace step ack needs entry executed ∧ metered playback drained.
@@ -55,7 +55,7 @@ const TELEMETRY_MS = 250;           // W2C.TELEMETRY cadence (§4/§8: unconditi
 const JOURNAL_MAX = 2000;           // ring bound; protocol.js's JOURNAL_MIN (400) is the wire floor
 const MIN_ANIM = 110, MAX_ANIM = 9000;   // erase-sweep animated-slot bounds (viz.js parity), for EventEntry.ms
 // ADR-0022 drain pacing (relocated verbatim from viz.js): cap device steps drained
-// per playback tick, carrying the remainder forward, so a huge burst (a no-delay
+// per playback tick, carrying the remainder forward, so a huge burst (a prep-mode
 // compaction of ~30k tiny reads) stays visibly lit across frames instead of mushing
 // into one decay flash. Paces the DRAIN; drops nothing (I8 veto holds).
 const MAX_OPS_PER_FRAME = 500;
@@ -72,11 +72,8 @@ const MS_PER_FRAME = 1000 / 60;     // coordinator grant cadence (chunk = scale 
 // full sim-second ahead, which at deep slow-mo is ~50 real-seconds of un-played
 // backlog: that backlog is the ADR-0020 "Stop leaves a long tail" root (B16) and
 // the B14 "SPEED stops pacing" root (a big backlog drains MAX_OPS-bound per frame
-// instead of chunk/time-bound, so the op rate no longer tracks SPEED). At no-delay
-// there is no real-time lead to bound (playback is flat-out), so a fixed sim-
-// second stands and BACKLOG_CAP guards the event count.
-const TAPE_CAP_FRAMES = 4;          // finite: execution may lead paced playback by this many frames of sim
-const NO_DELAY_TAPE_CAP = 1_000_000_000;   // no-delay: 1 sim-second of executed-but-unplayed flash
+// instead of chunk/time-bound, so the op rate no longer tracks SPEED).
+const TAPE_CAP_FRAMES = 4;          // execution may lead paced playback by this many frames of sim
 const BACKLOG_CAP = 100_000;        // hard cap on queued device steps (event-count guard)
 
 const fmtTime = (ns) => { const ms = ns / 1e6; return ms < 1000 ? `${ms.toFixed(ms < 10 ? 1 : 0)} ms` : `${(ms / 1000).toFixed(2)} s`; };
@@ -203,8 +200,8 @@ export function installWorkerHost(port, opts = {}) {
   let entryFileOps = 0;                            // file ops accrued by the entry currently executing (credited at drain)
 
   function send(type, payload) { port.postMessage(msg(type, { epoch, ...payload })); }
-  const eraseMs = (ns) => (isFinite(scale) ? Math.max(MIN_ANIM, Math.min(MAX_ANIM, ns / scale)) : MIN_ANIM);
-  const tapeCapNs = () => (isFinite(scale) ? TAPE_CAP_FRAMES * scale * MS_PER_FRAME : NO_DELAY_TAPE_CAP);
+  const eraseMs = (ns) => Math.max(MIN_ANIM, Math.min(MAX_ANIM, ns / scale));
+  const tapeCapNs = () => TAPE_CAP_FRAMES * scale * MS_PER_FRAME;
   const backpressured = () => (executedTapeNs - playbackNs) >= tapeCapNs() || pbQueue.length >= BACKLOG_CAP;
 
   // ---- liveness (ADR-0008/0015 §7): one reachability walk per flash change,
@@ -530,17 +527,16 @@ export function installWorkerHost(port, opts = {}) {
   // draining the queue CONTINUOUSLY intra-event with MAX_OPS_PER_FRAME carry-
   // forward (ADR-0022). playbackNs, the §2 currency, advances only here, so it
   // paces to the coordinator's real (rAF) frame cadence: a 21ms erase holds across
-  // frames, 5× slow-mo runs 1/5 real-time, no-delay flat-out but chunked. Driving
-  // it off the GRANT (not a wall-clock timer) keeps progress deterministic under
-  // the acceptance harness's macrotask-driven frames. Returns true iff it advanced.
+  // frames, 5× slow-mo runs 1/5 real-time. Driving it off the GRANT (not a
+  // wall-clock timer) keeps progress deterministic under the acceptance
+  // harness's macrotask-driven frames. Returns true iff it advanced.
   function drain() {
     if (!pbQueue.length) return false;
-    // No-delay (scale = Infinity) or prep: no TIME pacing, drain flat-out, bounded
-    // only by MAX_OPS_PER_FRAME (viz.js parity: `budget = noDelay ? Infinity : …`).
-    // Finite scale: the granted headroom IS this frame's realBudget × scale (the
-    // coordinator advanced playLimitNs by chunk = scale × MS_PER_FRAME).
-    const noDelay = prepActive || !isFinite(scale);
-    let budget = noDelay ? Infinity : (playLimitNs - playbackNs);
+    // prep: no TIME pacing, drain flat-out, bounded only by MAX_OPS_PER_FRAME
+    // (viz.js parity: `budget = prepActive ? Infinity : …`). Otherwise the
+    // granted headroom IS this frame's realBudget × scale (the coordinator
+    // advanced playLimitNs by chunk = scale × MS_PER_FRAME).
+    let budget = prepActive ? Infinity : (playLimitNs - playbackNs);
     if (!(budget > 0)) return false;                 // watermark reached, hold (paces Race + slow-mo)
     const pb0 = playbackNs, ed0 = entriesDrained;
     let stepBudget = MAX_OPS_PER_FRAME;
