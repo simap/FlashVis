@@ -68,7 +68,7 @@ driver*, not fabricated.
     npm run test:fastffs     # real FASTFFS over the emulated NOR chip, in Node
 
 Expected: two files written and one read back, reporting the reads / programs / erases the
-driver issued with 0 NOR-rule violations.
+driver issued against the emulated NOR device.
 
 ## Run the visualizer
 

@@ -6,8 +6,8 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
 - [x] Prove the pipeline: FASTFFS → WASM, driven against the JS NOR device (`npm run test:fastffs`).
 - [x] **Wire the visualizer to the live device event stream.** `runner.js` loads
       `dist/fastffs.mjs`, attaches `device.js`, and `viz.js` replays `prog`/`erase`/`read`
-      events onto the die. Fills reconstruct from real events; write-amp / erases / violations
-      are read off the device.
+      events onto the die. Fills reconstruct from real events; write-amp and erases are read off
+      the device.
 - [x] **Playground:** control panel (write / gc / format) plus a JS console over the FS API,
       with a self-pacing auto-workload.
 
