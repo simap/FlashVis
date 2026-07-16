@@ -45,14 +45,17 @@ resets on every format/granule change (restart from seed against an empty chip).
 - **Compile `churn_model.c` to WASM and drive it from JS.** Rejected: a build step and pointer
   marshalling for a tiny deterministic generator, and it makes the workload opaque to the console.
 
-## Update — 2026-07-11: open-loop executor over the lockstep seam
+## Update, 2026-07-16: open-loop executor over the lockstep seam
 
-Application moved from `workloadStep` in `playground.js` to the coordinator
-(ADR-0016) plus `runChurnEvent` in `session.js`; the byte-exact
-model is unchanged. That seam makes one constraint load-bearing: **the executor is open-loop** — it
-issues exactly the oracle's events, with no FS-state-dependent branch (e.g. an `exists()` guard) or
-added op, since either diverges one filesystem's issued stream from another's. Consequence: the
-intentional over-capacity write (350 KiB class on a 256 KiB chip) can leave the oracle marking a
-file live that a filesystem never stored, so a later delete logs "not found" — faithful, not a bug,
-and fixed only *outside* the op-sequence (quiet the log, or correct the oracle's bookkeeping). An
-`exists()`-guarded delete was tried and reverted.
+Application moved from `workloadStep` in `playground.js` to the coordinator (ADR-0016), which owns
+the one canonical sequence, plus a per-session executor that now runs in its own worker
+(`session-worker.js` `execRealEntry`, ADR-0024); the byte-exact model is unchanged. That seam makes
+one constraint load-bearing: **the executor is open-loop**. It issues exactly the oracle's events,
+with no FS-state-dependent branch (e.g. an `exists()` guard) or added op, since either diverges one
+filesystem's issued stream from another's. An `exists()`-guarded delete was tried and reverted.
+
+The over-capacity write that used to exercise this (the 350 KiB class on a 256 KiB chip) ships
+disabled (`weight: 0`, `playground.js`), so on the shipped workload the oracle's slot table and the
+filesystems agree. Re-enabling that class as a churn knob brings the divergence back: the oracle can
+then mark a file live that a filesystem never stored. Any correction for that belongs to the
+oracle's bookkeeping, never to a branch in the executor.
