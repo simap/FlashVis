@@ -84,7 +84,7 @@ export const FS_ORDER = ['fastffs', 'littlefs'];
  * hit this (synchronous stub/mock workers); the real backend does. Once INIT
  * has landed, reset() reuses the built runner via device.reset() (no reload).
  */
-export async function makeRig({ speed = Infinity, gcRatio = 0.5 } = {}) {
+export async function makeRig({ speed = 1e7, gcRatio = 0.5 } = {}) {   // 1e7 = MAX_SCALE (the value setSpeed clamps to)
   const churn = createChurnModel(CHURN_CFG);
   const coord = createLockstep({ churn, gcRatio, autoTick: false });
   const hosts = {};

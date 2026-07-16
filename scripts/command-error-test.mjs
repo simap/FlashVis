@@ -39,7 +39,7 @@ for (const fsId of ['fastffs', 'littlefs']) {
 const coord = createLockstep({ churn: createChurnModel(CHURN_CFG) });
 coord.setSessions(sessions);
 coord.reset();
-coord.setSpeed(Infinity);
+coord.setSpeed(1e7);   // 1e7 = MAX_SCALE (the value setSpeed clamps to)
 coord.setMode('pace');
 
 const cursors = () => coord.snapshots().map((s) => s.stepCursor);

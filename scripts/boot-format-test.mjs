@@ -51,7 +51,7 @@ async function makeRig() {
   }
   const coord = createLockstep({ churn: createChurnModel(CHURN_CFG) });
   coord.setSessions(sessions);
-  coord.setSpeed(Infinity);
+  coord.setSpeed(1e7);   // 1e7 = MAX_SCALE (the value setSpeed clamps to)
   return { dom, coord, sessions, erases, byId: Object.fromEntries(sessions.map((s) => [s.fsId, s])) };
 }
 

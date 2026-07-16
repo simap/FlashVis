@@ -462,9 +462,10 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       mode = m;
     },
     get mode() { return mode; },
-    /** scale: sim-ns per real-ms (Infinity ⇒ no delay). Rides grant.scale (§2): the
-     *  next frame's grant carries it, so a SPEED change lands in ≤ one frame. */
-    setSpeed(next) { scale = Math.min(next, MAX_SCALE); lastComputedRound = -1; },   // clamp: no infinite scale (§2 Δ finite)
+    /** scale: sim-ns per real-ms. Rides grant.scale (§2): the next frame's grant
+     *  carries it, so a SPEED change lands in <= one frame. Rejects non-finite or
+     *  negative (Infinity/-Infinity/NaN/<0); 0 is allowed (a future freeze option). */
+    setSpeed(next) { if (!isFinite(next) || next < 0) throw new Error('setSpeed: speed must be finite and >= 0'); scale = Math.min(next, MAX_SCALE); lastComputedRound = -1; },   // clamp valid finite: no infinite scale (§2 Δ finite)
     start() { running = true; },
     /** Pause: gate the churn GENERATOR only (ADR-0020 / §4, no stop message). Grants
      *  keep flowing (no-ops); in-flight worker ops drain to quiescence on their own. */

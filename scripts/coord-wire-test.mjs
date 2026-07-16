@@ -37,7 +37,7 @@ const fail = (m) => { failures++; console.error('  FAIL - ' + m); };
 const ok = (m) => console.log('  ok   - ' + m);
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
 
-function makeRig({ speed = Infinity, units = UNITS, maxOpsPerGrant = 64, caps = null } = {}) {
+function makeRig({ speed = 1e7, units = UNITS, maxOpsPerGrant = 64, caps = null } = {}) {   // 1e7 = MAX_SCALE (the value setSpeed clamps to)
   const churn = createChurnModel(CHURN_CFG);
   const coord = createLockstep({ churn, autoTick: false });
   const workers = {};
@@ -78,7 +78,7 @@ async function testHandshake() {
 // ---------------------------------------------------------------------------
 async function testRaceDivergence() {
   console.log('\n[2] RACE: identical playback ceiling ⇒ cursors diverge, playback level (§2 MAX)');
-  const rig = makeRig({ speed: Infinity });
+  const rig = makeRig({ speed: 1e7 });
   await flushTurns(4);
   rig.coord.setMode('race');
   rig.coord.start();
@@ -100,7 +100,7 @@ async function testRaceDivergence() {
 // ---------------------------------------------------------------------------
 async function testRaceCommand() {
   console.log('\n[3] RACE: a broadcast command drains on every worker (quiescence = ack, I1)');
-  const rig = makeRig({ speed: Infinity });
+  const rig = makeRig({ speed: 1e7 });
   await flushTurns(4);
   rig.coord.setMode('race');
   const { index } = rig.coord.broadcast({ ops: [1, 1, 1] }, 'write x3');   // 3-op atomic command at the frontier
@@ -117,7 +117,7 @@ async function testRaceCommand() {
 // ---------------------------------------------------------------------------
 async function testPaceLockstep() {
   console.log('\n[4] PACE: cursors stay in lockstep, join advances one step at a time');
-  const rig = makeRig({ speed: Infinity });
+  const rig = makeRig({ speed: 1e7 });
   await flushTurns(4);
   rig.coord.setMode('pace');
   rig.coord.start();
@@ -174,7 +174,7 @@ async function testSustainedPaceHold() {
 // ---------------------------------------------------------------------------
 async function testReseatBurstNoStall() {
   console.log('\n[6] PACE→RACE reseat: the BEHIND FS burns headroom to catch up (§2 MAX, not a stall)');
-  const rig = makeRig({ speed: Infinity, maxOpsPerGrant: 64 });
+  const rig = makeRig({ speed: 1e7, maxOpsPerGrant: 64 });
   await flushTurns(4);
   rig.coord.setMode('pace');
   rig.coord.start();
@@ -250,7 +250,7 @@ async function testRaceToPaceCatchupHold() {
 // false while frozen / idle. No debounce.
 async function testCsActive() {
   console.log('\n[9] csActive: raw per-frame blinky, true while playback advances, false while frozen/idle');
-  const rig = makeRig({ speed: Infinity });
+  const rig = makeRig({ speed: 1e7 });
   await flushTurns(4);
   // idle (not running, no work): csActive false for both
   await run(rig, 3);
@@ -280,7 +280,7 @@ async function testHoldDebounce() {
   const savedSeam = globalThis.__flashvisHoldShowMs;
   globalThis.__flashvisHoldShowMs = 300;                 // real ~300ms debounce for this test only
   try {
-    const rig = makeRig({ speed: Infinity });
+    const rig = makeRig({ speed: 1e7 });
     await flushTurns(4);
     rig.coord.setMode('race');
     rig.coord.start();
@@ -331,7 +331,7 @@ async function testGrantContinuityNoAccumulation() {
 // ---------------------------------------------------------------------------
 async function testResetEpochDiscard() {
   console.log('\n[8] reset() bumps the epoch; pre-reset stragglers are discarded (I5)');
-  const rig = makeRig({ speed: Infinity });
+  const rig = makeRig({ speed: 1e7 });
   await flushTurns(4);
   rig.coord.setMode('race');
   rig.coord.start();
@@ -361,7 +361,7 @@ async function testResetEpochDiscard() {
 // format wire field); a header Reset NEVER switches race/pace mode.
 async function testBootResetFlow() {
   console.log('\n[11] boot/header-Reset flow: reset→blank, format-as-broadcast, mode preserved');
-  const rig = makeRig({ speed: Infinity });
+  const rig = makeRig({ speed: 1e7 });
   await flushTurns(4);
   rig.coord.setMode('race');                     // set a non-default mode
   const modeBefore = rig.coord.mode;
@@ -460,6 +460,28 @@ async function testBoundedRaceClock() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// setSpeed input guard: reject non-finite or negative speed (Infinity/-Infinity/
+// NaN/<0) instead of silently clamping; valid finite speed still works. 0 is
+// allowed (reserved as a future freeze option) and is NOT asserted here.
+function testSetSpeedGuard() {
+  console.log('\n[14] setSpeed guard: rejects non-finite / negative, accepts valid finite');
+  const { coord } = makeRig();
+  const throws = (v, label) => {
+    let threw = false;
+    try { coord.setSpeed(v); } catch { threw = true; }
+    if (threw) ok(`setSpeed(${label}) threw (rejected, not silently clamped)`);
+    else fail(`setSpeed(${label}) did NOT throw (must reject non-finite/negative)`);
+  };
+  throws(Infinity, 'Infinity');
+  throws(-1, '-1');
+  throws(NaN, 'NaN');
+  let ranClean = true;
+  try { coord.setSpeed(1e6); } catch { ranClean = false; }
+  if (ranClean) ok('setSpeed(1e6) accepted a valid finite speed (no throw)');
+  else fail('setSpeed(1e6) threw on a valid finite speed (guard too aggressive)');
+}
+
 // ---- run all ----
 console.log('ADR-0024 coordinator-over-the-wire suite (mock transport + mock workers)');
 await testHandshake();
@@ -476,6 +498,7 @@ await testHoldDebounce();
 await testBootResetFlow();
 await testRaceScaleProportional();
 await testBoundedRaceClock();
+testSetSpeedGuard();
 
 console.log('');
 if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }

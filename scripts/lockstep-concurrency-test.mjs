@@ -67,7 +67,7 @@ async function assertCrossFsIdentical(rig, tag, label) {
 // ============================================================================
 async function scenarioExactlyOnce() {
   console.log('\n[1] exactly-once dispatch: N distinct commands run once per session, both FS identical');
-  const rig = await makeRig({ speed: Infinity });
+  const rig = await makeRig({ speed: 1e7 });
   const N = 5;
   const names = [];
   let last = 0;
@@ -99,7 +99,7 @@ async function scenarioExactlyOnce() {
 // ============================================================================
 async function scenarioResetReproducible() {
   console.log('\n[8] reset() reproducibility: a produced run, reset, re-run = byte-identical (journal-print)');
-  const rig = await makeRig({ speed: Infinity });
+  const rig = await makeRig({ speed: 1e7 });
   // Run 1: a fixed batch of produced churn steps, then a hash-print of the whole tree.
   const STEPS = 10;   // bounded so the small (256KB) chip never overflows a churn write
   async function producedRunThenHash(tag) {
@@ -146,7 +146,7 @@ async function scenarioResetReproducible() {
 // ============================================================================
 async function scenarioRejectingCommand() {
   console.log('\n[4] a throwing command still quiesces; the coordinator recovers (I1)');
-  const rig = await makeRig({ speed: Infinity });
+  const rig = await makeRig({ speed: 1e7 });
   const bad = rig.coord.broadcast(`throw new Error('boom - simulated bad command')`, 'bad').index;
   const good = rig.coord.broadcast(hashingWrite('after-boom.bin', 2048), 'good').index;
   rig.coord.setMode('pace');
@@ -171,7 +171,7 @@ async function scenarioRejectingCommand() {
 // ============================================================================
 async function scenarioStopGatesGeneratorOnly() {
   console.log('\n[5/6] stop() gates the generator only: an in-flight command COMPLETES, never aborts');
-  const rig = await makeRig({ speed: Infinity });
+  const rig = await makeRig({ speed: 1e7 });
   // Broadcast a multi-op command; stop() the instant it starts, then keep ticking.
   const src = `await writeFile('s5a.bin', 4096); await readFile('s5a.bin'); ${hashingWrite('s5b.bin', 4096)}`;
   const idx = rig.coord.broadcast(src, 'multi').index;
@@ -202,7 +202,7 @@ async function scenarioStopGatesGeneratorOnly() {
 // ============================================================================
 async function scenarioReseatBurst() {
   console.log('\n[7] Pace->Race reseat: the behind FS bursts to catch up, nothing freezes (§2 MAX)');
-  const rig = await makeRig({ speed: Infinity });
+  const rig = await makeRig({ speed: 1e7 });
   rig.coord.setMode('pace');
   rig.coord.start();
   await run(rig, 24);
@@ -264,7 +264,7 @@ async function scenarioOpsPerSec() {
 // ============================================================================
 async function scenarioSignalsRealBackend() {
   console.log('\n[10-15] standing signals over real WASM: holding laggard-safe, csActive tracks real advance');
-  const rig = await makeRig({ speed: Infinity });
+  const rig = await makeRig({ speed: 1e7 });
   // idle: neither holding nor csActive
   await run(rig, 3);
   let s = snapById(rig);
@@ -313,7 +313,7 @@ async function scenarioSignalsRealBackend() {
 // ============================================================================
 async function scenarioResetAbandonsMidFlight() {
   console.log('\n[16] reset() abandons a mid-flight round; the zombie completion is void (I5/§8)');
-  const rig = await makeRig({ speed: Infinity });
+  const rig = await makeRig({ speed: 1e7 });
   let release;
   globalThis.__fvGate16 = new Promise((r) => { release = r; });
   const src = `await writeFile('z-before.bin', 2048); await globalThis.__fvGate16; await writeFile('z-after.bin', 2048)`;
@@ -362,7 +362,7 @@ async function scenarioRaceMaxSpeedBound() {
   const MS_PER_FRAME = 1000 / 60, MAX_SCALE = 1e7;   // mirrors lockstep.js
   const CHUNK = MAX_SCALE * MS_PER_FRAME;             // §2 Δ at the top speed
   const BOUND = 2 * CHUNK;                            // RACE_LEAD_BOUND_FRAMES = 2
-  const rig = await makeRig({ speed: Infinity });     // Infinity input PROVES the clamp (becomes 1e7)
+  const rig = await makeRig({ speed: 1e7 });     // 1e7 = MAX_SCALE, the top metered speed (no infinite scale)
   rig.coord.setMode('race');
   rig.coord.start();
   const gapNs = () => { const v = rig.proxies.map((p) => p.acked.playbackNs); return Math.max(...v) - Math.min(...v); };
