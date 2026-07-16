@@ -1,8 +1,15 @@
 # ADR 0015: A session abstraction, split from a manager, for the FS picker (and later lockstep)
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-0024. The executor/manager split holds; the main-thread `session.js`
+  that embodied it does not.
 - **Date:** 2026-07-08
 - **Deciders:** —
+
+> Superseded by [ADR-0024](0024-worker-per-session.md): the seam this ADR argues for survives
+> intact, one pure executor per FS instance with a manager above it, but the executor moved off
+> the main thread into a worker (`web/src/session-worker.js`), reached over a message wire
+> (`web/src/protocol.js`) through `web/src/session-proxy.js` rather than by direct call. `session.js`
+> itself was retired in `f20a688` once production and every test had moved onto the worker path.
 
 ## Context
 
