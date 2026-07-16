@@ -77,20 +77,29 @@ async function testHandshake() {
 
 // ---------------------------------------------------------------------------
 async function testRaceDivergence() {
-  console.log('\n[2] RACE: identical playback ceiling ⇒ cursors diverge, playback level (§2 MAX)');
-  const rig = makeRig({ speed: 1e7 });
+  console.log('\n[2] RACE slow-mo: cheap FS out-steps pricey in cursor, playback LEVEL within bounded-MAX (§2)');
+  // SUB-OP pacing (scale 5e4 = ~1/20 real-time, chunk 0.83ms/frame, below BOTH op costs
+  // fastffs 1ms / littlefs 5ms): playback, not the entry window, is the binding
+  // constraint, so the §2 clock paces. Cheap FS drains MORE entries to fill the same
+  // shared playback ceiling, and the bounded-MAX keeps the playback gap within ~2 chunks.
+  const scale = 5e4;
+  const chunk = scale * (1000 / 60);   // Δ per frame (sim-ns)
+  const rig = makeRig({ speed: scale });
   await flushTurns(4);
   rig.coord.setMode('race');
   rig.coord.start();
-  await run(rig, 40);
+  await run(rig, 60);
   const s = snapById(rig);
   const cur = { fastffs: s.fastffs.stepCursor, littlefs: s.littlefs.stepCursor };
   if (!(cur.fastffs > cur.littlefs)) fail(`cheap FS did not out-step pricey FS (fastffs ${cur.fastffs} vs littlefs ${cur.littlefs})`);
   else ok(`cheap FS out-stepped pricey ${(cur.fastffs / Math.max(cur.littlefs, 1)).toFixed(1)}x (fastffs ${cur.fastffs}, littlefs ${cur.littlefs}), the comparison`);
+  // Playback LEVEL = the bounded-MAX gap: the granted ceilings differ by <= 2 chunks, and
+  // actual playback overshoots its ceiling by at most one (pricey) op, so gap <= 2Δ + op.
   const a = pb(rig, 'fastffs'), b = pb(rig, 'littlefs');
-  const rel = Math.abs(a - b) / Math.max(a, b);
-  if (rel > 0.15) fail(`playback NOT level across FS (fastffs ${(a / 1e6).toFixed(0)}ms vs littlefs ${(b / 1e6).toFixed(0)}ms, ${(rel * 100).toFixed(0)}% apart), ceiling not shared`);
-  else ok(`playback level within ${(rel * 100).toFixed(1)}% (fastffs ${(a / 1e6).toFixed(0)}ms, littlefs ${(b / 1e6).toFixed(0)}ms), one shared ceiling`);
+  const gap = Math.abs(a - b);
+  const bound = 2 * chunk + UNITS.littlefs;   // 2Δ + one pricey-op overshoot
+  if (gap > bound) fail(`playback NOT level: gap ${(gap / 1e6).toFixed(2)}ms > bound 2Δ+op ${(bound / 1e6).toFixed(2)}ms (2Δ=${(2 * chunk / 1e6).toFixed(2)}ms), ceiling not shared`);
+  else ok(`playback level: gap ${(gap / 1e6).toFixed(2)}ms <= bound 2Δ+op ${(bound / 1e6).toFixed(2)}ms (2Δ=${(2 * chunk / 1e6).toFixed(2)}ms), one shared bounded-MAX ceiling`);
   // round barrier: both workers acked the same advancing round (I2)
   const rounds = FS_ORDER.map((f) => rig.byId[f].acked.round);
   if (rounds[0] < 5 || Math.abs(rounds[0] - rounds[1]) > 1) fail(`round barrier off: acked rounds ${rounds} (should advance together, ≥1 apart at most)`);
@@ -280,19 +289,19 @@ async function testHoldDebounce() {
   const savedSeam = globalThis.__flashvisHoldShowMs;
   globalThis.__flashvisHoldShowMs = 300;                 // real ~300ms debounce for this test only
   try {
-    const rig = makeRig({ speed: 1e7 });
+    // SLOW-MO race with an EXECUTION-bound laggard (per-grant op cap of 1, tiny op cost
+    // so cap × op << chunk): the laggard genuinely cannot burn its headroom, so the
+    // bounded-MAX pins the leader CONTINUOUSLY. That is a real sustained raw hold (not a
+    // max-speed backlog artifact), which is what the ~300ms wall debounce must gate.
+    const rig = makeRig({ speed: 5e4, units: { fastffs: 1e4, littlefs: 1e4 }, caps: { fastffs: Infinity, littlefs: 1 } });
+    const lead = 'fastffs';                              // uncapped ⇒ the pinned leader
     await flushTurns(4);
     rig.coord.setMode('race');
     rig.coord.start();
-    await run(rig, 30);                                   // diverge cursors
-    const s0 = snapById(rig);
-    const lead = s0.fastffs.stepCursor >= s0.littlefs.stepCursor ? 'fastffs' : 'littlefs';
-    rig.coord.stop();
-    rig.coord.setMode('pace');                            // lead FS enters a sustained raw hold NOW
-    await frame(rig);
-    if (snapById(rig)[lead].holding) fail('holding lit on the very first frame of a fresh hold, not debounced');
+    await run(rig, 12);                                   // let the laggard fall behind and the leader pin (near-instant wall)
+    if (snapById(rig)[lead].holding) fail('holding lit on the very first sampled frame of a fresh hold, not debounced');
     else ok('holding NOT lit immediately when the raw hold begins (debounce engaged)');
-    // let ~350ms of real wall-time pass while the hold persists, ticking as we go
+    // let ~360ms of real wall-time pass while the leader stays pinned, ticking as we go
     const t0 = Date.now();
     while (Date.now() - t0 < 360) await frame(rig);
     if (!snapById(rig)[lead].holding) fail('holding never lit after the raw hold persisted > 300ms (debounce stuck)');
@@ -397,8 +406,11 @@ async function measurePerFrameAdvance(scale, { unit = 1e4 } = {}) {
   return (b - a) / 20;                                  // sim-ns of playback advanced per frame
 }
 async function testRaceScaleProportional() {
-  console.log('\n[12] RACE scale: a higher scale yields a proportionally larger per-frame advance (uncapped worker)');
-  const S = 1e5;
+  console.log('\n[12] RACE scale (slow-mo): per-frame playback advance scales with speed where playback is the limit');
+  // SLOW-MO, tiny op cost (unit 1e4 = 0.01ms << chunk): the worker always keeps up, so
+  // PLAYBACK (the §2 chunk = scale × MS_PER_FRAME), not entries, is the binding limit.
+  // S = 5e4 (~1/20 real-time) and 2S = 1e5, both sub-op: doubling scale doubles Δ/frame.
+  const S = 5e4;
   const adv1 = await measurePerFrameAdvance(S);
   const adv2 = await measurePerFrameAdvance(2 * S);
   const ratio = adv2 / adv1;
@@ -412,10 +424,13 @@ async function testRaceScaleProportional() {
   else ok(`per-frame advance ≈ chunk = scale × MS_PER_FRAME (${(adv1 / 1e6).toFixed(2)}ms ≈ ${(expected / 1e6).toFixed(2)}ms)`);
 }
 async function testBoundedRaceClock() {
-  console.log('\n[13] RACE bounded-MAX: an exec-bound laggard bounds the leader to slowest + 2×chunk (symptom 1)');
-  const scale = 1e5;
-  const chunk = scale * (1000 / 60);
-  const BOUND = 2 * chunk;   // RACE_LEAD_BOUND_FRAMES = 2
+  console.log('\n[13] RACE bounded-MAX (slow-mo): an exec-bound laggard pins the leader to slowest + 2Δ (symptom 1)');
+  // BETWEEN-OPS slow-mo (scale 2e5 = ~1/5 real-time, Δ 3.33ms/frame): playback paces, and
+  // an EXECUTION-bound laggard (per-grant op cap) genuinely cannot burn its headroom, so
+  // the bounded-MAX must PIN the leader at slowest + 2Δ and light its hold (not runaway).
+  const scale = 2e5;
+  const chunk = scale * (1000 / 60);   // Δ per frame
+  const BOUND = 2 * chunk;   // RACE_LEAD_BOUND_FRAMES = 2 (the slowest + 2Δ ceiling)
   // (a) BOTH keep up (uncapped, equal unit): flash time stays level, no false hold.
   {
     const rig = makeRig({ speed: scale, units: { fastffs: 1e4, littlefs: 1e4 }, maxOpsPerGrant: Infinity });

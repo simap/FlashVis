@@ -290,17 +290,41 @@ async function scenarioSignalsRealBackend() {
   else ok(`s11: csActive fired on most running frames (ff ${ffActive}/${NF}, lf ${lfActive}/${NF}), the real-time blinky`);
   if (laggardHeld) fail('s12: a session read holding=true AND csActive=true (a frozen FS must not be advancing)');
   else ok('s12: holding and csActive never both true on one FS (mutually exclusive, laggard-safe)');
-  // stop the generator, then let the fixed backlog fully drain to idle (in Race the
-  // cheap FS raced ahead; the pricey FS keeps draining until its cursor reaches the
-  // frontier). Pump until playback stops advancing, THEN csActive must clear.
-  rig.coord.stop();
-  await pumpUntil(rig, () => {
-    const before = rig.proxies.map((p) => p.acked.playbackNs);
-    return before.length && rig.proxies.every((p) => !snapById(rig)[p.fsId].csActive);
-  }, 's13-drain-to-idle', 200);
-  s = snapById(rig);
-  if (FS_ORDER.some((f) => s[f].csActive)) fail('s13: csActive still set after the run stopped and drained to idle');
-  else ok('s13: csActive cleared once playback stopped advancing (drained to idle)');
+  // s13 (SLOW-MO): the post-Stop tail is the bounded-MAX guarantee, not a frozen-window
+  // magnitude. A fresh SUB-OP slow-mo rig (scale 5e4, chunk 0.83ms/frame): playback is the
+  // binding constraint, so during the race the §2 bounded-MAX keeps the playback gap within
+  // ~2Δ, and once the generator stops each session drains only its small already-authorized
+  // backlog (~one window of ENTRIES) and halts, instead of chasing the frontier for
+  // hundreds of entries. (The frame COUNT to idle is inflated by slow-mo playback duration,
+  // so the bound is expressed in entries + the running gap, not frames.)
+  {
+    const scale = 5e4;
+    const chunk = scale * (1000 / 60);   // Δ per frame
+    const r = await makeRig({ speed: scale });
+    r.coord.setMode('race');
+    r.coord.start();
+    let maxGap = 0;
+    await run(r, 60, () => {
+      const v = r.proxies.map((p) => p.acked.playbackNs);
+      maxGap = Math.max(maxGap, Math.max(...v) - Math.min(...v));
+    });
+    const ms = (n) => (n / 1e6).toFixed(2);
+    if (maxGap > 2 * chunk) fail(`s13: running Race playback gap ${ms(maxGap)}ms exceeds the bounded-MAX 2Δ=${ms(2 * chunk)}ms (the §2 bound is not holding)`);
+    else ok(`s13: running Race playback gap ${ms(maxGap)}ms stays within the bounded-MAX 2Δ=${ms(2 * chunk)}ms (one shared ceiling)`);
+    // stop the generator; the tail is what each session drains BEYOND its cursor-at-stop.
+    const curAtStop = r.proxies.map((p) => p.acked.cursor);
+    r.coord.stop();
+    await pumpUntil(r, () => r.proxies.every((p) => !snapById(r)[p.fsId].csActive), 's13-slowmo-drain-to-idle', 300);
+    const tail = r.proxies.map((p, i) => p.acked.cursor - curAtStop[i]);
+    const maxTail = Math.max(...tail);
+    // Bounded to a handful of entries (~one window). The old unbounded post-Stop tail
+    // (laggard chasing leader-lead + window) would be hundreds; a bounded tail is a couple
+    // windows. RACE_LOOKAHEAD_FRAMES = 8, so ~2 windows is a generous, meaningful ceiling.
+    if (maxTail > 24) fail(`s13: post-Stop tail ${JSON.stringify(tail)} entries is NOT bounded (>24, chasing the frontier, not ~one window)`);
+    else ok(`s13: post-Stop tail bounded to ${JSON.stringify(tail)} entries (~one window, not a frontier chase)`);
+    if (r.proxies.some((p) => snapById(r)[p.fsId].csActive)) fail('s13: csActive still set after the run stopped and the backlog drained');
+    else ok('s13: csActive cleared once the bounded backlog drained to idle');
+  }
 }
 
 // ============================================================================
