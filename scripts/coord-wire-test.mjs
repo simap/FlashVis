@@ -289,16 +289,17 @@ async function testHoldDebounce() {
   const savedSeam = globalThis.__flashvisHoldShowMs;
   globalThis.__flashvisHoldShowMs = 300;                 // real ~300ms debounce for this test only
   try {
-    // SLOW-MO race with an EXECUTION-bound laggard (per-grant op cap of 1, tiny op cost
-    // so cap × op << chunk): the laggard genuinely cannot burn its headroom, so the
-    // bounded-MAX pins the leader CONTINUOUSLY. That is a real sustained raw hold (not a
-    // max-speed backlog artifact), which is what the ~300ms wall debounce must gate.
-    const rig = makeRig({ speed: 5e4, units: { fastffs: 1e4, littlefs: 1e4 }, caps: { fastffs: Infinity, littlefs: 1 } });
-    const lead = 'fastffs';                              // uncapped ⇒ the pinned leader
+    // SLOW-MO race with UNEQUAL op cost (littlefs 5ms/op vs fastffs 1ms/op): littlefs burns
+    // flash-time 5x faster, so it is the flash-time LEADER and the bounded-MAX pins it
+    // CONTINUOUSLY at fastffs + 2Δ. That is a real sustained raw hold from flash-time
+    // divergence (no prefetch window, no max-speed backlog), which the ~300ms wall debounce
+    // must gate. BETWEEN-OPS slow-mo (scale 2e5) so the pin engages within a few frames.
+    const rig = makeRig({ speed: 2e5, units: { fastffs: 1e6, littlefs: 5e6 }, maxOpsPerGrant: Infinity });
+    const lead = 'littlefs';                             // pricey ⇒ the pinned flash-time leader
     await flushTurns(4);
     rig.coord.setMode('race');
     rig.coord.start();
-    await run(rig, 12);                                   // let the laggard fall behind and the leader pin (near-instant wall)
+    await run(rig, 12);                                   // let the pricey FS race ahead and pin (near-instant wall)
     if (snapById(rig)[lead].holding) fail('holding lit on the very first sampled frame of a fresh hold, not debounced');
     else ok('holding NOT lit immediately when the raw hold begins (debounce engaged)');
     // let ~360ms of real wall-time pass while the leader stays pinned, ticking as we go
@@ -394,84 +395,100 @@ async function testBootResetFlow() {
 // worker can BURN the granted headroom (no drain cap). These pin the coordinator side
 // of both symptoms so a future worker-side fix can be verified against a correct clock.
 // Uncapped mock worker = "worker not drain-capped" (the §2 laggard can burn its headroom).
-async function measurePerFrameAdvance(scale, { unit = 1e4 } = {}) {
+async function measurePerFrameAdvance(scale, { unit = 2e6, frames = 40 } = {}) {
   const rig = makeRig({ speed: scale, units: { fastffs: unit, littlefs: unit }, maxOpsPerGrant: Infinity });
   await flushTurns(4);
   rig.coord.setMode('race');
   rig.coord.start();
   await run(rig, 20);                                   // skip the ramp
   const a = pb(rig, 'fastffs');
-  await run(rig, 20);
+  await run(rig, frames);
   const b = pb(rig, 'fastffs');
-  return (b - a) / 20;                                  // sim-ns of playback advanced per frame
+  return (b - a) / frames;                              // sim-ns of playback advanced per frame
 }
 async function testRaceScaleProportional() {
-  console.log('\n[12] RACE scale (slow-mo): per-frame playback advance scales with speed where playback is the limit');
-  // SLOW-MO, tiny op cost (unit 1e4 = 0.01ms << chunk): the worker always keeps up, so
-  // PLAYBACK (the §2 chunk = scale × MS_PER_FRAME), not entries, is the binding limit.
-  // S = 5e4 (~1/20 real-time) and 2S = 1e5, both sub-op: doubling scale doubles Δ/frame.
+  console.log('\n[12] RACE per-frame throughput: entry-cadence bound at window=1 (a DEFERRED prefetch optimization, not correctness)');
+  // WINDOW=1 FINDING (ADR-0024 §4 "window size is a deferred knob"). The old assertion here
+  // (per-frame playback advance ∝ scale) is NOT a correctness property: it only holds when a
+  // prefetch window lets the CURSOR-LEADER burn MANY entries per frame to fill the clock
+  // chunk. With no window (frontier = furthest cursor + 1), the cursor-LEADER is capped at
+  // ONE entry per frame() tick (the coordinator regrants only on the next tick, never
+  // sub-frame; a laggard BEHIND the leader may still burst multiple entries/grant to catch
+  // up, but that does not raise the leader's own rate). Here BOTH FS have equal cost, so they
+  // advance in lockstep as co-leaders, both capped at one entry/frame, and never shut their
+  // §2 gate (rel = playback + chunk always leaves one entry of headroom). So per-frame
+  // advance is the ENTRY CADENCE = one op cost, INDEPENDENT of scale. We ASSERT that
+  // window-free truth and mark scale-proportional per-frame throughput as the deferred
+  // wall-clock optimization it is. The scale-proportional CORRECTNESS property (the
+  // bounded-MAX 2Δ flash-time divergence) lives in [13], and it fires at window=1.
+  const unit = 2e6;                                     // 2ms op; one entry/frame ⇒ ~2ms advance/frame at any scale
   const S = 5e4;
-  const adv1 = await measurePerFrameAdvance(S);
-  const adv2 = await measurePerFrameAdvance(2 * S);
+  const adv1 = await measurePerFrameAdvance(S, { unit });
+  const adv2 = await measurePerFrameAdvance(2 * S, { unit });
   const ratio = adv2 / adv1;
-  // chunk = scale × MS_PER_FRAME ⇒ doubling scale doubles the per-frame advance.
-  if (!(ratio > 1.8 && ratio < 2.2)) fail(`per-frame race advance did not track scale: adv(S)=${(adv1 / 1e6).toFixed(2)}ms, adv(2S)=${(adv2 / 1e6).toFixed(2)}ms, ratio ${ratio.toFixed(2)} (want ~2). The coordinator clock is not scale-driven.`);
-  else ok(`per-frame race advance ~doubled with scale (adv(S)=${(adv1 / 1e6).toFixed(2)}ms, adv(2S)=${(adv2 / 1e6).toFixed(2)}ms, ratio ${ratio.toFixed(2)}) : grant.scale/chunk drives the race rate`);
-  // expected magnitude: chunk = scale × MS_PER_FRAME
-  const expected = S * (1000 / 60);
-  const relErr = Math.abs(adv1 - expected) / expected;
-  if (relErr > 0.15) fail(`per-frame advance ${(adv1 / 1e6).toFixed(2)}ms is not ≈ chunk=scale×MS_PER_FRAME=${(expected / 1e6).toFixed(2)}ms (rel err ${(relErr * 100).toFixed(0)}%)`);
-  else ok(`per-frame advance ≈ chunk = scale × MS_PER_FRAME (${(adv1 / 1e6).toFixed(2)}ms ≈ ${(expected / 1e6).toFixed(2)}ms)`);
+  const ms = (n) => (n / 1e6).toFixed(2);
+  // (1) per-frame advance is the entry cadence (~one op), NOT the clock chunk, and is
+  // scale-INDEPENDENT (ratio ~1) at window=1. This guards against silently reintroducing a
+  // per-frame prefetch burst as if it were correctness.
+  if (!(ratio > 0.85 && ratio < 1.15)) fail(`per-frame advance unexpectedly tracked scale at window=1: adv(S)=${ms(adv1)}ms, adv(2S)=${ms(adv2)}ms, ratio ${ratio.toFixed(2)} (expected ~1, entry-cadence bound). If a prefetch window is back, this is throughput, not correctness.`);
+  else ok(`per-frame advance is entry-cadence bound at window=1: adv(S)=${ms(adv1)}ms ≈ adv(2S)=${ms(adv2)}ms (ratio ${ratio.toFixed(2)} ~1, scale-independent), a deferred §4 throughput knob, not the clock`);
+  // (2) magnitude = one op cost per frame (the 1-entry-per-tick cadence), not scale×MS_PER_FRAME.
+  const relErr = Math.abs(adv1 - unit) / unit;
+  if (relErr > 0.15) fail(`per-frame advance ${ms(adv1)}ms is not ≈ one op cost ${ms(unit)}ms (rel err ${(relErr * 100).toFixed(0)}%): the entry cadence is not one-entry-per-frame as expected at window=1`);
+  else ok(`per-frame advance ≈ one op cost per frame (${ms(adv1)}ms ≈ ${ms(unit)}ms): exactly one entry per frame() tick, the window=1 throughput ceiling`);
 }
 async function testBoundedRaceClock() {
-  console.log('\n[13] RACE bounded-MAX (slow-mo): an exec-bound laggard pins the leader to slowest + 2Δ (symptom 1)');
-  // BETWEEN-OPS slow-mo (scale 2e5 = ~1/5 real-time, Δ 3.33ms/frame): playback paces, and
-  // an EXECUTION-bound laggard (per-grant op cap) genuinely cannot burn its headroom, so
-  // the bounded-MAX must PIN the leader at slowest + 2Δ and light its hold (not runaway).
+  console.log('\n[13] RACE bounded-MAX (slow-mo): FLASH-TIME divergence from unequal op cost pins the leader to slowest + 2Δ');
+  // The bound is driven by FLASH-TIME divergence (playbackNs), which comes from unequal
+  // per-op COST, NOT from bursting many entries. So the pin fires WITHOUT any prefetch
+  // window: at 1 entry/frame the pricey FS still consumes more flash-time per entry, so its
+  // playback races ahead until the §2 bounded-MAX pins it at slowest + 2Δ. BETWEEN-OPS
+  // slow-mo (scale 2e5, Δ 3.33ms/frame) so 2Δ is comparable to the pricey op (5ms), the
+  // bound is meaningful and not swamped by a single-op overshoot.
   const scale = 2e5;
   const chunk = scale * (1000 / 60);   // Δ per frame
   const BOUND = 2 * chunk;   // RACE_LEAD_BOUND_FRAMES = 2 (the slowest + 2Δ ceiling)
-  // (a) BOTH keep up (uncapped, equal unit): flash time stays level, no false hold.
+  // (a) BOTH keep up (equal cost): flash time stays level, no false hold.
   {
-    const rig = makeRig({ speed: scale, units: { fastffs: 1e4, littlefs: 1e4 }, maxOpsPerGrant: Infinity });
+    const rig = makeRig({ speed: scale, units: { fastffs: 1e6, littlefs: 1e6 }, maxOpsPerGrant: Infinity });
     await flushTurns(4);
     rig.coord.setMode('race'); rig.coord.start();
     let sawHold = false;
     await run(rig, 40, () => { const s = snapById(rig); if (s.fastffs.holding || s.littlefs.holding) sawHold = true; });
     const a = pb(rig, 'fastffs'), b = pb(rig, 'littlefs');
-    const rel = Math.abs(a - b) / Math.max(a, b);
-    if (rel > 0.1) fail(`both-keep-up race flash time NOT level (${(rel * 100).toFixed(0)}% apart)`);
-    else ok(`both keep up: flash time level within ${(rel * 100).toFixed(1)}% (MAX clock, under the bound)`);
-    if (sawHold) fail('a false hold fired while both FS kept up (small-jitter race must stay hold-free)');
-    else ok('no false hold while both kept up (bound not engaged under small jitter)');
+    const gap = Math.abs(a - b);
+    if (gap > BOUND) fail(`both-keep-up race flash time NOT level: gap ${(gap / 1e6).toFixed(2)}ms > 2Δ ${(BOUND / 1e6).toFixed(2)}ms`);
+    else ok(`both keep up: flash time level, gap ${(gap / 1e6).toFixed(2)}ms <= 2Δ ${(BOUND / 1e6).toFixed(2)}ms (MAX clock, under the bound)`);
+    if (sawHold) fail('a false hold fired while both FS kept up (equal-cost race must stay hold-free)');
+    else ok('no false hold while both kept up (bound not engaged, equal cost)');
   }
-  // (b) ONE FS is EXECUTION-bound (a tight per-grant op cap): it genuinely cannot burn
-  // the granted headroom, so it falls behind. The leader must PIN at slowest + 2×chunk
-  // (bounded divergence, NOT runaway) and read holding while pinned; the laggard, being
-  // the one still executing, must never read holding.
+  // (b) UNEQUAL cost: littlefs (5ms/op) burns flash-time 5x faster than fastffs (1ms/op),
+  // so littlefs is the FLASH-TIME LEADER. The bounded-MAX must PIN littlefs at slowest
+  // (fastffs) + 2Δ (bounded divergence, NOT runaway) and light ITS hold; fastffs, the one
+  // still executing behind, must never read holding. All at window=1 (no prefetch burst).
   {
-    const rig = makeRig({ speed: scale, units: { fastffs: 1e4, littlefs: 1e4 }, caps: { fastffs: Infinity, littlefs: 1 } });
+    const rig = makeRig({ speed: scale, units: { fastffs: 1e6, littlefs: 5e6 }, maxOpsPerGrant: Infinity });
     await flushTurns(4);
     rig.coord.setMode('race'); rig.coord.start();
     let maxLead = 0, sawLeaderHold = false, sawLaggardHold = false;
     await run(rig, 80, () => {
-      const lead = pb(rig, 'fastffs') - pb(rig, 'littlefs');
+      const lead = pb(rig, 'littlefs') - pb(rig, 'fastffs');   // littlefs = pricey flash-time leader
       maxLead = Math.max(maxLead, lead);
       const s = snapById(rig);
-      if (s.fastffs.holding) sawLeaderHold = true;
-      if (s.littlefs.holding) sawLaggardHold = true;
+      if (s.littlefs.holding) sawLeaderHold = true;
+      if (s.fastffs.holding) sawLaggardHold = true;
     });
-    const lead = pb(rig, 'fastffs') - pb(rig, 'littlefs');
-    // The leader may overshoot the ceiling by at most one op (unit) beyond the bound.
-    const tol = BOUND + 2e4;
-    if (lead > tol) fail(`leader ran away: lead ${(lead / 1e6).toFixed(1)}ms > bound 2×chunk=${(BOUND / 1e6).toFixed(1)}ms, the race clock is NOT bounded`);
-    else ok(`leader pinned at slowest + 2×chunk: lead ${(lead / 1e6).toFixed(2)}ms ≤ bound ${(BOUND / 1e6).toFixed(2)}ms (bounded MAX, no runaway); peak lead ${(maxLead / 1e6).toFixed(2)}ms`);
+    const lead = pb(rig, 'littlefs') - pb(rig, 'fastffs');
+    // The leader may overshoot the ceiling by at most one pricey op (5ms) beyond the bound.
+    const tol = BOUND + 5e6;
+    if (lead > tol) fail(`leader ran away: lead ${(lead / 1e6).toFixed(1)}ms > bound 2Δ+op ${(tol / 1e6).toFixed(1)}ms (2Δ=${(BOUND / 1e6).toFixed(1)}ms), the race clock is NOT bounded`);
+    else ok(`leader pinned at slowest + 2Δ: lead ${(lead / 1e6).toFixed(2)}ms <= bound 2Δ+op ${(tol / 1e6).toFixed(2)}ms (2Δ=${(BOUND / 1e6).toFixed(2)}ms, bounded MAX, no runaway); peak lead ${(maxLead / 1e6).toFixed(2)}ms`);
     if (!(maxLead > BOUND * 0.4)) fail(`the laggard was not actually held back (peak lead ${(maxLead / 1e6).toFixed(2)}ms), test not exercising the bound`);
-    else ok(`the exec-bound laggard did fall behind toward the bound (peak lead ${(maxLead / 1e6).toFixed(2)}ms)`);
-    if (!sawLeaderHold) fail('leader never read holding while pinned at the bound (the bounded-race hold must show)');
-    else ok('leader read holding while pinned at the bound (a real race hold, only for the too-far-behind case)');
-    if (sawLaggardHold) fail('the exec-bound laggard wrongly read holding (it is the one still executing)');
-    else ok('the exec-bound laggard never read holding (only the pinned leader holds)');
+    else ok(`the pricey FS did race ahead in flash-time toward the bound (peak lead ${(maxLead / 1e6).toFixed(2)}ms)`);
+    if (!sawLeaderHold) fail('flash-time leader (littlefs) never read holding while pinned at the bound (the bounded-race hold must show)');
+    else ok('flash-time leader (littlefs) read holding while pinned at the bound (a real race hold from flash-time divergence)');
+    if (sawLaggardHold) fail('the trailing FS (fastffs) wrongly read holding (it is the one still executing behind)');
+    else ok('the trailing FS (fastffs) never read holding (only the pinned flash-time leader holds)');
   }
 }
 
