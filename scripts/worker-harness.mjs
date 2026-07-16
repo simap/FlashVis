@@ -23,14 +23,10 @@
  *                   (web/src/lockstep.js) by default; point at a scratch copy
  *                   with one guard reintroduced-as-a-bug to prove a scenario
  *                   fails under its target defect.
- *   FV_WORKER_HOST  module exporting installWorkerHost (alias createWorkerHost /
- *                   attachWorkerHost also accepted), the real production host
+ *   FV_WORKER_HOST  module exporting installWorkerHost (alias createWorkerHost
+ *                   also accepted), the real production host
  *                   (web/src/session-worker.js) by default; same mutation role
  *                   for worker-side guards.
- *
- * (The old ref-worker-host.mjs, which wrapped the retained main-thread
- * session.js, is retired now that the real standalone worker host is here,
- * see LANE-REPORT.md.)
  */
 import { createTransport, flushTurns } from './mock-worker-transport.mjs';
 import { createSessionProxy } from './../web/src/session-proxy.js';
@@ -40,8 +36,8 @@ const coordModule = process.env.FV_COORDINATOR || './../web/src/lockstep.js';
 const { createLockstep } = await import(coordModule);
 const workerHostModule = process.env.FV_WORKER_HOST || './../web/src/session-worker.js';
 const hostMod = await import(workerHostModule);
-const installHost = hostMod.installWorkerHost || hostMod.createWorkerHost || hostMod.attachWorkerHost;
-if (typeof installHost !== 'function') throw new Error(`FV_WORKER_HOST module ${workerHostModule} exports no installWorkerHost/createWorkerHost/attachWorkerHost`);
+const installHost = hostMod.installWorkerHost || hostMod.createWorkerHost;
+if (typeof installHost !== 'function') throw new Error(`FV_WORKER_HOST module ${workerHostModule} exports no installWorkerHost/createWorkerHost`);
 
 export const GEOMETRY = { sectorSize: 4096, sectorCount: 64, pageSize: 256, granule: 1 };
 // Mirrors web/src/playground.js's boot config EXACTLY (scaled to the 256 KiB

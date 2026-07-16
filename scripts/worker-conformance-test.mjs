@@ -16,14 +16,12 @@
  * pattern as FV_LOCKSTEP (lockstep-concurrency-test.mjs) / FV_SESSION
  * (command-error-test.mjs):
  *
- *   const { installWorkerHost } = await import(process.env.FV_WORKER_HOST || './stub-worker-host.mjs');
+ *   const { installWorkerHost } = await import(process.env.FV_WORKER_HOST || '../web/src/session-worker.js');
  *
- * Until the real worker host (lane/worker) lands, this runs against
- * scripts/stub-worker-host.mjs: a host built ONLY to shape these
- * assertions (see that file's header). Pointing at the real host is:
- *   FV_WORKER_HOST=../web/src/worker-host.js node scripts/worker-conformance-test.mjs
- * (or whatever path/export name the real host lands under; update the
- * default import above once it exists in this worktree, not the assertions).
+ * This runs against the production host, web/src/session-worker.js. Point it
+ * at another host with:
+ *   FV_WORKER_HOST=<path> node scripts/worker-conformance-test.mjs
+ * Swap the host, not the assertions.
  *
  * OBSERVABILITY: every assertion below reads GRANT_ACK fields
  * (playbackNs/cursor/entriesDrained/drainedCounters), the IN-BAND wire
@@ -38,9 +36,6 @@
  */
 import { C2W, W2C, msg } from '../web/src/protocol.js';
 import { createTransport, flushTurns } from './mock-worker-transport.mjs';
-// Default target is lane/worker's real host now that it exists in-tree (the
-// header's "update the default import once it lands"; assertions untouched).
-// FV_WORKER_HOST still overrides (e.g. back to ./stub-worker-host.mjs).
 const { installWorkerHost } = await import(process.env.FV_WORKER_HOST || '../web/src/session-worker.js');
 
 process.on('unhandledRejection', (e) => { console.error('\nFAIL - unhandled rejection:', (e && e.stack) || e); process.exit(1); });
