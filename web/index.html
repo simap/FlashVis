@@ -8,7 +8,7 @@
 :root{
   /* Structural constants shared by every theme: hairlines and body text stay a
      neutral cool grey so text/line contrast is guaranteed in ALL palettes (good
-     dark-theme practice — the ambient below carries the color, the type stays
+     dark-theme practice, the ambient below carries the color, the type stays
      maximally legible). --err/--lead/--queued are semantic (fault / leader /
      queued) and read the same everywhere. Everything a theme owns is a var it
      re-declares below. */
@@ -30,12 +30,11 @@
      The load-bearing requirement is the OP-OVER-STATE overlay: a glow renders on
      top of a cell that already holds a state color, and BOTH must stay readable.
      The base op hue (low/mid heat, before it whitens) is therefore kept distinct
-     from EVERY state it can sit on — by hue where possible, by lightness +
+     from EVERY state it can sit on, by hue where possible, by lightness +
      saturation where the families are close (read-over-live, program-over-live).
      See the per-theme overlay notes. viz.js re-sources --read/--program/--erase/
      --mix/--prog-edge/--sector-bg for the live glow. --mix is the DESIGNED color a
-     cell glows when a read and a program overlap it (both heat channels present) —
-     a natural fusion of the two, never the muddy read↔program midpoint; the render
+     cell glows when a read and a program overlap it (both heat channels present),      a natural fusion of the two, never the muddy read↔program midpoint; the render
      pulls toward it by how co-present the two ops are. Aurora is the :root default
      so the page renders fully themed before JS runs.
 
@@ -47,7 +46,7 @@
      colorless AMONG the saturated colors, and a neutral also makes every op-glow
      overlay trivially legible). Op hues are pushed saturated too. */
 
-  /* 1 · AURORA SIGNAL — instrument-on-dark-glass (default). */
+  /* 1 · AURORA SIGNAL, instrument-on-dark-glass (default). */
   --bg:#0b0f14; --panel:#101821; --panel-2:#0c131a; --chrome:#16212b;
   --glow-a:#12202b; --glow-b:#131a26;
   --erased:#132029; --erased-edge:#2b4a57;
@@ -61,7 +60,7 @@
      program red-orange(h18) over gold live(h44) → hue26+sat; every op over the
      neutral ash obsolete → trivially high-contrast. */
 }
-/* 2 · MAGMA — a volcanic core, deliberately the warm counterweight to Aurora's
+/* 2 · MAGMA, a volcanic core, deliberately the warm counterweight to Aurora's
    cool glass: warm obsidian substrate + ember accent, cooled basalt erased,
    sulfur-gold molten live, a cobalt mineral vein for metadata, a red-hot write,
    and a magenta plasma discharge to erase. Cyan read is the one cold probe. */
@@ -79,7 +78,7 @@
      program red(h8) over sulfur live(h45) → hue37+redder; magenta erase(h340)
      over gold/cobalt/ash → far; every op over ash obsolete → high-contrast. */
 }
-/* 3 · ULTRAVIOLET LAB — an indigo cleanroom under UV. Ice-blue read, hot-
+/* 3 · ULTRAVIOLET LAB, an indigo cleanroom under UV. Ice-blue read, hot-
    magenta write, a UV-reactive lime erase (blue/magenta/green is the most
    colorblind-robust op trio). Live glows blue-violet; metadata is teal. */
 :root[data-theme="uv"]{
@@ -96,7 +95,7 @@
      (h328) over orchid live(h278) → hue50 + big sat/brightness gap; lime erase
      over teal/orchid/ash → far; blue/magenta/lime is the colorblind-robust trio. */
 }
-/* 4 · TERMINAL PHOSPHOR — the storage-tool vernacular on a green-black tube, but
+/* 4 · TERMINAL PHOSPHOR, the storage-tool vernacular on a green-black tube, but
    a MULTI-phosphor set so the states stay distinct: vivid green live, cyan
    metadata, a dim grey-green burn for obsolete, with amber write + red erase.
    Op TYPE also reads through MOTION (read bloom / program fill-rise / erase
@@ -116,7 +115,7 @@
      amber/red ops over any green state → warm/cool; green-vs-red also carries on the
      phosphor MOTION cue (read bloom / program fill-rise / erase sweep). */
 }
-/* 5 · DEEP SEA — an abyssal dive: bioluminescent sea-green scan, an
+/* 5 · DEEP SEA, an abyssal dive: bioluminescent sea-green scan, an
    anglerfish amber lure for writes, a jellyfish rose-magenta erase. Live is a
    vivid coral against the cold trench; metadata a bright water-blue. */
 :root[data-theme="deepsea"]{
@@ -133,7 +132,7 @@
      program amber(h33) over coral live(h13) → hue20+yellower; rose-magenta erase
      (h330) over coral/water-blue/ash → far. */
 }
-/* 6 · CYANOTYPE BLUEPRINT — a drafting print: paper-white-blue read over a
+/* 6 · CYANOTYPE BLUEPRINT, a drafting print: paper-white-blue read over a
    blueprint-cyan field, orange annotation for writes, a crimson correction to
    erase. Metadata is a warm amber margin note (cool read never collides). */
 :root[data-theme="blueprint"]{
@@ -166,11 +165,11 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .hidden{display:none!important}
 
 /* ============================ signature header =============================
-   Two stacked rows (the N=5 "standings rail" — ADR-0018's scoreboard must stay
+   Two stacked rows (the N=5 "standings rail", ADR-0018's scoreboard must stay
    legible as N grows, and five cards no longer fit inside a sentence):
-   row 1 (.sig-line) is the title sentence — mono, the FLASHVIS logotype the one
+   row 1 (.sig-line) is the title sentence, mono, the FLASHVIS logotype the one
    sans flourish, with speed (A1b) and the compare-mode wheel (A1a) inline
-   (sim-global controls, not per-op stimulus — the WORKLOAD strip below holds
+   (sim-global controls, not per-op stimulus, the WORKLOAD strip below holds
    only stimulus). Row 2 (.fsset) is the full-width rail of FS cards; the cards
    ARE the display switcher (click → focus/display that die). */
 .sig{flex:none;display:flex;flex-direction:column;gap:12px;
@@ -186,9 +185,9 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .tail .k{color:var(--txt);font-weight:500}
 
 /* the standings rail: .fs cards are built DYNAMICALLY by playground.js into
-   #fsSet, one per participating FS (all registered, always — A2). auto-fit +
+   #fsSet, one per participating FS (all registered, always, A2). auto-fit +
    minmax keeps every card visible at every width: cards compress, then wrap
-   to a second row — never a scroll row (standings you can't see aren't
+   to a second row, never a scroll row (standings you can't see aren't
    standings). */
 .fsset{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:9px}
 
@@ -200,8 +199,15 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .fs:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .fs-top{display:flex;align-items:center;gap:8px}
 .fs-name{font-family:"Space Grotesk";font-weight:700;font-size:14.5px;letter-spacing:.05em;color:var(--txt);line-height:1.1;transition:.14s}
+/* B15: the status dot is RAW per-frame CS-activity blinky (spec/ui.md), no
+   animation, no transition to smooth it. JS toggles .cs-on off each frame's
+   csActive; off = faint, on = the live accent. */
 .fs-run{width:6px;height:6px;border-radius:50%;background:var(--txt-faint);margin-left:auto;flex:none}
-.fs-vital{display:flex;align-items:baseline;gap:6px}
+.fs-run.cs-on{background:var(--lead)}
+/* both totals show in both modes (spec/ui.md): two equal-weight .fs-stat
+   groups (flash time, then ops), each a value + its uppercase label. */
+.fs-vital{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.fs-stat{display:flex;align-items:baseline;gap:4px;min-width:0}
 .fs-v{font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--txt-dim)}
 .fs-l{font-size:8.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--txt-faint)}
 /* EMA throughput bar (A8): leader = 100% (--lead), others scaled to the leader. */
@@ -215,12 +221,9 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .fs.on .fs-name{color:var(--accent)}
 .fs.on .fs-v{color:var(--txt)}
 .fs.leader .fs-bar .track i{background:var(--lead);box-shadow:0 0 8px -2px var(--lead)}
-/* the un-focused FS is still running — a slow live pulse says so */
-.fs:not(.on) .fs-run{animation:live 2.4s ease-in-out infinite}
-@keyframes live{0%,100%{background:var(--accent-dim)}50%{background:var(--lead)}}
-/* Pace: the FS that reached the frontier first HOLDS for the laggard (A8) */
-.fs.waiting .fs-run{background:var(--hold);animation:hold 1.1s ease-in-out infinite}
-@keyframes hold{0%,100%{opacity:.35}50%{opacity:1}}
+/* B15: the status dot no longer pulses on a CSS timer (that smoothed the raw
+   signal); it blinks with the FS's real per-frame csActive, driven from JS.
+   The "holding" state is still shown by the ◷ label below (.fs-hold). */
 .fs-hold{display:none;align-items:center;gap:4px;font-size:8.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--hold)}
 .fs.waiting .fs-hold{display:inline-flex}
 .fs.waiting .fs-l{display:none}
@@ -231,7 +234,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    override .hintk's small size so it renders at the sentence's own type. */
 .sig-speed .hintk{font-size:15px;letter-spacing:.005em;color:inherit}
 /* the compare mode is an inline WHEEL: the active phrase sits on the sentence
-   baseline, the other mode peeks below — faded and tilted back, like the next
+   baseline, the other mode peeks below, faded and tilted back, like the next
    notch of a reel. Click and it rotates up into place; the old one recedes. */
 .modewheel{position:relative;display:inline-block;vertical-align:baseline;
   background:none;border:none;padding:0;margin:0;cursor:pointer;font-family:inherit;text-align:left;perspective:280px}
@@ -250,7 +253,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 /* ============================ main split: stage | side panel | console ====
    Fix #2: the sector inspector + telemetry live in their OWN column beside the
    die (readable while clicking die sectors), NOT stacked under it. This is my
-   fixed layout — the reference's under-die stacking is one of the regressions
+   fixed layout, the reference's under-die stacking is one of the regressions
    the fixes correct, so it does NOT win here; only its *styling* is ported. */
 .main{flex:1 1 auto;min-height:0;overflow:hidden;display:grid;
   grid-template-columns:minmax(0,1fr) 292px minmax(348px,432px);gap:22px;
@@ -261,7 +264,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 /* the emulated NOR chip drawn as its real package: an 8-pin small-outline body
    with 8 gull-wing legs (A4). The body sits ABOVE the legs (z-index) so each lead disappears
    under the package edge, not stuck to the side. Enclosure tokens
-   (--pkg-a/b/line) are desaturated on purpose — the cell-state colors below
+   (--pkg-a/b/line) are desaturated on purpose, the cell-state colors below
    (--prog/--stale/--index/--program/--erase/--read) are the DATA and are
    untouched. */
 .chip-pkg{align-self:center;display:flex;align-items:stretch;width:100%;max-width:560px}
@@ -280,17 +283,16 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    would only lag and damp that glow toward the dim resting ring. */
 .cell{position:relative;aspect-ratio:1;border-radius:1.5px;background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 /* .fillwrap owns the rounded overflow-clip (so the rectangular .fill stays inside
-   the cell's rounded shape) — .cell itself no longer clips, so .glow's box-shadow
+   the cell's rounded shape), .cell itself no longer clips, so .glow's box-shadow
    below can bleed outside the cell's own box in every direction (z-height fix). */
 .cell .fillwrap{position:absolute;inset:0;border-radius:inherit;overflow:hidden}
 .cell .fill{position:absolute;left:0;right:0;bottom:0;height:0;background:var(--prog);transition:height .18s ease}
-/* .glow carries only the BLOOM (core + outer glow, written by viz.js drawHeat —
-   the heat RING/border is written to the .cell body, BELOW this layer). It lives
+/* .glow carries only the BLOOM (core + outer glow, written by viz.js drawHeat,    the heat RING/border is written to the .cell body, BELOW this layer). It lives
    in ONE layer ABOVE every opaque body AND every border in the die: absolutely
    positioned with a positive z-index, and NO ancestor up to .diewrap establishes a
    stacking context (.sector/.cell are position:relative with z-index:auto), so
-   every .glow paints in the diewrap's stacking context — above ALL cells/sectors/
-   borders everywhere — not just cells earlier in DOM order. That is what stops a
+   every .glow paints in the diewrap's stacking context, above ALL cells/sectors/
+   borders everywhere, not just cells earlier in DOM order. That is what stops a
    cell's border ever peeking over the bloom (the directional top-left artifact).
    inset:0 keeps each glow aligned to its own cell; pointer-events:none lets clicks
    fall through. Translucent box-shadows blend additively, so bloom paint order is
@@ -301,18 +303,18 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .cell[data-live="obsolete"] .fill{background:var(--stale)}
 .cell[data-live="obsolete"]{box-shadow:inset 0 0 0 1px var(--stale-edge)}
 .cell[data-live="meta"] .fill{background:var(--index)}
-/* WL (class 4, FAT+WL): the wear-levelling FTL's own bookkeeping — conceptually
+/* WL (class 4, FAT+WL): the wear-levelling FTL's own bookkeeping, conceptually
    a layer of metadata, so it renders as a SHADE of the metadata color, not a
    new hue. Derived from --index/--panel via color-mix so it tracks every
    palette without per-theme declarations. */
 .cell[data-live="wl"] .fill{background:color-mix(in srgb,var(--index) 45%,var(--panel))}
-/* Slack (class 5, FAT+WL): allocated but carrying no data — must READ as
+/* Slack (class 5, FAT+WL): allocated but carrying no data, must READ as
    erased/blank (spec/ui.md). Slack pages ARE physically programmed, so without
    these rules the default fill would render them in the live gold at full
-   height (pixel-identical to live data — the misreading the spec exists to
+   height (pixel-identical to live data, the misreading the spec exists to
    fix). Suppress the fill and reset the [data-s="prog"] hot edge back to the
    erased ring; equal specificity, so these must stay AFTER that rule (source
-   order is the override — pinned by scripts/fatfs-render-test.mjs). Palette-
+   order is the override, pinned by scripts/fatfs-render-test.mjs). Palette-
    independent by construction: it re-uses the erased vars. */
 .cell[data-live="slack"]{box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .cell[data-live="slack"] .fill{background:transparent}
@@ -336,7 +338,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 /* pin 1 / CS (chip-select) activity indicator (top-left lead, SOP-8
    convention, by the notch): the fast per-frame twin of the card's
    holding/stalled readout. playground.js toggles .cs-active/.cs-paused on
-   #pinCS every rAF from coordinator.waitStates()[focusedFsId] — positive
+   #pinCS every rAF from coordinator.waitStates()[focusedFsId], positive
    logic on purpose (CS is electrically active-low, shown here active-HIGH):
    lit = the focused die is actually executing/animating, quiet = parked on
    a gate. A short transition keeps RACE's expected rapid flicker readable
@@ -353,7 +355,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
   color:var(--txt-faint);pointer-events:none;user-select:none;transition:color .07s ease-out}
 .pin-cs.cs-active .cs-label{color:var(--accent)}
 
-/* static device geometry line (A5) — replaces the old dynamic .stagefoot;
+/* static device geometry line (A5), replaces the old dynamic .stagefoot;
    the dynamic stats it used to show moved into Flash Stats (A6). Built once
    by playground.js from the same geometry data #specGeo is sourced from. */
 .geo{display:flex;gap:16px;color:var(--txt-faint);font-size:11px;letter-spacing:.04em;flex-wrap:wrap;justify-content:center}
@@ -382,14 +384,14 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
    (the chip background shows through, mirroring a glow riding over a cell). */
 .sw.erased{background:var(--erased);box-shadow:inset 0 0 0 1px var(--erased-edge)}
 .sw.prog{background:var(--prog)} .sw.obsolete{background:var(--stale)} .sw.index{background:var(--index)}
-.sw.wl{background:color-mix(in srgb,var(--index) 45%,var(--panel))}  /* shade of metadata — see [data-live="wl"] */
+.sw.wl{background:color-mix(in srgb,var(--index) 45%,var(--panel))}  /* shade of metadata, see [data-live="wl"] */
 .sw.glow{width:11px;height:11px;border-radius:50%;background:transparent}
 .sw.read.glow{box-shadow:inset 0 0 0 1.5px var(--read),0 0 6px 0 var(--read)}
 .sw.program.glow{box-shadow:inset 0 0 0 1.5px var(--program),0 0 6px 0 var(--program)}
 .sw.erase.glow{box-shadow:inset 0 0 0 1.5px var(--erase),0 0 6px 0 var(--erase)}
 .sw.mix.glow{box-shadow:inset 0 0 0 1.5px var(--mix),0 0 6px 0 var(--mix)}
 
-/* palette switcher — sits with the legend because it governs what the legend
+/* palette switcher, sits with the legend because it governs what the legend
    MEANS: pick a palette and the whole die + live glow re-skins. It's a radiogroup
    of one chip per theme; each chip previews ITS OWN five signature colors (read ·
    write · mix · erase · live) via the .tprev-* blocks below, so you can see a
@@ -420,7 +422,7 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 .tprev-deepsea{--read:#2ff0c8;--program:#ff9a2e;--mix:#8ff05a;--erase:#ff4db0;--prog:#ff7a52}
 .tprev-blueprint{--read:#d6ecff;--program:#ff7a33;--mix:#ffc79e;--erase:#ff3b52;--prog:#2f9fe0}
 
-/* side panel — telemetry + sector inspector, its own column (fix #2) */
+/* side panel, telemetry + sector inspector, its own column (fix #2) */
 .panel{display:flex;flex-direction:column;gap:14px;min-height:0;overflow:auto}
 .card{background:linear-gradient(180deg,var(--panel),var(--panel-2));border:1px solid var(--line-soft);border-radius:8px;padding:13px 14px}
 .card h3{margin:0 0 10px;font-size:11px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:var(--txt-dim);display:flex;justify-content:space-between}
@@ -441,9 +443,9 @@ h1,h2,h3{font-family:"Space Grotesk",system-ui,sans-serif}
 /* ============================ the console tape (signature) ================= */
 .pane{display:flex;flex-direction:column;min-height:0;gap:11px}
 
-/* register A — the workload strip (drives auto-churn on every FS). Speed +
+/* register A, the workload strip (drives auto-churn on every FS). Speed +
    compare mode now live in the header sentence (A1a/A1b, ADR-0020: they're
-   sim-global execution controls, not per-op stimulus) — this strip holds
+   sim-global execution controls, not per-op stimulus), this strip holds
    only Run/Step + BG GC. */
 .workload{flex:none;display:flex;align-items:center;gap:9px 12px;flex-wrap:wrap;
   padding:9px 11px;border:1px solid var(--line-soft);border-radius:8px;background:linear-gradient(180deg,var(--chrome),var(--panel-2))}
@@ -486,18 +488,18 @@ input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:3
 .tape-gap .catchup{margin-left:auto;font-size:10.5px;padding:4px 9px}
 .tape-scroll{flex:1;min-height:0;overflow:auto;padding:9px 13px;font-size:12px;line-height:1.55}
 .line{white-space:pre-wrap;word-break:break-word;padding-left:12px;text-indent:-12px}
-.line.in{color:var(--accent)}            /* injected command echo — "what I did" */
+.line.in{color:var(--accent)}            /* injected command echo, "what I did" */
 .line.out{color:var(--txt)}              /* op result with simulated cost */
-.line.churn{color:var(--txt-dim)}        /* auto-workload op — "what the workload did" */
+.line.churn{color:var(--txt-dim)}        /* auto-workload op, "what the workload did" */
 .line.err{color:var(--err)}
 .line.sys{color:var(--txt-faint)}
-.line.gc{color:var(--txt-faint)}         /* GC — background maintenance, not a workload op (ADR-0023): grayed but still shows its flash-time cost */
-/* lifecycle (ADR-0018): queued dimmed to --queued; live lit to accent — applied
+.line.gc{color:var(--txt-faint)}         /* GC, background maintenance, not a workload op (ADR-0023): grayed but still shows its flash-time cost */
+/* lifecycle (ADR-0018): queued dimmed to --queued; live lit to accent, applied
    in place as the coordinator advances an entry queued → live → done. */
 .line[data-state="queued"]{color:var(--queued)}
 .line[data-state="live"]{color:var(--accent);font-weight:500}
 
-/* register B — manual pokes (inject discrete operations) + free-form input */
+/* register B, manual pokes (inject discrete operations) + free-form input */
 .pokes{flex:none;display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .pokes .reg{font-size:8.5px;letter-spacing:.16em;color:var(--txt-faint);margin-right:2px}
 .prompt{flex:none;display:flex;align-items:center;gap:8px;
@@ -594,10 +596,10 @@ dialog.about[open]{animation:aboutIn .18s ease}
     <button class="btn" id="btnReset" title="reset the simulation to a clean boot state">Reset</button>
   </div>
   <!-- The standings rail (ADR-0018's scoreboard, A1): the FS cards ARE the
-       display switcher. Built dynamically by playground.js into #fsSet — one
-       .fs button per participating FS (all registered, always — A2). Click a
+       display switcher. Built dynamically by playground.js into #fsSet, one
+       .fs button per participating FS (all registered, always, A2). Click a
        card to focus it. -->
-  <div class="fsset" id="fsSet" role="group" aria-label="filesystem standings — select one to focus"></div>
+  <div class="fsset" id="fsSet" role="group" aria-label="filesystem standings, select one to focus"></div>
 </header>
 
 <div class="main">
@@ -682,7 +684,7 @@ dialog.about[open]{animation:aboutIn .18s ease}
   </section>
 </div>
 
-<!-- Boot/ready status (kept per redesign manifest §C — placement deferred,
+<!-- Boot/ready status (kept per redesign manifest §C, placement deferred,
      not surfaced in the new header). #specGeo also feeds the visible static
      .geo geometry line (A5). -->
 <span id="specGeo" class="hidden"></span>

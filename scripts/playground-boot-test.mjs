@@ -1,0 +1,172 @@
+/*
+ * playground-boot-test.mjs: end-to-end boot of the REAL web/src/playground.js
+ * on the ADR-0024 worker-per-session wire, headless: a fake DOM (fake-dom.mjs)
+ * + one in-realm worker host per session (createWorkerHost over
+ * mock-worker-transport.mjs, with the stub runner, no real WASM). Drives the
+ * whole page the way a browser would and asserts it boots, renders the focused
+ * die from pulled FRAMEs, populates the compare strip from TELEMETRY, switches
+ * focus, injects console commands, and gates churn with Run/Pause.
+ *
+ * This is the "get the page RUNNING" verification the integration brief asks
+ * for; a real-browser boot is additive.
+ */
+import { installFakeDom } from './fake-dom.mjs';
+import { createTransport } from './mock-worker-transport.mjs';
+import { createWorkerHost } from '../web/src/session-worker.js';
+import { createStubRunner } from './worker-stub-runner.mjs';
+import { C2W } from '../web/src/protocol.js';
+
+const dom = installFakeDom();
+const fail = (msg) => { console.error('FAIL:', msg); dom.uninstall(); process.exit(1); };
+let checks = 0;
+const ok = (c, m) => { if (c) { checks++; console.log('  ok   -', m); } else fail(m); };
+
+// Each connectWorker() spins up an in-realm worker host over a transport pair
+// and returns the coordinator-side port. The stub runner keeps it WASM-free.
+const hosts = [];
+// RC-A instrumentation: record every PULL selector the coordinator sends to
+// each session, so the test can prove a focus switch asks for HEAD-ONLY events
+// (no since:0 erase-replay backlog) and then carries the cursor forward.
+const pullLog = new Map();
+globalThis.__flashvisWorkerConnect = (fsId, meta) => {
+  const { mainPort, workerPort } = createTransport();
+  const host = createWorkerHost(workerPort, { createRunner: (geometry) => createStubRunner(geometry) });
+  hosts.push(host);
+  const pulls = []; pullLog.set(fsId, pulls);
+  const send = mainPort.postMessage.bind(mainPort);
+  mainPort.postMessage = (m) => { if (m && m.type === C2W.PULL) pulls.push(m); return send(m); };
+  return { port: mainPort, terminate: () => { host._stop?.(); workerPort.close?.(); mainPort.close?.(); } };
+};
+// Deterministic hold pins under the fake clock (no real-time debounce race).
+globalThis.__flashvisHoldShowMs = 0;
+
+await import('../web/src/playground.js');   // starts boot()
+
+// ---- pump: fake macrotasks (transport delivery + worker timers) + fake rAF
+// (the render loop) + fake intervals (HUD/compare). The mock transport delivers
+// on setTimeout(0); the coordinator + worker use setInterval; the render/hold
+// loops use rAF, all captured by fake-dom, driven here. ----
+async function pump(turns = 1) {
+  for (let i = 0; i < turns; i++) {
+    await new Promise((r) => setTimeout(r, 0));   // let queued transport messages land
+    dom.runIntervals();                            // coordinator frame() + worker tick/telemetry + HUD
+    dom.tick(1);                                   // one rAF batch (render loop + hold loop)
+  }
+}
+
+// ---- boot reaches ready ----
+let ready = false;
+for (let i = 0; i < 600 && !ready; i++) { await pump(1); ready = dom.getEl('bootStatus').textContent === 'ready'; }
+ok(ready, 'playground reached bootStatus "ready" (boot did not hang or throw)');
+if (dom.getEl('specLive').textContent.includes('boot failed')) fail(`boot failed: ${dom.getEl('specLive').textContent}`);
+
+// ---- static geometry line: NOR device, ESP32-S3 timing; the "SOP-8" package
+// string must be scrubbed (moved here from real-smoke.mjs: it is a pure static
+// DOM contract renderGeo() builds at boot, provable on the stub wire). ----
+const geo = dom.getEl('geoLine').innerHTML || dom.getEl('geoLine').textContent || '';
+ok(/NOR/.test(geo), `geometry line names the NOR device: "${geo}"`);
+ok(!/SOP-8/.test(geo), `geometry line has no "SOP-8" package string: "${geo}"`);
+
+// ---- one die PER SESSION (ADR-0024 §7 PROPOSAL: per-session viz; focus swaps
+// visibility, so exactly one die is visible at a time) ----
+const dice = dom.getEl('dieStack').children;
+ok(dice.length === 5, `one die mounted per registered FS (${dice.length} dice)`);
+ok(dice.filter((d) => !d.classList.contains('hidden')).length === 1,
+  'exactly one die is visible (the focused session); the rest are hidden');
+
+// ---- compare strip: one .fs card per registered FS, fastffs focused ----
+for (let i = 0; i < 40; i++) await pump(1);   // let telemetry heartbeats populate the strip
+const fsFastffs = dom.getEl('fsCard-fastffs');
+ok(fsFastffs.classList.contains('on'), 'fastffs is the initially-focused fs card');
+ok(!dom.getEl('fsCard-littlefs').classList.contains('on'), 'littlefs is not focused initially');
+
+// ---- boot tape shows the broadcast help()/format() (worker-owned journal,
+// pulled + echoed via api.print) ----
+const tapeText = () => dom.getEl('tape').children.map((c) => c.textContent).join('\n');
+ok(/help\(\)/.test(tapeText()), `focused tape shows the boot help() echo:\n${tapeText()}`);
+ok(/format\(\)/.test(tapeText()), `focused tape shows the boot format() echo:\n${tapeText()}`);
+
+// ---- focus switch: die/tape follow littlefs; its OWN tape shows the boot log ----
+dom.dispatch('fsCard-littlefs');
+for (let i = 0; i < 40; i++) await pump(1);
+ok(dom.getEl('fsCard-littlefs').classList.contains('on'), 'clicking littlefs focuses it');
+ok(!fsFastffs.classList.contains('on'), 'fastffs loses focus after switching');
+ok(/format\(\)/.test(tapeText()), `littlefs's own tape shows the boot format() after focusing it:\n${tapeText()}`);
+
+// back to fastffs
+dom.dispatch('fsCard-fastffs');
+for (let i = 0; i < 20; i++) await pump(1);
+ok(fsFastffs.classList.contains('on'), 'focus switches back to fastffs');
+
+// ---- console injects a source command that drives the FS ----
+const filesBefore = dom.getEl('sFiles').textContent;
+const input = dom.getEl('terminput');
+input.value = 'await writeFile("hello.bin", 512)';
+input.dispatch('keydown', { key: 'Enter', preventDefault() {} });
+for (let i = 0; i < 60; i++) await pump(1);
+ok(/writeFile/.test(tapeText()), `the injected writeFile command echoes on the tape:\n${tapeText().split('\n').slice(-6).join('\n')}`);
+ok(dom.getEl('sFiles').textContent !== '0', `telemetry shows a file after the injected write (sFiles=${dom.getEl('sFiles').textContent}, was ${filesBefore})`);
+
+// ---- FS cards show BOTH totals (flash time + ops) in BOTH modes (spec/ui.md:
+// only the bottom rate switches by mode, never the headline totals) ----
+const bothStats = () => ({ time: dom.getEl('fsTime-fastffs').textContent, ops: dom.getEl('fsOps-fastffs').textContent });
+{
+  const s = bothStats();   // boot default is Pace
+  ok(s.time !== 'n/a' && /(ms|s)$/.test(s.time), `Pace: fs card shows the flash-time total (${s.time})`);
+  ok(/^\d+$/.test(s.ops), `Pace: fs card shows the ops total alongside it (${s.ops})`);
+}
+dom.dispatch('modeWheel');   // Pace -> Race
+for (let i = 0; i < 20; i++) await pump(1);
+{
+  const s = bothStats();
+  ok(s.time !== 'n/a' && /(ms|s)$/.test(s.time), `Race: fs card STILL shows the flash-time total (${s.time})`);
+  ok(/^\d+$/.test(s.ops), `Race: fs card STILL shows the ops total (${s.ops})`);
+}
+dom.dispatch('modeWheel');   // Race -> Pace (restore boot default for the rest of the run)
+for (let i = 0; i < 20; i++) await pump(1);
+
+// ---- Run gates churn: start running, the workload advances flash time ----
+const timeBefore = dom.getEl('fsTime-fastffs').textContent;
+dom.dispatch('btnRun');    // Run
+for (let i = 0; i < 120; i++) await pump(1);
+dom.dispatch('btnRun');    // Pause
+const timeAfter = dom.getEl('fsTime-fastffs').textContent;
+ok(timeAfter !== timeBefore || dom.getEl('fSim').textContent !== '0 ms',
+  `Run advanced the workload (fs card flash time ${timeBefore} -> ${timeAfter}, fSim ${dom.getEl('fSim').textContent})`);
+
+// ---- SPEED slider reaches the coordinator (no throw; label updates) ----
+const speed = dom.getEl('speed');
+speed.value = '100';
+speed.dispatch('input', { target: speed });
+ok(dom.getEl('speedRead').textContent.includes('real-time'), 'SPEED=max sets the "10x real-time" label (finite cap, no infinite scale; setSpeed reached the coordinator)');
+
+// ---- die actually rendered from pulled frames: some cell got programmed
+// (fProg > 0% or free pages < total) ----
+const free = Number(dom.getEl('fFree').textContent);
+ok(Number.isFinite(free) && free < 64 * 16, `the focused die rendered pulled shown state (free pages ${free} < ${64 * 16})`);
+
+// ---- RC-A: a focus switch must NOT replay a session's historical events ----
+// Run churn so every (unfocused) session accumulates events in its worker ring,
+// then switch to one and inspect the pulls issued from the switch onward.
+dom.dispatch('btnRun');
+for (let i = 0; i < 150; i++) await pump(1);
+dom.dispatch('btnRun');   // pause
+const spiffsPulls = pullLog.get('spiffs');
+const nBefore = spiffsPulls.length;
+dom.dispatch('fsCard-spiffs');
+for (let i = 0; i < 40; i++) await pump(1);
+const fresh = spiffsPulls.slice(nBefore).filter((p) => p.events);
+const firstEvents = fresh[0]?.events;
+// B11/B4: the (re)attach pull asks for HEAD-ONLY events, never the whole ring.
+ok(firstEvents && firstEvents.newest === true && firstEvents.limit === 0,
+  `first pull after focus asks HEAD-ONLY events (no erase-replay backlog): ${JSON.stringify(firstEvents)}`);
+ok(!fresh.some((p) => p.events.since === 0 && !p.events.newest),
+  'no pull requests the whole events ring (since:0) on switch, historical erases never replay');
+// B12: after the fresh frame seeds the cursor, later pulls carry it FORWARD, so
+// genuinely-new events for the WATCHED fs are requested (not over-suppressed).
+ok(fresh.some((p) => p.events.since != null && !p.events.newest),
+  'after attach the events cursor carries forward (watched FS still gets new events, B12)');
+
+for (const h of hosts) h._stop?.();
+dom.uninstall();
+console.log(`\nPASS - playground boots + drives both FS over the ADR-0024 wire (${checks} checks).`);

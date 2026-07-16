@@ -1,9 +1,9 @@
 /*
- * mock-worker-transport.mjs — a faithful in-realm Worker-port model (ADR-0024 §13).
+ * mock-worker-transport.mjs, a faithful in-realm Worker-port model (ADR-0024 §13).
  *
  * Models the semantics of `new Worker()` + postMessage WITHOUT a real OS thread:
  *   - every delivered message is structuredClone'd (no shared references across the
- *     boundary — a closure mutated on one side is invisible to the other, exactly as
+ *     boundary, a closure mutated on one side is invisible to the other, exactly as
  *     with a real worker; this is why dispatch/cost observables must be IN-BAND);
  *   - delivery is ASYNC and ORDERED (queued to a macrotask), so cross-boundary
  *     ordering and latency are real, not synchronous.
@@ -13,7 +13,7 @@
  * additive check layered on the same message protocol; it is not required for done.
  *
  * Contract: messages are the envelopes from web/src/protocol.js. This module knows
- * nothing about their contents — it only plumbs and clones them in order.
+ * nothing about their contents, it only plumbs and clones them in order.
  */
 
 /**
@@ -54,7 +54,7 @@ export function createTransport() {
   return { mainPort, workerPort };
 }
 
-/** Resolve after `n` macrotask turns — drains queued deliveries in tests. */
+/** Resolve after `n` macrotask turns, drains queued deliveries in tests. */
 export function flushTurns(n = 1) {
   let p = Promise.resolve();
   for (let i = 0; i < n; i++) p = p.then(() => new Promise((r) => setTimeout(r, 0)));
