@@ -238,9 +238,76 @@ async function run() {
     else fail(`B19: ${jdups} journal line(s) returned more than once, the journal cursor bridge over-returns`);
   }
 
+  // ---- 10. ADR-0023 (retired opcount-test.mjs (c)): N gc() entries leave
+  //          exec_fileOpCount FLAT while device flash time (exec_simNs)
+  //          CLIMBS. GC is background time, never a file op, even worker-
+  //          side and even measured on the EXECUTION counters (exec_*,
+  //          not the playback-gated drainedCounters), which update eagerly
+  //          and in real ns regardless of the playback gate. ----
+  {
+    const t4 = createTransport();
+    installWorkerHost(t4.workerPort, { createRunner: createStubRunner });
+    const w4 = { telemetry: [] };
+    t4.mainPort.onmessage = (e) => { const m = e.data; if (m.type === W2C.TELEMETRY) w4.telemetry.push(m); };
+    t4.mainPort.postMessage(msg(C2W.INIT, { epoch: 30, fsId: 'stub', geometry: GEOMETRY, name: 'stub' }));
+    await flushTurns(6);
+    await wait(280);   // first heartbeat: baseline, no ops executed yet
+    const base = w4.telemetry[w4.telemetry.length - 1];
+
+    const gcEntries = [];
+    for (let i = 0; i < 20; i++) gcEntries.push({ index: i, kind: 'gc', payload: null, seed: 0 });
+    t4.mainPort.postMessage(msg(C2W.ENTRIES, { epoch: 30, entries: gcEntries }));
+    t4.mainPort.postMessage(msg(C2W.GRANT, { epoch: 30, round: 1, entryLimit: gcEntries.length, playLimitNs: 1e12, scale: Infinity }));
+    await wait(280);   // let the 20 gc ops execute AND a fresh heartbeat land
+    const after = w4.telemetry[w4.telemetry.length - 1];
+
+    const opsDelta = after.exec_fileOpCount - base.exec_fileOpCount;
+    const simDelta = after.exec_simNs - base.exec_simNs;
+    if (opsDelta === 0) ok(`ADR-0023: N gc() entries leave exec_fileOpCount flat (Δ=${opsDelta})`);
+    else fail(`gc() must not move exec_fileOpCount, but it moved by +${opsDelta}`);
+    if (simDelta > 0) ok(`ADR-0023: device flash time (exec_simNs) climbs during gc() (Δ=${(simDelta / 1e6).toFixed(2)}ms)`);
+    else fail(`exec_simNs did not climb during gc() (Δ=${simDelta})`);
+  }
+
+  // ---- 11. journal ring is BOUNDED worker-side (ADR-0024 §7 tape-leak guard,
+  //          the worker-path half of retired tape-leak-test.mjs; the ring's
+  //          own bounded/monotonic-id behavior is unit-tested directly in
+  //          scripts/worker-rings-test.mjs). Push far more gc entries than
+  //          the worker's JOURNAL_MAX (2000) and confirm the PULLed journal
+  //          window never exceeds it even though journalHead (the monotonic
+  //          issue counter) climbs well past it, i.e. old lines are actually
+  //          evicted, not retained forever. ----
+  {
+    const t5 = createTransport();
+    installWorkerHost(t5.workerPort, { createRunner: createStubRunner });
+    const w5 = { frame: [] };
+    t5.mainPort.onmessage = (e) => { const m = e.data; if (m.type === W2C.FRAME) w5.frame.push(m); };
+    t5.mainPort.postMessage(msg(C2W.INIT, { epoch: 40, fsId: 'stub', geometry: GEOMETRY, name: 'stub' }));
+    await flushTurns(6);
+
+    const JOURNAL_MAX = 2000;
+    const N = JOURNAL_MAX + 500;
+    const bigEntries = [];
+    for (let i = 0; i < N; i++) bigEntries.push({ index: i, kind: 'gc', payload: null, seed: 0 });
+    t5.mainPort.postMessage(msg(C2W.ENTRIES, { epoch: 40, entries: bigEntries }));
+    t5.mainPort.postMessage(msg(C2W.GRANT, { epoch: 40, round: 1, entryLimit: N, playLimitNs: 1e12, scale: Infinity }));
+    await flushTurns(20);
+
+    t5.mainPort.postMessage(msg(C2W.PULL, { epoch: 40, journal: { newest: true, limit: N } }));
+    await flushTurns(2);
+    const jf5 = w5.frame[w5.frame.length - 1];
+    if (jf5.journalHead >= N) ok(`journalHead is a monotonic issue counter that outran the ring cap (${jf5.journalHead} >= ${N} gc entries pushed)`);
+    else fail(`journalHead did not track all pushes (${jf5.journalHead} < ${N})`);
+    if (jf5.journal.length <= JOURNAL_MAX) ok(`worker journal ring stays bounded at ${jf5.journal.length} (<= ${JOURNAL_MAX}) after ${N} pushes (tape-leak guard, worker path)`);
+    else fail(`worker journal ring grew unbounded: ${jf5.journal.length} > ${JOURNAL_MAX} after ${N} pushes`);
+    const newestLine = jf5.journal[jf5.journal.length - 1];
+    if (newestLine && newestLine.entryIndex === N - 1) ok('worker journal ring keeps the newest line (ring, not FIFO-of-oldest)');
+    else fail(`worker journal ring did not keep the newest line (got entryIndex ${newestLine && newestLine.entryIndex})`);
+  }
+
   console.log('');
   if (failures) { console.error(`FAIL - ${failures} assertion(s) failed`); process.exit(1); }
-  console.log('PASS - real-execution path: §2 gate, raw-source sandbox command (I1), FRAME typedefs (heat/shown/liveMap/erase events), write-amp telemetry, I5 discard, RESET, B2 reset-races-init, B18 slow-mo erase visibility.');
+  console.log('PASS - real-execution path: §2 gate, raw-source sandbox command (I1), FRAME typedefs (heat/shown/liveMap/erase events), write-amp telemetry, I5 discard, RESET, B2 reset-races-init, B18 slow-mo erase visibility, ADR-0023 gc-excluded flat opcount, ADR-0024 §7 bounded worker journal ring.');
   process.exit(0);
 }
 
