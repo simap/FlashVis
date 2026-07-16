@@ -30,9 +30,11 @@ slack headroom, applying each event to the FS then the model so both stay in loc
 resets on every format/granule change (restart from seed against an empty chip).
 
 **The executor is open-loop.** It issues exactly the events the model emits: no FS-state-dependent
-branch (e.g. an `exists()` guard), no added op, no reordering. The model is the sole source of the
-sequence, and no filesystem's state ever feeds back into what is issued. Anything else diverges one
-filesystem's issued stream from another's, which forfeits (c) above.
+branch (e.g. an `exists()` guard), no added op, no reordering. Conditional reads are barred on both
+counts at once: the probe is an op the model never emitted, and its answer is filesystem state
+steering the stream. The model is the sole source of the sequence, and no filesystem's state ever
+feeds back into what is issued. Anything else diverges one filesystem's issued stream from another's,
+which forfeits (c) above.
 
 ## Consequences
 
