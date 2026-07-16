@@ -292,19 +292,19 @@ export function installWorkerHost(port, opts = {}) {
   function execRealEntry(index, entry) {
     const ev = entry.payload;
     captureBatch = []; entryFileOps = 0;
-    let label = null, err = null;
-    // B1: a churn op that throws (over-capacity write, ENOSPC, a remove of a
-    // missing file) must NOT crash the worker: the retired in-process path
-    // swallowed it. Journal the error, keep the session alive, advance past it.
-    try {
-      if (entry.kind === 'gc') { runner.gcStep(); label = 'gc()'; }
-      else if (ev && ev.type === CHURN_EVENT.WRITE) { bumpFileOp(); runner.write(ev.name, deterministicBytes(ev.writeSeed, ev.size)); label = `write(${ev.name}, ${ev.size} B)`; }
-      else if (ev && ev.type === CHURN_EVENT.DELETE) { bumpFileOp(); runner.remove(ev.name); label = `delete(${ev.name})`; }
-      // DONE / NO_SLOT: nothing issued, empty batch, no tape line.
-    } catch (e) { err = e; }
+    let label = null;
+    // The executor is OPEN LOOP (ADR-0010): it issues exactly the oracle's events,
+    // with no FS-state-dependent branch and no error suppression. A churn op that
+    // throws (over-capacity write, ENOSPC, a remove of a missing file) propagates.
+    // An FS that cannot survive the canonical workload must fail loudly: that IS
+    // the comparison. Do not catch here. If the shipped workload errors, tune the
+    // churn parameters until it does not; never quiet the FS's answer.
+    if (entry.kind === 'gc') { runner.gcStep(); label = 'gc()'; }
+    else if (ev && ev.type === CHURN_EVENT.WRITE) { bumpFileOp(); runner.write(ev.name, deterministicBytes(ev.writeSeed, ev.size)); label = `write(${ev.name}, ${ev.size} B)`; }
+    else if (ev && ev.type === CHURN_EVENT.DELETE) { bumpFileOp(); runner.remove(ev.name); label = `delete(${ev.name})`; }
+    // DONE / NO_SLOT: nothing issued, empty batch, no tape line.
     const batch = captureBatch; captureBatch = null;
-    if (err) journal.push({ entryIndex: index, kind: 'op', text: `${label || 'op'} → ${err.message || err}` });
-    else if (label && batch.length) journal.push(opLogFields(index, label, batch));
+    if (label && batch.length) journal.push(opLogFields(index, label, batch));
     enqueueBatch(index, batch, true, entryFileOps);
     cursor = index + 1;
   }
