@@ -66,6 +66,30 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       gives every participating session its own cursor into it — Race gates each session on its
       own player draining, Pace barrier-syncs every session per step. See
       [ADR-0016](adr/0016-lockstep-coordinator.md).
+- [ ] **Micro-bench UI support.** Today a micro-bench is a console one-liner pasted by hand (see
+      `oneliner_workload.js`: write a big file, then loop small write/read/delete churn against it).
+      Give that a first-class surface: a drop-down of canned workloads (or a modal to pick/edit
+      one) that runs against the selected FS, so a specific access pattern can be exercised and
+      compared without retyping it. Open questions: does a bench run through the same lockstep
+      coordinator (comparable across FS, the interesting case) or standalone against one session;
+      and how its result is reported (the scoreboard/compare strip, or its own summary). Overlaps
+      the churn tuning knobs below, since a canned-workload picker and a parameter panel may be
+      one feature.
+- [ ] **Worker crash detect (ADR-0024 §8).** Punted during the 0024 lanes and never recorded, so it
+      quietly stayed unbuilt. §8 specifies it ("telemetry silent k·250ms ∨ onerror → console tape
+      line; wedges; reload; no recovery") and `protocol.js:194` restates it. That `∨` is **two
+      independent systems**, and neither exists:
+  - **Throw detect.** No `worker.onerror` / `'error'` listener anywhere in `web/src/`. A worker
+    that throws (module load, or the known over-chip churn write) reports nothing at all. Hook it
+    at the `connectWorker` seam, `playground.js:91`.
+  - **Heartbeat, for responsiveness.** The mechanism is already half-built: `TELEMETRY` is the
+    unconditional ~250ms beat and `session-proxy.js` timestamps every message into `lastHeardAt`.
+    Only the consumer is missing: compare `nowMs() - proxy.lastHeardAt` against `k · 250` beside
+    the existing HUD cadence. This is the half that catches a *wedge*, which throws nothing.
+
+      Why it matters: the §2 barrier releases round+1 only when every session acks, so a single
+      dead worker stops every *other* session's clock too. Today that surfaces as the whole
+      playground freezing, with no tape line and no dead marker on the fs card.
 - [ ] **Churn workload tuning knobs.** Expose the churn model's parameters in the UI — target
       live size, file-size distribution, create/replace/delete mix, seed — so the workload can be
       shaped (and reproduced) instead of hardcoded. (Later — the hardcoded model is fine for
@@ -78,6 +102,26 @@ Rough order, not a contract. See `adr/` for the decisions behind these.
       lives here — it's GC-ratio-dependent, FASTFFS's background GC keeps it low (so the 50% default
       undersells it), and the residual is compaction-only, run under allocation pressure. (Being
       extended to cover the three drivers below.)
+
+## Unlanded lane work to review
+Three branches carry work that never landed on `main` and is not patch-equivalent to anything on
+it. Every other lane/fix branch has been merged and its worktree removed; these three keep theirs.
+Each needs a land-or-drop decision:
+
+- [ ] **`lane/opcount-fresh`** @ `341daab`: "Implement ADR-0023: file-granular fileOpCount,
+      decoupled from the lockstep cursor". The one substantial feature branch outstanding.
+      [ADR-0023](adr/0023-file-op-count-vs-cursor.md) is the written decision, and the worker path
+      already ships a `fileOpCount` in `drainedCounters`, so the first question is whether this
+      branch is superseded by what landed with ADR-0024 or still adds the file-granular part.
+      Worktree: `/Users/benh/git/flashvis-opcount`.
+- [ ] **`lane/signal-fix`** @ `4452fb4`: "Reconcile churn auto-workload deletes to the real FS (no
+      delete-of-absent)". A correctness fix to the churn model's delete path; worth confirming
+      whether the bug it fixes still reproduces on `main`.
+      Worktree: `/Users/benh/git/flashvis-signalfix`.
+- [ ] **`lane/coord`** @ `1142055`: two `docs(diag)` commits arguing that the Race execution-simNs
+      residual is the one-command atomic floor (leapfrog, bounded), not a freeze bug. Diagnostic
+      write-ups, no code. Land as an ADR note or drop.
+      Worktree: `/Users/benh/git/flashvis-coord`.
 
 ## Borrow from FASTFFS later
 The FASTFFS repo has more reusable workload and fault machinery worth pulling rather than
