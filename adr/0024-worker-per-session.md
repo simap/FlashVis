@@ -5,7 +5,7 @@ symbol. Symbols survive only where the §2 algebra needs them: `Δ` (chunk), `re
 subscript, and the math quantifiers. Assumes the reader knows the system (ADRs 0005–0023); bound
 concepts are cited, not redefined.
 
-- **Status:** Proposed · **Date:** 2026-07-12 · Amends ADR-0019 (mechanism only)
+- **Status:** Accepted · **Date:** 2026-07-16 · Amends ADR-0019 (mechanism only)
 
 ---
 
