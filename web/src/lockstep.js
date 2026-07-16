@@ -90,21 +90,13 @@ const holdDebounceMs = () => (typeof globalThis !== 'undefined' && globalThis.__
 // no sim-seconds, so the bar holds its last reading instead of fading on wall time.
 const OPS_EMA_TAU_SIM_NS = 2e9;   // 2 simulated seconds
 
-// Race entry window (per session). entryLimit must sit a few frames ahead of each
-// session's OWN cursor: big enough that the §2 playLimitNs gate (not the window) is the
-// throttle so scale drives the rate (symptom 2), yet small enough that the post-Stop
-// backlog is only a few frames of THIS session's drain (a bounded tail, B16). A single
-// shared frontier sized by the LEADER cannot do both: it leaves the laggard a tail of
-// (leader-lead + window), and in a diverging Race the leader lead grows without bound,
-// so the laggard drains for hundreds of frames after Stop. Hence the window is sized
-// PER SESSION from that session's observed Δcursor/frame (raceWindow, below): each FS is
-// authorized RACE_LOOKAHEAD_FRAMES frames of its own drain, so the gate stays the
-// throttle for every FS and each FS's tail is ~RACE_LOOKAHEAD_FRAMES frames whatever its
-// per-op cost. Under-provisioning only ever costs a round-trip of idle, never
-// correctness (§4 "window size is a deferred tuning knob").
-const RACE_LOOKAHEAD_MAX = 4096;    // per-session ceiling (memory guard, not a throttle)
-const RACE_LOOKAHEAD_MIN = 4;       // floor: enough to never starve the next entry (bootstrap ramps up from here)
-const RACE_LOOKAHEAD_FRAMES = 8;    // authorize this many frames of a session's own drain ahead of its cursor
+// Race prefetch is the STRICT ADR-0024 minimal: entries are prefetch only (they
+// authorize nothing; §4), entryLimit = the shipped frontier (§0/§3), and the frontier is
+// held exactly one entry ahead of the furthest session's cursor (RACE_LOOKAHEAD, below).
+// A starved worker acks at once on window exhaustion and the coordinator ships the next
+// fresh entry: at most one round-trip of idle, never a bug (§4 "window size is a deferred
+// tuning knob"). No sized or drain-rate window: prefetch none beyond the current item.
+const RACE_LOOKAHEAD = 1;           // smallest lookahead that does not deadlock (frontier > cursor so the worker may proceed)
 
 // Bounded MAX for the §2 RACE watermark (symptom-1 fix). A too-slow FS is genuinely
 // EXECUTION-bound: the coordinator grants it the headroom to catch up, but the worker
@@ -150,37 +142,6 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   let lastComputedRound = -1;       // highest round we have derived a grant for
   let sharedIndex = 0;              // Pace: the one entry currently authorized (entryLimit = +1)
   let frontier = 0;                 // Race: shipped/authorized entry count
-
-  // ---- observed PER-SESSION drain rate (entries drained per frame): sizes each
-  // session's OWN entryLimit window. entryLimit must be a few frames ahead of THIS
-  // session's cursor: big enough that the §2 gate (not the window) throttles it, small
-  // enough that the post-Stop tail is a few frames of ITS OWN drain (B16). A single
-  // shared frontier sized by the LEADER cannot do both: it leaves the laggard a tail
-  // of (leader-lead + window), so the window is per session, keyed on each session's
-  // observed Δcursor/frame. It self-corrects up (never collapses): a window sized below
-  // demand throttles the session, which observes a smaller drain, but the target is
-  // RACE_LOOKAHEAD_FRAMES × drain, always a multiple of it, so it climbs back to the
-  // gate rate within a few frames. Bootstrap ramps from RACE_LOOKAHEAD_MIN. ----
-  const drainEma = new Map();       // proxy -> EMA of entries drained per frame (Δcursor)
-  const lastCur = new Map();        // proxy -> acked.cursor at the previous frame
-  function trackDrainRates() {
-    for (const p of proxies) {
-      const cur = p.acked.cursor;
-      const d = cur - (lastCur.get(p) ?? cur);
-      lastCur.set(p, cur);
-      if (d >= 0) {
-        const prev = drainEma.get(p);
-        drainEma.set(p, prev == null ? d : prev + 0.3 * (d - prev));
-      }
-    }
-  }
-  // Entries THIS session may run ahead of its cursor: RACE_LOOKAHEAD_FRAMES frames of
-  // its own drain, clamped. So the gate stays the throttle AND the post-Stop tail is
-  // ~RACE_LOOKAHEAD_FRAMES frames of this session's drain, whatever its per-op cost.
-  function raceWindow(p) {
-    const r = drainEma.get(p) ?? 0;
-    return Math.max(RACE_LOOKAHEAD_MIN, Math.min(RACE_LOOKAHEAD_MAX, Math.ceil(RACE_LOOKAHEAD_FRAMES * r)));
-  }
 
   // one-shot step nudges (paused single-step; see step())
   let forceProduce = false;         // Pace: allow one shared-index advance while paused
@@ -276,10 +237,10 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
     if (mode === 'pace') {
       paceAdvance();
     } else {
-      // Generate enough to cover the furthest-reaching session's OWN window (each
-      // session's entryLimit = its cursor + its per-session window, below), so entries
-      // exist for whoever authorizes highest, and no further (bounds what is shipped).
-      if (running) ensure(Math.max(...proxies.map((p) => p.acked.cursor + raceWindow(p)), 0));
+      // Hold the frontier exactly RACE_LOOKAHEAD (one entry) ahead of the furthest
+      // session's cursor: refill on demand as sessions drain, nothing beyond the current
+      // work item (ADR-0024 §4). Run/pause gates only this GENERATOR, never execution.
+      if (running) ensure(Math.max(...proxies.map((p) => p.acked.cursor), 0) + RACE_LOOKAHEAD);
       frontier = sequence.length;
     }
     // rel = MAX over sessions of (acked_s − baseline_s), plus one chunk. DERIVED from
@@ -309,19 +270,7 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       if (playLimitNs < p.acked.playbackNs) playLimitNs = p.acked.playbackNs;   // clamp ≥ acked_s
       let entryLimit;
       if (mode === 'pace') entryLimit = Math.max(sharedIndex + 1, p.acked.cursor);
-      else {
-        // Race: PER-SESSION window (bounds the post-Stop tail to a few frames of THIS
-        // session's drain (B16) while staying above the §2 gate demand so the gate,
-        // not the window, is the throttle). While running it slides one window ahead of
-        // the cursor; once STOPPED it FREEZES at its last running value so each session
-        // drains only its already-authorized backlog (~one window) and halts, instead of
-        // a treadmill that lets the laggard chase the leader's frontier (at no-delay the
-        // worker bypasses the playback gate, so entryLimit is the only tail bound).
-        const prev = cached.get(p);
-        entryLimit = running
-          ? Math.min(frontier, p.acked.cursor + raceWindow(p))
-          : Math.min(frontier, prev ? prev.entryLimit : p.acked.cursor + raceWindow(p));
-      }
+      else entryLimit = frontier;   // Race: authorization = the shipped frontier (ADR-0024 §0/§3)
       if (raceStepLimit >= 0) { entryLimit = raceStepLimit; playLimitNs = Infinity; }   // one-shot Race step: ungated
       cached.set(p, { round: r, entryLimit, playLimitNs, scale: wireScale() });
     }
@@ -332,7 +281,6 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
   function frame() {
     sampleRates();
     if (!proxies.length) return;
-    trackDrainRates();                                        // update per-session drain rate (sizes each race window)
     shipEntries();
     if (lastComputedRound < round) { computeGrants(round); lastComputedRound = round; }
     else if (proxies.every((p) => p.acked.round >= round)) {   // §2 barrier: all acked ⇒ release round+1
@@ -431,7 +379,6 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       for (const p of [...baseline.keys()]) if (!next.has(p)) {
         baseline.delete(p); cached.delete(p); shipped.delete(p); opsEma.delete(p); lastOps.delete(p); lastPb.delete(p);
         prevPlayback.delete(p); csActive.delete(p); holdRawSince.delete(p); holdingShown.delete(p);
-        drainEma.delete(p); lastCur.delete(p);
       }
       proxies = list.slice();
       for (const p of proxies) if (!baseline.has(p)) {
@@ -499,7 +446,6 @@ export function createLockstep({ churn, gcRatio = 0.5, autoTick = true }) {
       for (const p of proxies) { baseline.set(p, 0); shipped.set(p, 0); cached.delete(p); p.reset(epoch); }
       opsEma.clear(); lastOps.clear(); lastPb.clear();
       prevPlayback.clear(); csActive.clear(); holdRawSince.clear(); holdingShown.clear();
-      drainEma.clear(); lastCur.clear();
     },
     get epoch() { return epoch; },
     /** Append one ATOMIC COMMAND at the frontier ("present"). `payload` is the wire
